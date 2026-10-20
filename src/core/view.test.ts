@@ -189,7 +189,7 @@ describe('수 표기', () => {
     expect(moveLabel(find(s, '10-6'))).toBe('王 b1→a2');
     expect(moveLabel(find(s, '7-4'), s.board)).toBe('子 b2×b3');
     expect(moveLabel({ from: 3, to: 0, piece: JA, promote: true })).toBe('子 a3→a4 侯 승격');
-    expect(moveLabel({ from: DROP, to: 6, piece: 2, promote: false })).toBe('將 a2 투입');
+    expect(moveLabel({ from: DROP, to: 6, piece: 2, promote: false })).toBe('將 a2에 놓기');
   });
 });
 

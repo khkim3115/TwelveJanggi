@@ -1,0 +1,1304 @@
+/* 십이장기 — 전역 스타일.
+   화면 틀(헤더·버튼·모달·패치노트·피드백)은 나인 멘스 모리스와 같은 토큰을 쓰고,
+   게임만의 얼굴은 보드와 말 한 곳에 둔다: 나무 판 위의 팔각 패, 녹·적 먹으로 새긴 한자. */
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface-2: #1c2430;
+  --line: #2b3542;
+  --text: #e6edf3;
+  --muted: #8b98a9;
+  --accent: #6ea8fe;
+  --accent-soft: rgba(110, 168, 254, 0.16);
+  --hint: #f0b429;
+  --danger: #f2555a;
+  --ok: #3fb950;
+
+  /* 진영 색 — 장기의 초(녹)·한(적)처럼 먹 색으로 쓴다. */
+  --side-1: #2e9d63;
+  --side-2: #d8473b;
+
+  /* 판·말 — 실물 소품이라 테마가 바뀌어도 나무색을 유지하되, 다크에서는 눈부시지 않게 한 톤 낮춘다. */
+  --wood: #b98d55;
+  --wood-edge: #6b4724;
+  --wood-line: #4a3017;
+  --camp-1: rgba(32, 120, 72, 0.3);
+  --camp-2: rgba(178, 44, 32, 0.28);
+  --tile: #ecd7ad;
+  --tile-edge: #7d5a2e;
+  --tile-shadow: rgba(0, 0, 0, 0.42);
+  --ink-1: #14603b;
+  --ink-2: #ab2a1f;
+  /* 侯 테(나무색 패 위 3:1 이상)와 승격 배지(밝은 금색 + 어두운 글자) */
+  --hu-rim: #8f5f0a;
+  --hu-badge: #f2c14e;
+  --mark: rgba(40, 22, 6, 0.8);
+  /* 판 위 초점 테 — 나무색 위에서 잘 보이도록 어둡게 */
+  --focus-on-wood: #10151c;
+  /* 강조색 바탕 위 글자 */
+  --on-accent: #0d1117;
+  --coord: #7a8796;
+  --hanja: 'Noto Serif CJK KR', 'Noto Serif KR', 'Source Han Serif K', 'Nanum Myeongjo', Batang, 'AppleMyungjo',
+    'Songti SC', serif;
+
+  --radius: 14px;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #eef1f5;
+  --line: #dde2e9;
+  --text: #1b2027;
+  --muted: #5d6875;
+  --accent: #2f6fd0;
+  --accent-soft: rgba(47, 111, 208, 0.12);
+  --hint: #b7791f;
+  --danger: #cf3339;
+  --ok: #1f8b3a;
+
+  --side-1: #1d7a4a;
+  --side-2: #c0362b;
+
+  --wood: #d6b27b;
+  --wood-edge: #8a6234;
+  --wood-line: #5c3d1d;
+  --camp-1: rgba(32, 120, 72, 0.22);
+  --camp-2: rgba(178, 44, 32, 0.2);
+  --tile: #f6e8c8;
+  --tile-edge: #8c6638;
+  --tile-shadow: rgba(60, 35, 10, 0.32);
+  --hu-rim: #8a5a00;
+  --mark: rgba(50, 28, 8, 0.8);
+  --on-accent: #ffffff;
+  --coord: #7b6a55;
+
+  --shadow: 0 10px 28px rgba(20, 30, 45, 0.14);
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Malgun Gothic',
+    system-ui, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* ── 레이아웃 ─────────────────────────────────────────────────────────── */
+
+.page {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 12px 14px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.brand h1 {
+  font-size: 1.15rem;
+  margin: 0;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+
+.brand .sub {
+  color: var(--muted);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.theme-btn,
+.help-btn,
+.gear {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px 9px;
+  line-height: 1;
+  font-size: 0.95rem;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.theme-btn:hover,
+.help-btn:hover,
+.gear:hover {
+  background: var(--surface-2);
+  border-color: var(--accent);
+}
+
+.pn-btn {
+  position: relative;
+}
+
+.pn-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+
+/* ── 버튼 ─────────────────────────────────────────────────────────────── */
+
+.btn-primary,
+.mp-primary {
+  background: var(--accent);
+  color: var(--on-accent);
+  border: none;
+  border-radius: 11px;
+  padding: 10px 16px;
+  font-weight: 600;
+  transition: filter 0.15s;
+}
+
+.btn-primary:hover:not(:disabled),
+.mp-primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.btn-big {
+  width: 100%;
+  padding: 13px 16px;
+  font-size: 1rem;
+}
+
+.btn-ghost,
+.ghost-btn,
+.settings-close,
+.pn-close {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 9px 14px;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.btn-ghost:hover:not(:disabled),
+.ghost-btn:hover:not(:disabled),
+.settings-close:hover,
+.pn-close:hover {
+  background: var(--surface-2);
+  border-color: var(--accent);
+}
+
+.btn-danger {
+  color: var(--danger);
+}
+
+.btn-danger:hover:not(:disabled) {
+  border-color: var(--danger);
+}
+
+/* ── 차례 배너 ────────────────────────────────────────────────────────── */
+
+.turnbar {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.turnbar-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.turnbar-hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+
+
+.chip {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+
+/* ── 조작 버튼 줄 ─────────────────────────────────────────────────────── */
+
+.controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.controls button {
+  flex: 1 1 auto;
+  min-width: 108px;
+}
+
+/* ── 홈 ───────────────────────────────────────────────────────────────── */
+
+.home-lead {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.home-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.home-card h2 {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+.home-card-sub,
+.home-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.83rem;
+  line-height: 1.55;
+}
+
+/* ── 난이도 선택 ──────────────────────────────────────────────────────── */
+
+.diff-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.diff-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 9px 12px;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.diff-row:hover {
+  border-color: var(--accent);
+}
+
+.diff-row.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.diff-name {
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.diff-desc {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.seg {
+  display: flex;
+  gap: 6px;
+}
+
+.seg button,
+.seg-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 0.85rem;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.seg button.on,
+.seg-btn.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* 선후공은 버튼이 3개라 좁은 화면에서 빠듯하다 — 여백을 줄이고, 넘치면 넘치는 대신 줄바꿈. */
+.seg-seat {
+  flex-wrap: wrap;
+}
+
+.seg-seat .seg-btn {
+  min-width: 0;
+  padding: 8px 6px;
+  font-size: 0.8rem;
+}
+
+
+/* ── 모달 공통 ────────────────────────────────────────────────────────── */
+
+.help,
+.settings,
+.patchnotes,
+.over {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 50;
+  backdrop-filter: blur(2px);
+}
+
+.help-card,
+.settings-card,
+.patchnotes-card,
+.over-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  width: min(520px, 100%);
+  max-height: 86vh;
+  overflow: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.help-top,
+.settings-top,
+.pn-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.help-top h3,
+.settings-top h3,
+.pn-top h3,
+.settings-card h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.pn-x,
+.pn-back {
+  background: transparent;
+  border: none;
+  font-size: 1.05rem;
+  padding: 4px 6px;
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.pn-x:hover,
+.pn-back:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* ── 도움말 ───────────────────────────────────────────────────────────── */
+
+.help-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 0.87rem;
+  line-height: 1.65;
+}
+
+.help-body h4 {
+  margin: 8px 0 0;
+  font-size: 0.92rem;
+  color: var(--accent);
+}
+
+.help-lead {
+  margin: 0;
+  color: var(--muted);
+}
+
+
+.help-foot,
+.settings-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.set-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.set-section h4 {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.set-note {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/* ── 결과 ─────────────────────────────────────────────────────────────── */
+
+.over-card {
+  width: min(360px, 100%);
+  align-items: center;
+  text-align: center;
+}
+
+.over-title {
+  font-size: 1.7rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.over-win {
+  color: var(--ok);
+}
+
+.over-lose {
+  color: var(--danger);
+}
+
+.over-draw {
+  color: var(--muted);
+}
+
+.over-detail {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.over-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.over-actions,
+.go-actions {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  justify-content: center;
+}
+
+.over-actions button {
+  flex: 1;
+}
+
+/* ── 패치노트 ─────────────────────────────────────────────────────────── */
+
+.pn-top-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pn-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pn-row {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.pn-row:hover {
+  border-color: var(--accent);
+}
+
+.pn-row-head,
+.pn-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.pn-ver {
+  font-weight: 700;
+}
+
+.pn-new {
+  background: var(--danger);
+  color: #fff;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.pn-date {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.pn-row-title,
+.pn-detail-title {
+  font-size: 0.88rem;
+}
+
+.pn-chips {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.pn-chip {
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.7rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.pn-chip-feature {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.pn-chip-improvement {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.pn-chip-fix {
+  color: var(--hint);
+  border-color: var(--hint);
+}
+
+.pn-detail,
+.pn-group {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.pn-items {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
+.pn-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pn-cur {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+/* ── 피드백 ───────────────────────────────────────────────────────────── */
+
+.fb-card {
+  width: min(460px, 100%);
+}
+
+.fb-intro,
+.fb-note,
+
+.fb-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.fb-label {
+  font-size: 0.84rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  position: relative;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.field input,
+.field textarea,
+.fb-textarea {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 9px 11px;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.88rem;
+  resize: vertical;
+}
+
+.field input:focus,
+.field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.fb-count {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  font-size: 0.7rem;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+/* 허니팟 — 사람 눈·스크린리더 모두에서 감춘다. */
+.fb-hp {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.fb-done {
+  margin: 0;
+  color: var(--ok);
+  font-size: 0.92rem;
+}
+
+.fb-community {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fb-community-link,
+.fb-gh {
+  font-size: 0.8rem;
+  text-decoration: none;
+}
+
+.fb-gh-sub {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.mp-error {
+  background: rgba(242, 85, 90, 0.12);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  border-radius: 10px;
+  padding: 8px 11px;
+  font-size: 0.82rem;
+}
+
+
+/* ── 진영 표시 ────────────────────────────────────────────────────────── */
+
+.side-dot {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: none;
+  border: 2px solid var(--tile);
+}
+
+.side-1 {
+  background: var(--side-1);
+}
+
+.side-2 {
+  background: var(--side-2);
+}
+
+/* 랜덤 — 반반 원. 같은 토큰을 쓰므로 테마가 바뀌어도 따라온다(이모지는 폰트마다 깨진다). */
+.side-random {
+  background: linear-gradient(90deg, var(--side-1) 0 50%, var(--side-2) 50% 100%);
+}
+
+.turnbar-alert {
+  border-color: var(--hint);
+}
+
+.chip-alert {
+  color: #1b2027;
+  background: var(--hint);
+  border-color: var(--hint);
+  font-weight: 700;
+}
+
+.brand-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.6em;
+  height: 1.6em;
+  margin-right: 0.35em;
+  vertical-align: -0.28em;
+  font-family: var(--hanja);
+  font-weight: 800;
+  font-size: 0.95em;
+  color: var(--ink-1);
+  background: var(--tile);
+  border: 2px solid var(--tile-edge);
+  clip-path: polygon(30% 0, 70% 0, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0 70%, 0 30%);
+}
+
+/* ── 판 ───────────────────────────────────────────────────────────────── */
+
+.table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.board-wrap {
+  display: flex;
+  justify-content: center;
+}
+
+.board {
+  width: 100%;
+  max-width: 380px;
+  height: auto;
+  display: block;
+  user-select: none;
+  touch-action: manipulation;
+}
+
+.board-frame {
+  fill: var(--wood);
+  stroke: var(--wood-edge);
+  stroke-width: 3;
+}
+
+.board-camp.camp-1 {
+  fill: var(--camp-1);
+}
+
+.board-camp.camp-2 {
+  fill: var(--camp-2);
+}
+
+.board-grid rect,
+.board-grid line {
+  fill: none;
+  stroke: var(--wood-line);
+  stroke-width: 2;
+}
+
+.board-coords text {
+  fill: var(--coord);
+  font-size: 15px;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.cell-hit {
+  fill: transparent;
+  outline: none;
+}
+
+.cell-clickable .cell-hit {
+  cursor: pointer;
+}
+
+.cell-hit:focus-visible {
+  stroke: var(--focus-on-wood);
+  stroke-width: 5;
+}
+
+.cell-hit[aria-disabled='true'] {
+  cursor: default;
+}
+
+/* ── 말 ───────────────────────────────────────────────────────────────── */
+
+.piece-shadow {
+  fill: var(--tile-shadow);
+}
+
+.piece-face {
+  fill: var(--tile);
+  stroke: var(--tile-edge);
+  stroke-width: 2.5;
+}
+
+.piece-inlay {
+  fill: none;
+  stroke-width: 1.4;
+  opacity: 0.45;
+}
+
+.piece-1 .piece-inlay,
+.piece-1 .piece-pip {
+  stroke: var(--ink-1);
+}
+
+.piece-2 .piece-inlay,
+.piece-2 .piece-pip {
+  stroke: var(--ink-2);
+}
+
+.piece-pip {
+  stroke-width: 0;
+}
+
+.piece-1 .piece-pip {
+  fill: var(--ink-1);
+}
+
+.piece-2 .piece-pip {
+  fill: var(--ink-2);
+}
+
+.piece-char {
+  font-family: var(--hanja);
+  font-weight: 800;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.piece-1 .piece-char {
+  fill: var(--ink-1);
+}
+
+.piece-2 .piece-char {
+  fill: var(--ink-2);
+}
+
+/* 侯 — 승격한 子. 금빛 테로 한눈에 구분한다. */
+.piece-hu .piece-inlay {
+  stroke: var(--hu-rim);
+  stroke-width: 3.2;
+  opacity: 1;
+}
+
+.cell-movable.cell-clickable:hover .piece-face {
+  stroke: var(--accent);
+}
+
+/* 승격하는 순간 패를 한 번 뒤집는다 — 이 화면의 유일한 연출. */
+.promoted-now .piece {
+  animation: flip 0.5s ease;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@keyframes flip {
+  0% {
+    transform: scaleX(1);
+  }
+  50% {
+    transform: scaleX(0);
+  }
+  100% {
+    transform: scaleX(1);
+  }
+}
+
+/* ── 표시(선택·목적지·잡기·승격·마지막 수·힌트·입성) ──────────────────── */
+
+/* 선택·잡기 테는 나무색과 밝기 차가 작아 색만으로는 3:1 이 안 된다 — 어두운 밑선(ring-under) 위에 얹는다. */
+.ring-under {
+  fill: none;
+  stroke: rgba(10, 6, 2, 0.75);
+  stroke-width: 9;
+  pointer-events: none;
+}
+
+.ring {
+  fill: none;
+  stroke-width: 5;
+  pointer-events: none;
+}
+
+.sel-ring .ring {
+  stroke: var(--accent);
+}
+
+.target-dot {
+  fill: var(--mark);
+  pointer-events: none;
+}
+
+.capture-ring .ring {
+  stroke: var(--danger);
+}
+
+.promo-badge circle {
+  fill: var(--hu-badge);
+  stroke: var(--tile);
+  stroke-width: 2;
+}
+
+.promo-badge text {
+  fill: #1b2027;
+  font-family: var(--hanja);
+  font-weight: 800;
+  font-size: 14px;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.last-to,
+.last-from {
+  fill: none;
+  stroke: var(--wood-line);
+  stroke-width: 3;
+  opacity: 0.55;
+}
+
+.last-from {
+  stroke-dasharray: 6 6;
+}
+
+/* 금색 표시(힌트·입성)는 나무색 판 위에서 대비가 약하다 — 어두운 밑선(halo-under) 위에 얹는다. */
+.halo-under {
+  fill: none;
+  stroke: rgba(30, 16, 4, 0.55);
+  stroke-width: 9;
+}
+
+.halo {
+  fill: none;
+  stroke: var(--hint);
+  stroke-width: 5;
+}
+
+.hint-ring {
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.hint-from {
+  fill: none;
+  stroke: var(--hint);
+  stroke-width: 3;
+  stroke-dasharray: 7 6;
+}
+
+.board-hint-arrow line {
+  stroke: var(--hint);
+  stroke-width: 7;
+  stroke-linecap: round;
+}
+
+.board-hint-arrow .arrow-under {
+  stroke: rgba(30, 16, 4, 0.5);
+  stroke-width: 11;
+}
+
+.board-hint-arrow {
+  pointer-events: none;
+}
+
+.board-arrow-head {
+  fill: var(--hint);
+}
+
+.try-ring .halo {
+  stroke-dasharray: 10 6;
+}
+
+.try-ring {
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* ── 결과 줄(판 보기) ───────────────────────────────────────────────── */
+
+.over-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.over-bar-title {
+  font-weight: 800;
+}
+
+.over-bar-detail {
+  flex: 1 1 12em;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.turnbar-last {
+  color: var(--muted);
+}
+
+/* ── 손패 ─────────────────────────────────────────────────────────────── */
+
+.tray {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.tray-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: 0.8rem;
+  color: var(--muted);
+  min-width: 6.5em;
+}
+
+.tray-pieces {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.tray-empty {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.tray-tile {
+  display: inline-block;
+  position: relative;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  background: none;
+  border: 2px solid transparent;
+  border-radius: 10px;
+}
+
+.tray-tile[aria-disabled='true'],
+span.tray-tile {
+  cursor: default;
+}
+
+.tray-tile svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.tray-tile-can:hover {
+  border-color: var(--line);
+}
+
+/* 선택(테두리)과 힌트(바깥 그림자)를 다른 속성으로 그려 둘이 겹쳐도 다 보이게 한다. */
+.tray-tile-on,
+.tray-tile-on:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.tray-tile-hint {
+  box-shadow: 0 0 0 3px var(--hint);
+}
+
+.tray-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.tray-count {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+
+/* ── 도움말의 말 그림 ─────────────────────────────────────────────────── */
+
+.help-small {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.help-pieces {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.help-pieces li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.help-diagram {
+  width: 84px;
+  height: 84px;
+  flex: none;
+}
+
+.help-cell {
+  fill: var(--wood);
+  stroke: var(--wood-line);
+  stroke-width: 2;
+}
+
+/* 갈 수 있는 칸 — 나무색에 녹을 살짝 섞는다(반투명으로 칠하면 어두운 배경이 비쳐 무거워진다). */
+.help-cell-on {
+  fill: color-mix(in srgb, var(--wood) 72%, var(--side-1));
+}
+
+.help-dot {
+  fill: var(--ink-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .promoted-now .piece,
+  .hint-ring,
+  .try-ring {
+    animation: none;
+  }
+}
+
+/* ── 반응형 ───────────────────────────────────────────────────────────── */
+
+@media (max-width: 400px) {
+  .brand h1 {
+    font-size: 1rem;
+  }
+  .brand .sub {
+    display: none;
+  }
+  .tray-label {
+    min-width: 0;
+  }
+  .theme-btn,
+  .help-btn,
+  .gear {
+    padding: 5px 7px;
+  }
+}
+
+/* 버튼 4개가 한 줄에 안 들어가는 폭에서는 2×2 로 고정한다(기권만 한 줄을 다 차지하지 않게). */
+@media (max-width: 420px) {
+  .controls {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .controls button {
+    min-width: 0;
+  }
+}
