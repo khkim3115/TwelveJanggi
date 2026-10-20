@@ -149,7 +149,7 @@ export const KIND_NAME: readonly string[] = ['', '왕', '장', '상', '자', '�
 /** 수 한 줄 표기(로그·접근성·힌트 문구). board 를 주면 잡기를 × 로 표시한다. */
 export function moveLabel(m: Move, board?: Int8Array): string {
   const piece = KIND_HANJA[m.piece];
-  if (m.from === DROP) return `${piece} ${CELL_LABEL[m.to]} 투입`;
+  if (m.from === DROP) return `${piece} ${CELL_LABEL[m.to]}에 놓기`;
   const sep = board && board[m.to] !== 0 ? '×' : '→';
   return `${piece} ${CELL_LABEL[m.from]}${sep}${CELL_LABEL[m.to]}${m.promote ? ' 侯 승격' : ''}`;
 }
@@ -212,7 +212,7 @@ export function turnHint(s: GameState, me: Player | null): string {
   const base = (s.turn - 1) * 3;
   const hasHand = s.hand[base] + s.hand[base + 1] + s.hand[base + 2] > 0;
   return hasHand
-    ? '움직일 말이나 손패를 고른 뒤 갈 칸을 누르세요.'
+    ? '움직일 말이나 놓을 손패를 고른 뒤 칸을 누르세요.'
     : '움직일 말을 고른 뒤 갈 칸을 누르세요.';
 }
 

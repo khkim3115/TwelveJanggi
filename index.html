@@ -6,9 +6,19 @@
     <meta name="theme-color" content="#0d1117" />
     <meta
       name="description"
-      content="십이장기 온라인 — 3×4 판 위의 王·將·相·子. 난이도별 AI 솔로 플레이와 방 코드 온라인 대전."
+      content="십이장기 — 3×4 판 위의 王·將·相·子. 난이도별 AI 와 바로 두는 웹 십이장기."
     />
     <title>십이장기</title>
+    <script>
+      // 저장된 테마를 첫 페인트 전에 적용한다 — 번들이 뜰 때까지 다크로 깜빡이지 않게(gameStore.applyTheme 와 같은 키).
+      try {
+        var t = localStorage.getItem('tj_theme');
+        if (t === 'light' || t === 'dark') {
+          document.documentElement.dataset.theme = t;
+          if (t === 'light') document.querySelector('meta[name=theme-color]').setAttribute('content', '#f5f6f8');
+        }
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>
