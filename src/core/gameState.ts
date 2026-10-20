@@ -37,8 +37,8 @@ export interface Move {
   /** 출발 칸. 손패 투입이면 DROP(-1). */
   from: number;
   to: number;
-  /** 움직이는(투입이면 놓는) 말의 종류 — 승격 전 기준. */
-  kind: Kind;
+  /** 움직이는(투입이면 놓는) 말의 종류 — 승격 전 기준. (`.kind` 는 결과·클릭의 문자열 태그 이름이라 피한다) */
+  piece: Kind;
   /** 이 수로 子 가 侯 가 되는가. 합법 수 생성이 정하는 강제 플래그다(고르는 값이 아님). */
   promote: boolean;
 }
@@ -141,7 +141,7 @@ export function legalMoves(s: GameState): Move[] {
     for (const to of STEPS[me][kind][from]) {
       const t = s.board[to];
       if (t !== 0 && sideOf(t) === me) continue;
-      out.push({ from, to, kind, promote: isPromotion(me, kind, to) });
+      out.push({ from, to, piece: kind, promote: isPromotion(me, kind, to) });
     }
   }
 
@@ -149,13 +149,17 @@ export function legalMoves(s: GameState): Move[] {
   for (const kind of HAND_KINDS) {
     if (s.hand[handIndex(me, kind)] === 0) continue;
     for (let to = 0; to < CELL_COUNT; to++) {
-      if (s.board[to] === 0 && ROW_OF[to] !== far) out.push({ from: DROP, to, kind, promote: false });
+      if (s.board[to] === 0 && ROW_OF[to] !== far) out.push({ from: DROP, to, piece: kind, promote: false });
     }
   }
   return out;
 }
 
-/** 합법 수가 하나라도 있는지만 확인(legalMoves 전체 생성 없이). blocked 판정에 쓴다. */
+/**
+ * 합법 수가 하나라도 있는지만 확인(legalMoves 전체 생성 없이). blocked 판정에 쓴다.
+ * 참고: 판 위 말이 전부 막히는 배치는 비왕 말 6개를 모두 써야 해서(전수 확인), 실전 국면에서는 손패가 있으면
+ * 판 위 수도 반드시 있다 — 아래 투입 분기는 방어용이다. 서버 tj_has_move 도 같은 구조를 따른다.
+ */
 export function hasLegalMove(s: GameState): boolean {
   if (s.phase === 'over') return false;
   const me = s.turn;
@@ -175,7 +179,7 @@ export function hasLegalMove(s: GameState): boolean {
 }
 
 export function sameMove(a: Move, b: Move): boolean {
-  return a.from === b.from && a.to === b.to && a.kind === b.kind && a.promote === b.promote;
+  return a.from === b.from && a.to === b.to && a.piece === b.piece && a.promote === b.promote;
 }
 
 export function isLegal(s: GameState, m: Move): boolean {
@@ -184,7 +188,7 @@ export function isLegal(s: GameState, m: Move): boolean {
 
 /** 수의 짧은 문자열 키(히스토리 휴리스틱·테스트 비교용). 투입 'P*7', 이동 '7-4', 승격 '3-0+'. */
 export function moveKey(m: Move): string {
-  if (m.from === DROP) return `${KIND_LETTER[m.kind]}*${m.to}`;
+  if (m.from === DROP) return `${KIND_LETTER[m.piece]}*${m.to}`;
   return `${m.from}-${m.to}${m.promote ? '+' : ''}`;
 }
 
@@ -293,7 +297,7 @@ export function applyMoveInPlace(s: GameState, m: Move): Undo {
 
   let h = s.hash;
   if (m.from === DROP) {
-    const kind = m.kind as HandKind;
+    const kind = m.piece as HandKind;
     const hi = handIndex(me, kind);
     h ^= zHand(me, kind, s.hand[hi]);
     s.hand[hi] -= 1;
@@ -353,7 +357,7 @@ export function undoMove(s: GameState, u: Undo): void {
   const m = u.move;
   if (m.from === DROP) {
     s.board[m.to] = 0;
-    s.hand[handIndex(me, m.kind as HandKind)] += 1;
+    s.hand[handIndex(me, m.piece as HandKind)] += 1;
   } else {
     s.board[m.from] = u.moved;
     s.board[m.to] = u.captured;
@@ -377,9 +381,10 @@ export function applyMove(s: GameState, m: Move): GameState {
   return next;
 }
 
-/** 기권 — 규칙 밖의 종료(솔로 포기·멀티 나가기). */
+/** 기권 — 규칙 밖의 종료(솔로 포기·멀티 나가기). 이미 끝난 판은 결과를 바꾸지 않는다. */
 export function applyResign(s: GameState, quitter: Player): GameState {
   const next = cloneState(s);
+  if (s.phase === 'over') return next;
   next.result = { kind: 'win', winner: other(quitter), reason: 'resign' };
   next.phase = 'over';
   return next;
@@ -411,7 +416,7 @@ function detectResult(s: GameState, captured: number): GameResult | null {
 
 export interface Snapshot {
   board: number[];
-  /** [녹 將·相·子, 적 將·相·子] — 서버 tj_rooms.hands 와 같은 순서. */
+  /** [녹 將·相·子, 적 將·相·子] — 서버 tj_rooms.hand 와 같은 이름·순서. */
   hand: number[];
   turn: Player;
 }
@@ -429,8 +434,9 @@ export function stateFromSnapshot(snap: Snapshot, rules: RuleConfig = DEFAULT_RU
 }
 
 /**
- * Worker 로 넘기기 위한 완전 직렬화형. 스냅샷과 달리 반복 이력까지 들고 가서
- * AI 가 "무승부로 몰리는 수"를 알아볼 수 있게 한다.
+ * Worker 로 넘기기 위한 직렬화형. 스냅샷과 달리 반복 이력까지 들고 가서
+ * AI 가 "무승부로 몰리는 수"를 알아볼 수 있게 한다. 진행 중인 국면 전용이다 — 결과(phase·result)와
+ * 룰 설정은 싣지 않는다(AI 는 끝난 판에 불리지 않고, 룰은 v1 고정).
  */
 export interface StateTransfer extends Snapshot {
   history: number[];

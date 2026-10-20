@@ -37,7 +37,7 @@ export interface BoardView {
 function selects(sel: Selection | null, m: Move): boolean {
   if (sel === null) return false;
   if (sel.kind === 'cell') return m.from === sel.cell;
-  return m.from === DROP && m.kind === sel.piece;
+  return m.from === DROP && m.piece === sel.piece;
 }
 
 /**
@@ -67,7 +67,7 @@ export function boardView(s: GameState, me: Player | null, sel: Selection | null
   if (me === null || s.phase === 'over' || s.turn !== me) return view;
 
   for (const m of legalMoves(s)) {
-    if (m.from === DROP) view.droppable.add(m.kind as HandKind);
+    if (m.from === DROP) view.droppable.add(m.piece as HandKind);
     else view.movable.add(m.from);
     if (!selects(sel, m)) continue;
     view.targets.add(m.to);
@@ -98,7 +98,7 @@ export function resolveClick(
   const moves = legalMoves(s);
 
   if (target.kind === 'hand') {
-    if (!moves.some((m) => m.from === DROP && m.kind === target.piece)) return null;
+    if (!moves.some((m) => m.from === DROP && m.piece === target.piece)) return null;
     const same = sel?.kind === 'hand' && sel.piece === target.piece;
     return { kind: 'select', selection: same ? null : target };
   }
@@ -133,6 +133,14 @@ export function displayToIndex(display: number, viewer: Player): number {
   return viewer === 2 ? rotate(display) : display;
 }
 
+/**
+ * 이 말을 화면에서 180° 돌려 그려야 하는가. 보는 사람과 다른 진영의 말만 돈다 —
+ * 그래야 KIND_DIRS(주인 기준, 앞 = 위)로 그린 이동 방향 눈금이 화면 위의 실제 이동과 맞는다.
+ */
+export function isUpsideDown(side: Player, viewer: Player): boolean {
+  return side !== viewer;
+}
+
 /* ── 말 이름 ─────────────────────────────────────────────────────────── */
 
 export const KIND_HANJA: readonly string[] = ['', '王', '將', '相', '子', '侯'];
@@ -140,7 +148,7 @@ export const KIND_NAME: readonly string[] = ['', '왕', '장', '상', '자', '�
 
 /** 수 한 줄 표기(로그·접근성·힌트 문구). board 를 주면 잡기를 × 로 표시한다. */
 export function moveLabel(m: Move, board?: Int8Array): string {
-  const piece = KIND_HANJA[m.kind];
+  const piece = KIND_HANJA[m.piece];
   if (m.from === DROP) return `${piece} ${CELL_LABEL[m.to]} 투입`;
   const sep = board && board[m.to] !== 0 ? '×' : '→';
   return `${piece} ${CELL_LABEL[m.from]}${sep}${CELL_LABEL[m.to]}${m.promote ? ' 侯 승격' : ''}`;

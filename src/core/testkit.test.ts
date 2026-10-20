@@ -21,11 +21,13 @@ describe('makeState', () => {
   it.each([
     ['글자 수가 틀림', { board: 'rkb .p. .P. BK' }],
     ['모르는 글자', { board: 'rkb .p. .X. BKR' }],
-    ['王 이 없음', { board: 'r.b .p. .P. BKR', hand: ['', ''] as [string, string] }],
+    ['적 王 이 없음', { board: 'r.b .p. .P. BKR', hand: ['', ''] as [string, string] }],
+    ['녹 王 이 없음', { board: 'rkb .p. .P. B.R' }],
     ['將 이 3개', { board: 'rkb .p. .P. BKR', hand: ['R', ''] as [string, string] }],
     ['相 이 1개', { board: 'rk. .p. .P. BKR' }],
     ['손패에 王', { board: 'rkb .p. .P. BKR', hand: ['K', ''] as [string, string] }],
-    ['승격 줄의 子', { board: 'Pkb .p. ... BKR', hand: ['', 'R'] as [string, string] }],
+    ['승격 줄의 녹 子', { board: 'Pkb .p. ... BKR', hand: ['', 'R'] as [string, string] }],
+    ['승격 줄의 적 子', { board: 'rkb ... .P. pKR', hand: ['B', ''] as [string, string] }],
     ['차례인 쪽 王 이 이미 입성', { board: 'K.. .k. ... ...', hand: ['RBP', 'RBP'] as [string, string] }],
   ])('%s → 거부', (_, spec) => {
     expect(() => makeState(spec)).toThrow();

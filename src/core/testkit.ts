@@ -6,6 +6,8 @@
 //
 // makeState 는 말 보존을 검증한다. 실제 대국에서 나올 수 없는 국면(같은 말 3개, 승격 줄의 子 등)은
 // 해시 표 범위를 벗어나거나 판정 전제를 깨서 조용히 틀린 결과를 내기 때문이다.
+// 단 "입성 대기 王 이 직전에 어디서 왔는가" 같은 이력 조건은 보지 않는다 — 판정 순서를 고정하는
+// 인위적 국면(실전에선 안 나오는 겹침)을 테스트에서 만들 수 있게 일부러 열어 둔다.
 
 import { CELL_COUNT, HU, JA, JANG, KING, KIND_LETTER, ROW_OF, SANG, farRow, type Kind } from './board';
 import { DEFAULT_RULES, type RuleConfig } from './rules';

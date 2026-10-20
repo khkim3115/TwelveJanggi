@@ -1,6 +1,6 @@
 // 클릭 해석·하이라이트·화면 방향·선후공 선택의 계약. 솔로와 멀티 화면이 같은 함수를 쓰므로 여기서 한 번만 지킨다.
 import { describe, expect, it } from 'vitest';
-import { CELL_COUNT, JA, ROWS, ROW_OF } from './board';
+import { CELL_COUNT, COL_OF, JA, KINDS, KIND_DIRS, ROWS, ROW_OF, STEPS } from './board';
 import { DROP, applyMove, createInitialState, legalMoves, moveKey, type GameState, type Move } from './gameState';
 import { makeState } from './testkit';
 import {
@@ -10,6 +10,7 @@ import {
   boardView,
   displayToIndex,
   indexToDisplay,
+  isUpsideDown,
   moveLabel,
   phaseLabel,
   resolveClick,
@@ -65,7 +66,7 @@ describe('resolveClick — 손패 투입', () => {
     expect(resolveClick(s, 1, null, handP)).toEqual({ kind: 'select', selection: handP });
     expect(resolveClick(s, 1, handP, cell(3))).toEqual({
       kind: 'move',
-      move: { from: DROP, to: 3, kind: JA, promote: false },
+      move: { from: DROP, to: 3, piece: JA, promote: false },
     });
   });
 
@@ -114,7 +115,7 @@ describe('boardView', () => {
 describe('王 입성 표시', () => {
   const entered = applyMove(
     makeState({ board: '... .K. ..k ...', hand: ['RBP', 'RBP'] }),
-    { from: 4, to: 1, kind: 1, promote: false },
+    { from: 4, to: 1, piece: 1, promote: false },
   );
 
   it('들어간 쪽이 입성 대기로 표시된다', () => {
@@ -127,6 +128,23 @@ describe('王 입성 표시', () => {
   it('막아야 하는 쪽과 들어간 쪽에게 다른 문구를 보여 준다', () => {
     expect(turnHint(entered, 2)).toContain('잡지 못하면 집니다');
     expect(turnHint(entered, 1)).toContain('승리');
+  });
+
+  it('끝난 판에는 입성 대기가 없다(王 을 잡으며 들어간 경우 포함)', () => {
+    const done = applyMove(
+      makeState({ board: '.k. .K. ... ...', hand: ['RBP', 'RBP'] }),
+      { from: 4, to: 1, piece: 1, promote: false },
+    );
+    expect(done.result?.reason).toBe('capture');
+    expect(tryPendingSide(done)).toBeNull();
+    expect(boardView(done, 2, null).tryPending).toBeNull();
+  });
+});
+
+describe('차례 문구', () => {
+  it('차례인 쪽에게 손패가 있을 때만 손패를 언급한다', () => {
+    expect(turnHint(makeState({ board: 'r.b .k. .P. BKR', hand: ['P', ''] }), 1)).toContain('손패');
+    expect(turnHint(makeState({ board: 'r.b .k. .P. BKR', turn: 2, hand: ['P', ''] }), 2)).not.toContain('손패');
   });
 });
 
@@ -144,6 +162,25 @@ describe('화면 방향', () => {
     expect(bottomRow(1)).toEqual([ROWS - 1, ROWS - 1, ROWS - 1]); // 녹 진영 = 행 3
     expect(bottomRow(2)).toEqual([0, 0, 0]); // 적 진영 = 행 0
   });
+
+  it('방향 눈금(KIND_DIRS)은 보는 사람과 다른 진영의 말만 뒤집으면 화면 위 실제 이동과 맞는다', () => {
+    const rc = (d: number) => [ROW_OF[d], COL_OF[d]] as const;
+    for (const viewer of [1, 2] as const) {
+      for (const side of [1, 2] as const) {
+        const flip = isUpsideDown(side, viewer) ? -1 : 1;
+        for (const kind of KINDS) {
+          const marks = KIND_DIRS[kind].map(([dr, dc]) => `${dr * flip},${dc * flip}`);
+          for (let from = 0; from < CELL_COUNT; from++) {
+            const [fr, fc] = rc(indexToDisplay(from, viewer));
+            for (const to of STEPS[side][kind][from]) {
+              const [tr, tc] = rc(indexToDisplay(to, viewer));
+              expect(marks).toContain(`${tr - fr},${tc - fc}`);
+            }
+          }
+        }
+      }
+    }
+  });
 });
 
 describe('수 표기', () => {
@@ -151,8 +188,8 @@ describe('수 표기', () => {
     const s = createInitialState();
     expect(moveLabel(find(s, '10-6'))).toBe('王 b1→a2');
     expect(moveLabel(find(s, '7-4'), s.board)).toBe('子 b2×b3');
-    expect(moveLabel({ from: 3, to: 0, kind: JA, promote: true })).toBe('子 a3→a4 侯 승격');
-    expect(moveLabel({ from: DROP, to: 6, kind: 2, promote: false })).toBe('將 a2 투입');
+    expect(moveLabel({ from: 3, to: 0, piece: JA, promote: true })).toBe('子 a3→a4 侯 승격');
+    expect(moveLabel({ from: DROP, to: 6, piece: 2, promote: false })).toBe('將 a2 투입');
   });
 });
 

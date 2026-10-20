@@ -74,7 +74,8 @@ export function farRow(side: Side): number {
 /**
  * 말 주인 기준 방향 [행 변화, 열 변화]. 앞 = 행 −1(녹 시점).
  * 적은 판을 180° 돌린 것이므로 두 성분의 부호를 모두 뒤집어 쓴다.
- * UI 는 이 표로 말 위의 이동 방향 눈금을 그린다(적 말은 말 자체를 180° 돌려 그린다).
+ * UI 는 이 표로 말 위의 이동 방향 눈금을 그리고, 보는 사람과 다른 진영의 말만 180° 돌려 그린다
+ * (화면 방향 규칙은 view.ts 의 indexToDisplay · isUpsideDown).
  */
 export const KIND_DIRS: readonly (readonly (readonly [number, number])[])[] = [
   [],

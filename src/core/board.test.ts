@@ -95,9 +95,10 @@ describe('말 이동 방향', () => {
   it('적은 판을 180° 돌린 방향으로 움직인다', () => {
     expect(STEPS[2][JA][4]).toEqual([7]);
     expect(sorted(STEPS[2][HU][7])).toEqual([4, 6, 8, 9, 10, 11]);
+    // 순서까지 같다 — 지금 방향표는 좌우 대칭이라 집합만 비교하면 열 부호 실수를 못 잡는다.
     for (const kind of KINDS) {
       for (let from = 0; from < CELL_COUNT; from++) {
-        expect(sorted(STEPS[2][kind][rotate(from)])).toEqual(sorted(STEPS[1][kind][from].map(rotate)));
+        expect(STEPS[2][kind][rotate(from)]).toEqual(STEPS[1][kind][from].map(rotate));
       }
     }
   });

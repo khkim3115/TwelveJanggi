@@ -1,6 +1,6 @@
 // 룰 v1 의 규칙 계약. UI·AI·서버가 전부 이 동작을 전제로 만들어진다.
 import { describe, expect, it } from 'vitest';
-import { HU, JA, JANG, KING, SANG } from './board';
+import { HU, JA, JANG, KING, KINDS, SANG } from './board';
 import {
   DROP,
   applyMove,
@@ -126,6 +126,13 @@ describe('잡기와 손패', () => {
     expect(next.phase).toBe('over');
     expect(legalMoves(next)).toEqual([]);
   });
+
+  it('적이 녹 王 을 잡아도 마찬가지다', () => {
+    const s = makeState({ board: '..k .K. ... ...', turn: 2, hand: ['RBP', 'RBP'] });
+    const next = play(s, '2-4');
+    expect(Array.from(next.hand)).toEqual(Array.from(s.hand));
+    expect(next.result).toEqual({ kind: 'win', winner: 2, reason: 'capture' });
+  });
 });
 
 describe('투입', () => {
@@ -134,7 +141,31 @@ describe('투입', () => {
     const s = makeState({ board: 'r.b .k. .P. BKR', hand: ['P', ''] });
     const drops = legalMoves(s).filter((m) => m.from === DROP);
     expect(keys(drops)).toEqual(['P*3', 'P*5', 'P*6', 'P*8']);
-    expect(isLegal(s, { from: DROP, to: 1, kind: JA, promote: false })).toBe(false);
+    expect(isLegal(s, { from: DROP, to: 1, piece: JA, promote: false })).toBe(false);
+  });
+
+  it('將·相 도 상대 진영 행에는 못 놓는다', () => {
+    const s = makeState({ board: 'k.. ... .K. ...', hand: ['RRBBPP', ''] });
+    const drops = legalMoves(s).filter((m) => m.from === DROP);
+    expect(new Set(drops.map((m) => m.piece))).toEqual(new Set([JANG, SANG, JA]));
+    expect(drops.filter((m) => m.to <= 2)).toEqual([]);
+  });
+
+  it('적도 상대 진영(행 3)에는 못 놓는다', () => {
+    const s = makeState({ board: 'rkb .p. .K. B.R', turn: 2, hand: ['', 'P'] });
+    expect(keys(legalMoves(s).filter((m) => m.from === DROP))).toEqual(['P*3', 'P*5', 'P*6', 'P*8']);
+    expect(isLegal(s, { from: DROP, to: 10, piece: JA, promote: false })).toBe(false);
+  });
+
+  it('자기 진영의 빈칸에는 놓을 수 있다', () => {
+    const s = makeState({ board: 'r.b .k. .P. BK.', hand: ['RP', ''] });
+    expect(keys(legalMoves(s).filter((m) => m.from === DROP && m.piece === JA))).toEqual([
+      'P*11',
+      'P*3',
+      'P*5',
+      'P*6',
+      'P*8',
+    ]);
   });
 
   it('같은 종류가 2개여도 칸마다 수는 하나다', () => {
@@ -152,8 +183,8 @@ describe('투입', () => {
 
   it('손패에 없는 종류는 놓을 수 없다', () => {
     const s = makeState({ board: 'r.b .k. ... BKR', hand: ['PP', ''] });
-    expect(isLegal(s, { from: DROP, to: 3, kind: SANG, promote: false })).toBe(false);
-    expect(isLegal(s, { from: DROP, to: 3, kind: KING, promote: false })).toBe(false);
+    expect(isLegal(s, { from: DROP, to: 3, piece: SANG, promote: false })).toBe(false);
+    expect(isLegal(s, { from: DROP, to: 3, piece: KING, promote: false })).toBe(false);
   });
 });
 
@@ -174,6 +205,19 @@ describe('승격', () => {
     expect(next.board[1]).toBe(HU);
     expect(handCount(next, 1, JANG)).toBe(1);
     expect(next.hash).toBe(computeHash(next));
+  });
+
+  it('적 子 는 행 3 에 들어가면 侯 가 된다', () => {
+    const s = makeState({ board: 'rkb K.. ..p BR.', turn: 2, hand: ['P', ''] });
+    expect(legalMoves(s).filter((m) => m.from === 8).map(moveKey)).toEqual(['8-11+']);
+    expect(play(s, '8-11+').board[11]).toBe(-HU);
+  });
+
+  it('이미 侯 인 말은 상대 진영에 들어가도 승격 표시가 없다', () => {
+    const s = makeState({ board: 'k.. .H. ... .K.', hand: ['RRBBP', ''] });
+    const m = mv(s, '4-1');
+    expect(m.promote).toBe(false);
+    expect(play(s, '4-1').board[1]).toBe(HU);
   });
 
   it('투입한 子 는 다음 이동으로 들어갈 때 승격한다', () => {
@@ -219,12 +263,41 @@ describe('승패 판정', () => {
     expect(done.result).toEqual({ kind: 'win', winner: 2, reason: 'blocked' });
   });
 
+  it('잡는 수만 남아도 blocked 가 아니다', () => {
+    const after = play(makeState({ board: 'kR. B.. .P. .K.', hand: ['RBP', ''] }), '7-4');
+    const ms = legalMoves(after);
+    expect(ms).toHaveLength(3);
+    expect(ms.every((m) => m.from !== DROP && after.board[m.to] !== 0)).toBe(true);
+    expect(after.result).toBeNull();
+  });
+
+  // 아래 세 개는 판정 순서(서버 tj__advance 와 공유)를 고정하는 인위적 국면이다. 실전에서는 겹치지 않는다 —
+  // 입성한 王 은 방금 떠난 칸으로 돌아가거나 그 칸에 들어온 말을 잡을 수 있어 막히지 않고,
+  // try·blocked 국면은 처음 나온 순간 끝나 반복 횟수가 쌓이지 않는다. 반복은 이력을 주입해 만든다.
   it('try 와 blocked 가 겹치면 try 가 먼저다', () => {
     // 녹 王 은 이미 적 진영(0)에 있고, 적 王 이 相 을 잡은 뒤 녹은 둘 수가 없다.
     const s = makeState({ board: 'KRB RP. P.k ..B', turn: 2 });
     const done = play(s, '8-11');
     expect(done.result).toEqual({ kind: 'win', winner: 1, reason: 'try' });
     expect(hasLegalMove(stateFromSnapshot(toSnapshot(done)))).toBe(false);
+  });
+
+  it('try 와 반복이 겹치면 try 가 먼저다', () => {
+    const s = makeState({ board: 'K.. .k. ... ...', turn: 2, hand: ['RBP', 'RBP'] });
+    const m = mv(s, 'R*8');
+    const after = applyMove(s, m);
+    expect(after.result?.reason).toBe('try');
+    const seeded = fromTransfer({ ...toTransfer(s), history: [after.key, after.key, s.key] });
+    expect(applyMove(seeded, m).result).toEqual({ kind: 'win', winner: 1, reason: 'try' });
+  });
+
+  it('반복과 blocked 가 겹치면 반복이 먼저다', () => {
+    const s = makeState({ board: 'RB. KRB PPk ...', turn: 2 });
+    const m = mv(s, '8-10');
+    const after = applyMove(s, m);
+    expect(after.result?.reason).toBe('blocked');
+    const seeded = fromTransfer({ ...toTransfer(s), history: [after.key, after.key, s.key] });
+    expect(applyMove(seeded, m).result).toEqual({ kind: 'draw', reason: 'repetition' });
   });
 
   it('같은 국면이 3번 나오면 무승부 — 시작 국면도 1회로 센다', () => {
@@ -244,19 +317,59 @@ describe('승패 판정', () => {
     expect(a.hash).not.toBe(b.hash);
   });
 
+  it('차례만 다른 두 국면은 key·hash 가 다르다', () => {
+    const g = makeState({ board: 'rkb .p. .P. BKR', turn: 1 });
+    const r = makeState({ board: 'rkb .p. .P. BKR', turn: 2 });
+    expect(r.key).not.toBe(g.key);
+    expect(r.hash).not.toBe(g.hash);
+  });
+
+  it('국면 키는 말 배치·손패 배분이 다르면 반드시 다르다(진법 자릿수 계약)', () => {
+    // 자릿수 진법을 줄이면 충돌하는 쌍들 — 칸 값 11가지, 손패 개수 3가지.
+    const a = makeState({ board: 'k.. .hH ... .K.', hand: ['RB', 'RB'] });
+    const b = makeState({ board: 'k.. .ph ... .K.', hand: ['RB', 'RB'] });
+    expect(a.key).not.toBe(b.key);
+    const c = makeState({ board: 'kr. ... .B. RK.', hand: ['B', 'PP'] });
+    const d = makeState({ board: 'kr. ... .B. RK.', hand: ['PP', 'B'] });
+    expect(c.key).not.toBe(d.key);
+  });
+
+  it('zobrist: 말 하나(진영·종류·칸 120가지)의 해시 기여는 0 이 아니고 서로 다르다', () => {
+    const blank = { board: new Int8Array(12), hand: new Int8Array(6), turn: 1 as const };
+    const empty = computeHash(blank);
+    const seen = new Set<number>();
+    for (const side of [1, 2] as const) {
+      for (const kind of KINDS) {
+        for (let c = 0; c < 12; c++) {
+          const board = new Int8Array(12);
+          board[c] = side === 1 ? kind : -kind;
+          const h = computeHash({ ...blank, board }) ^ empty;
+          expect(h).not.toBe(0);
+          seen.add(h);
+        }
+      }
+    }
+    expect(seen.size).toBe(120);
+  });
+
   it('기권하면 상대가 이긴다', () => {
     const s = applyResign(createInitialState(), 1);
     expect(s.result).toEqual({ kind: 'win', winner: 2, reason: 'resign' });
     expect(s.phase).toBe('over');
+  });
+
+  it('이미 끝난 판에서 기권해도 결과는 그대로다', () => {
+    const done = play(makeState({ board: '.k. .K. ... ...', hand: ['RBP', 'RBP'] }), '4-1');
+    expect(applyResign(done, 1).result).toEqual({ kind: 'win', winner: 1, reason: 'capture' });
   });
 });
 
 describe('수 표현', () => {
   it('승격 플래그·종류까지 같아야 같은 수다', () => {
     const s = makeState({ board: '.rb P.. ..k BKR', hand: ['', 'P'] });
-    expect(isLegal(s, { from: 3, to: 0, kind: JA, promote: true })).toBe(true);
-    expect(isLegal(s, { from: 3, to: 0, kind: JA, promote: false })).toBe(false);
-    expect(isLegal(s, { from: 3, to: 0, kind: JANG, promote: true })).toBe(false);
+    expect(isLegal(s, { from: 3, to: 0, piece: JA, promote: true })).toBe(true);
+    expect(isLegal(s, { from: 3, to: 0, piece: JA, promote: false })).toBe(false);
+    expect(isLegal(s, { from: 3, to: 0, piece: JANG, promote: true })).toBe(false);
   });
 });
 
@@ -308,6 +421,14 @@ describe('상태 관리', () => {
     expect(back.hash).toBe(s.hash);
     const t = fromTransfer(toTransfer(s));
     expect(snapshotOf(t)).toEqual(snapshotOf(s));
+  });
+
+  it('전송형 이력의 끝이 현재 국면이 아니면 현재 키를 붙여 보정한다', () => {
+    const start = createInitialState();
+    const s = play(start, '7-4');
+    const t = fromTransfer({ ...toTransfer(s), history: [start.key] });
+    expect(t.history).toEqual([start.key, s.key]);
+    expect(t.reps.get(s.key)).toBe(1);
   });
 });
 
