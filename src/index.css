@@ -1571,6 +1571,77 @@ span.tray-tile {
   opacity: 0.55;
 }
 
+/* ── 앱 설치 · PWA 알림 ───────────────────────────────────────────────── */
+
+.install-btn {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.install-btn:hover {
+  filter: brightness(1.1);
+}
+
+/* 헤더의 아이콘형 설치 버튼(📥) — 다른 아이콘 버튼과 같은 모양에 강조색 테두리만 더한다. */
+.install-icon {
+  border-color: var(--accent);
+}
+
+/* 홈 카드 안에서는 다른 큰 버튼처럼 가득 채운다. */
+.home-card .install-btn {
+  width: 100%;
+  padding: 11px 14px;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.pwa-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: var(--shadow);
+  font-size: 0.83rem;
+  z-index: 60;
+  width: max-content;
+  max-width: calc(100vw - 24px);
+}
+
+.pwa-toast-btn {
+  background: var(--accent);
+  color: var(--on-accent);
+  border: none;
+  border-radius: 9px;
+  padding: 6px 11px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pwa-toast-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  padding: 2px 4px;
+}
+
+/* 알림은 홈에서만 뜬다(PwaStatus). 떠 있는 동안에는 맨 아래 카드가 알림에 가리지 않게 자리를 비워 둔다. */
+.home:has(~ .pwa-toast) {
+  padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+}
+
 /* ── 반응형 ───────────────────────────────────────────────────────────── */
 
 @media (max-width: 400px) {
@@ -1587,6 +1658,15 @@ span.tray-tile {
   .help-btn,
   .gear {
     padding: 5px 7px;
+  }
+}
+
+/* 헤더의 설치 아이콘은 페이지가 최대 폭(560px)일 때만 둔다. 그보다 좁으면 아이콘이 나타나며 헤더가 한 줄 늘 수 있는데,
+   첫 방문엔 설치 제안 이벤트가 판 도중(약 30초 뒤)에 와서 판을 밀어낸다. 좁은 화면은 홈의 '앱으로 받기' 카드가 창구다.
+   (범위 문법이라 화면 배율로 폭이 559.x px 여도 빈틈이 없다 — 이 버튼이 뜨는 크로미움은 모두 지원한다.) */
+@media (width < 560px) {
+  .install-icon {
+    display: none;
   }
 }
 

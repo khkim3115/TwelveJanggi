@@ -11,7 +11,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "bench:seats": "tsx scripts/bench-seats.ts",
-    "e2e:mp": "tsx scripts/mp-e2e.ts"
+    "e2e:mp": "tsx scripts/mp-e2e.ts",
+    "generate-pwa-assets": "pwa-assets-generator"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.118.0",
@@ -23,10 +24,12 @@
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@vite-pwa/assets-generator": "^0.2.6",
     "@vitejs/plugin-react": "^4.3.4",
     "tsx": "^4.23.15",
     "typescript": "~5.7.2",
     "vite": "^6.0.5",
+    "vite-plugin-pwa": "^0.21.2",
     "vitest": "^2.1.8"
   }
 }

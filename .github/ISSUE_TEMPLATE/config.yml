@@ -1,0 +1,7 @@
+# 빈 이슈는 허용한다 — 사이트 💬 피드백 창의 'GitHub 이슈로 직접 등록' 링크가 제목·본문을 미리 채워 빈 양식으로 열기 때문.
+# 양식(버그/건의)을 먼저 권하고, GitHub 계정이 없는 사람은 인앱 피드백으로 안내한다.
+blank_issues_enabled: true
+contact_links:
+  - name: 💬 인앱 피드백 (GitHub 계정 없이)
+    url: https://khkim3115.github.io/TwelveJanggi/
+    about: GitHub 계정이 없다면 사이트 위쪽 💬 버튼으로 익명으로 보낼 수 있어요. 버전·화면·환경도 자동으로 첨부돼요.

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- 십이장기 아이콘 — 헤더 Brand 와 같은 팔각 나무 패에 녹 먹으로 새긴 王.
+       王 은 글꼴이 아니라 획(사각형)으로 그린다: 아이콘 생성기·브라우저마다 한자 글꼴이 달라도 모양이 같게.
+       바꾼 뒤에는 npm run generate-pwa-assets 로 PNG·ICO 를 다시 만든다. -->
+  <rect width="512" height="512" rx="96" fill="#0d1117"/>
+  <polygon points="184,88 328,88 436,196 436,340 328,448 184,448 76,340 76,196" fill="#000" opacity="0.45"/>
+  <polygon points="184,76 328,76 436,184 436,328 328,436 184,436 76,328 76,184"
+           fill="#ecd7ad" stroke="#7d5a2e" stroke-width="14" stroke-linejoin="round"/>
+  <polygon points="193,98 319,98 414,193 414,319 319,414 193,414 98,319 98,193"
+           fill="none" stroke="#b9925a" stroke-width="5" stroke-linejoin="round"/>
+  <g fill="#14603b">
+    <rect x="168" y="146" width="176" height="38" rx="9"/>
+    <rect x="184" y="237" width="144" height="36" rx="9"/>
+    <rect x="150" y="328" width="212" height="42" rx="9"/>
+    <rect x="237" y="146" width="38" height="224" rx="8"/>
+  </g>
+</svg>

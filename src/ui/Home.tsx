@@ -1,4 +1,4 @@
-// 시작 화면 — 혼자 하기(난이도·선후공) · 온라인 대전. 앱 받기는 배포 단계(#5)에서 붙는다.
+// 시작 화면 — 혼자 하기(난이도·선후공) · 온라인 대전 · 앱으로 받기(PWA).
 import { DIFFICULTIES, DIFFICULTY_DESC, DIFFICULTY_LABEL } from '../engine/ai';
 import type { Difficulty } from '../engine/ai';
 // 설정 여부만 본다 — lib/supabase 를 import 하면 첫 화면에 Supabase 클라이언트가 실린다.
@@ -6,6 +6,7 @@ import { isSupabaseConfigured } from '../lib/env';
 import { useAppStore } from '../store/appStore';
 import { useGameStore } from '../store/gameStore';
 import { Brand } from './Brand';
+import { DownloadCards } from './DownloadCards';
 import { Header } from './Header';
 import { SEAT_NOTE, SeatPicker } from './SeatPicker';
 
@@ -71,6 +72,8 @@ export function Home() {
           </p>
         )}
       </section>
+
+      <DownloadCards />
     </div>
   );
 }

@@ -1,0 +1,36 @@
+name: ✨ 기능 건의
+description: 새 기능이나 개선 아이디어를 제안해 주세요.
+title: "[건의] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        제안 감사합니다! 간단한 건의라면 사이트 위쪽 **💬 버튼**으로 GitHub 계정 없이 익명으로 보낼 수도 있어요.
+  - type: textarea
+    id: idea
+    attributes:
+      label: 어떤 기능/개선을 원하시나요?
+      placeholder: "예) 온라인 대전이 끝난 뒤 같은 상대와 바로 한 판 더 둘 수 있으면 좋겠어요."
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: 왜 필요한가요? (선택)
+      description: 어떤 상황에서 불편했는지, 무엇이 좋아지는지 적어 주세요.
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: 관련 영역 (선택)
+      options:
+        - 혼자 하기 (AI 대국)
+        - 힌트 · 되돌리기
+        - 온라인 대전 (로비 · 대국 · 채팅)
+        - 설치한 앱(PWA) · 오프라인
+        - 화면 · 접근성
+        - 기타
+    validations:
+      required: false
