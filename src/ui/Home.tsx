@@ -1,6 +1,8 @@
-// 시작 화면 — 혼자 하기(난이도·선후공). 온라인 대전·앱 받기는 뒤 단계에서 붙는다.
+// 시작 화면 — 혼자 하기(난이도·선후공) · 온라인 대전. 앱 받기는 배포 단계(#5)에서 붙는다.
 import { DIFFICULTIES, DIFFICULTY_DESC, DIFFICULTY_LABEL } from '../engine/ai';
 import type { Difficulty } from '../engine/ai';
+// 설정 여부만 본다 — lib/supabase 를 import 하면 첫 화면에 Supabase 클라이언트가 실린다.
+import { isSupabaseConfigured } from '../lib/env';
 import { useAppStore } from '../store/appStore';
 import { useGameStore } from '../store/gameStore';
 import { Brand } from './Brand';
@@ -51,6 +53,23 @@ export function Home() {
         <button className="btn-primary btn-big" onClick={startSolo}>
           게임 시작
         </button>
+      </section>
+
+      <section className="home-card">
+        <h2>🌐 온라인 대전</h2>
+        <p className="home-card-sub">방을 만들고 6자리 코드를 알려 주면 친구와 1:1 로 둘 수 있어요.</p>
+        <button
+          className="btn-primary btn-big"
+          onClick={() => setScreen('lobby')}
+          disabled={!isSupabaseConfigured}
+        >
+          방 만들기 · 참가
+        </button>
+        {!isSupabaseConfigured && (
+          <p className="home-note">
+            이 빌드에는 온라인 대전 서버 설정이 없습니다. 혼자 하기는 그대로 즐길 수 있어요.
+          </p>
+        )}
       </section>
     </div>
   );

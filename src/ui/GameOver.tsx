@@ -1,7 +1,7 @@
 // 솔로 결과 화면. 승패 이유까지 한국어로 풀어 준다(왜 끝났는지 모르면 배울 수 없으니).
 // '판 보기'로 창을 접으면 마지막 국면을 그대로 둔 채 판 위에 짧은 결과 줄만 남긴다.
-import { useState } from 'react';
-import { DEFAULT_RULES } from '../core/rules';
+import { useRef, useState } from 'react';
+import { DEFAULT_RULES, ONLINE_MAX_PLIES } from '../core/rules';
 import type { DrawReason, GameResult, Player, WinReason } from '../core/gameState';
 import { SIDE_LABEL } from '../core/view';
 import { DIFFICULTY_LABEL } from '../engine/ai';
@@ -20,6 +20,7 @@ export const WIN_REASON: Record<WinReason, [string, string]> = {
 
 export const DRAW_REASON: Record<DrawReason, string> = {
   repetition: `같은 국면(판·손패·차례)이 ${DEFAULT_RULES.repetitionLimit}번 나왔습니다`,
+  movelimit: `${ONLINE_MAX_PLIES}수가 지나도록 승부가 나지 않았습니다(온라인 대전 상한)`,
 };
 
 export function resultText(result: GameResult, me: Player): { title: string; detail: string } {
@@ -90,18 +91,39 @@ interface OverDialogProps {
   detail: string;
   tone: string;
   chips: string[];
+  /** 주 버튼 문구(솔로 '다시 하기', 온라인 '로비로'). */
+  againLabel?: string;
+  /**
+   * 첫 초점을 버튼이 아니라 제목에 둔다. 온라인 결과는 상대의 기권·시간초과로 아무 때나 뜨는데, 그때 채팅을
+   * 치던 중이면 다음 Space·Enter 가 첫 버튼('로비로' — 방을 나간다)을 눌러 버린다.
+   */
+  focusTitle?: boolean;
   onPeek: () => void;
   onAgain: () => void;
   onMenu: () => void;
 }
 
-function OverDialog({ title, detail, tone, chips, onPeek, onAgain, onMenu }: OverDialogProps) {
+/** 결과 창 — 솔로와 온라인 결과(MpGameOver)가 같은 모양을 쓴다. */
+export function OverDialog({
+  title,
+  detail,
+  tone,
+  chips,
+  againLabel = '다시 하기',
+  focusTitle,
+  onPeek,
+  onAgain,
+  onMenu,
+}: OverDialogProps) {
+  const titleRef = useRef<HTMLDivElement>(null);
   // ESC 는 창을 접어 판을 보여 준다(결과 자체는 그대로).
-  const cardRef = useDialog<HTMLDivElement>(onPeek);
+  const cardRef = useDialog<HTMLDivElement>(onPeek, focusTitle ? titleRef : undefined);
   return (
     <div className="over">
       <div ref={cardRef} className="over-card" role="dialog" aria-modal="true" aria-label="게임 결과">
-        <div className={`over-title over-${tone}`}>{title}</div>
+        <div ref={titleRef} className={`over-title over-${tone}`} tabIndex={focusTitle ? -1 : undefined}>
+          {title}
+        </div>
         <p className="over-detail">{detail}</p>
         <div className="over-meta">
           {chips.map((c) => (
@@ -112,7 +134,7 @@ function OverDialog({ title, detail, tone, chips, onPeek, onAgain, onMenu }: Ove
         </div>
         <div className="over-actions">
           <button className="btn-primary" onClick={onAgain}>
-            다시 하기
+            {againLabel}
           </button>
           <button className="btn-ghost" onClick={onPeek}>
             판 보기

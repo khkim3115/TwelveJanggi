@@ -28,6 +28,8 @@ const COMMUNITY_LINKS_ACTIVE = activeCommunityLinks();
 function errorKo(e: unknown): string {
   const msg = (e as { message?: string })?.message ?? '';
   if (msg.includes('too many submissions')) return '짧은 시간에 너무 많이 보냈어요. 잠시 후 다시 시도해 주세요.';
+  if (msg.includes('feedback quota exhausted'))
+    return '오늘은 피드백이 많이 몰려 더 받지 못해요. 아래 GitHub 링크로 남겨 주시면 확인할게요.';
   if (msg.includes('not authenticated') || msg.includes('Anonymous sign-ins are disabled'))
     return '세션 준비에 실패했어요. 새로고침 후 다시 시도해 주세요.';
   if (msg.includes('설정되지 않')) return msg;
@@ -49,8 +51,10 @@ export function FeedbackModal({ onClose }: { onClose: () => void }) {
   // ESC 닫기·초점 이동·가두기·복귀(기존 모달과 동일).
   const cardRef = useDialog<HTMLDivElement>(onClose);
 
+  // 힌트 사용 여부는 혼자 하기 화면에서만 뜻이 있다 — 온라인 화면에서 보내면 지난 솔로 판의 값이 붙는다.
   const meta = useMemo(
-    () => collectFeedbackMeta({ app_version: LATEST_VERSION, screen, hint_used: hintUsed }),
+    () =>
+      collectFeedbackMeta({ app_version: LATEST_VERSION, screen, hint_used: screen === 'solo' ? hintUsed : undefined }),
     [screen, hintUsed],
   );
   // 보조 GitHub 링크: 현재 입력 중인 종류/내용/메타를 반영(내용 비어도 링크는 생성).

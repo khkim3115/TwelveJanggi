@@ -3,7 +3,7 @@
 import { create } from 'zustand';
 import { LATEST_VERSION } from '../data/changelog';
 
-export type Screen = 'home' | 'solo';
+export type Screen = 'home' | 'solo' | 'lobby' | 'mpgame';
 
 const SEEN_KEY = 'tj_seen_version';
 
