@@ -13,7 +13,7 @@
 //  3. 같은 국면(판 + 양쪽 손패 + 차례)이 N회째        → 무승부      (repetition, 시작 국면도 1회로 센다)
 //  4. 차례가 된 쪽이 둘 수(투입 포함)가 하나도 없다   → 상대 승     (blocked)
 //
-// 서버 이식 주의: tj_start_game 은 반복 횟수(pos_counts)를 시작 국면 키 1회로 초기화해야 한다.
+// 서버 이식 주의: tj_start_game 은 반복 횟수(tj_room_positions)를 시작 국면 키 1회로 초기화해야 한다.
 // 나인 멘스 모리스처럼 빈 값으로 시작하면 처음 국면으로 돌아오는 반복에서 무승부가 한 ply 늦어진다.
 
 export interface RuleConfig {
@@ -24,3 +24,10 @@ export interface RuleConfig {
 export const DEFAULT_RULES: RuleConfig = {
   repetitionLimit: 3,
 };
+
+/**
+ * 온라인 대전 서버(tj__advance)만 두는 판 길이 상한(ply). 위 판정 넷으로 끝나지 않은 채 여기에 이르면 무승부
+ * (DrawReason 'movelimit'). 잡은 말이 손패로 돌아오는 규칙이라 판이 스스로 끝나지 않을 수 있어서, 공유 DB 에
+ * 판 하나가 끝없이 쌓이지 않게 하는 안전장치다. 사람이 두는 판은 여기까지 가지 않는다. 로컬 대국(솔로)에는 없다.
+ */
+export const ONLINE_MAX_PLIES = 1000;

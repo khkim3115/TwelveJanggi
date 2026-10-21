@@ -44,7 +44,8 @@ export interface Move {
 }
 
 export type WinReason = 'capture' | 'try' | 'blocked' | 'resign' | 'timeout';
-export type DrawReason = 'repetition';
+/** movelimit 은 온라인 서버의 판 길이 상한(rules.ts ONLINE_MAX_PLIES) — 로컬 detectResult 는 내지 않는다. */
+export type DrawReason = 'repetition' | 'movelimit';
 
 export type GameResult =
   | { kind: 'win'; winner: Player; reason: WinReason }

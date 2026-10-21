@@ -32,7 +32,11 @@ export function useDialog<T extends HTMLElement>(
       if (items.length === 0) return;
       const head = items[0];
       const tail = items[items.length - 1];
-      if (e.shiftKey && document.activeElement === head) {
+      const active = document.activeElement as HTMLElement | null;
+      // 카드 안이지만 Tab 순서 밖인 곳(초점을 처음 받은 제목 등, tabIndex=-1)에서 Shift+Tab 하면 브라우저는
+      // 카드 앞쪽 바깥으로 보낸다 — 첫 칸에서 뒤로 간 것처럼 마지막 칸으로 감는다.
+      const offCycle = active !== null && card.contains(active) && !items.includes(active);
+      if (e.shiftKey && (active === head || offCycle)) {
         e.preventDefault();
         tail.focus();
       } else if (!e.shiftKey && document.activeElement === tail) {
