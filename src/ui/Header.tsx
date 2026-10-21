@@ -1,4 +1,4 @@
-// 모든 화면 공통 상단 바: 브랜드 + (홈/화면별 추가요소) + 테마전환·도움말·패치노트·피드백·설정.
+// 모든 화면 공통 상단 바: 브랜드 + (홈/화면별 추가요소) + 테마전환·도움말·패치노트·피드백·앱 설치·설정.
 import { useEffect, useState, type ReactNode } from 'react';
 import { useAppStore } from '../store/appStore';
 import { useGameStore } from '../store/gameStore';
@@ -7,6 +7,7 @@ import { SettingsPanel } from './SettingsPanel';
 import { HelpPanel } from './HelpPanel';
 import { PatchNotesModal } from './PatchNotesModal';
 import { FeedbackModal } from './FeedbackModal';
+import { InstallButton } from './InstallButton';
 
 const GUIDE_KEY = 'tj_seen_guide';
 
@@ -115,6 +116,7 @@ export function Header({ title, subtitle, showHome, showSettings, autoHelp, chil
           >
             💬
           </button>
+          <InstallButton compact />
           {showSettings && (
             <button className="gear" onClick={() => setSettingsOpen(true)} aria-label="설정">
               ⚙️

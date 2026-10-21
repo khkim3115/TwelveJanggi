@@ -4,6 +4,7 @@ import App from './ui/App';
 import { Home } from './ui/Home';
 import { Lobby } from './ui/Lobby';
 import { MultiplayerGame } from './ui/MultiplayerGame';
+import { PwaStatus } from './ui/PwaStatus';
 import { useAppStore } from './store/appStore';
 import './index.css';
 
@@ -24,5 +25,6 @@ function Screen() {
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <Screen />
+    <PwaStatus />
   </StrictMode>,
 );
