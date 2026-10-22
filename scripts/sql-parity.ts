@@ -47,7 +47,9 @@ import { chooseMove } from '../src/engine/ai';
 
 // 인자를 잘못 주면 조용히 기본값(저장소의 schema.sql)으로 돌아 '통과'하지 않도록 엄격하게 읽고 멈춘다.
 // (--sql=초안, 값 없는 --sql, 오타 난 옵션, npm 의 -- 를 빼먹어 위치 인자로 온 경로가 그런 경우다)
-const USAGE = '사용법: npm run test:sql [-- --deep] [-- --games N --sample R --seed S] [-- --sql <schema.sql 대신 쓸 전체 누적본>]';
+const USAGE =
+  '사용법: npm run test:sql -- [--deep] [--games N] [--sample R] [--seed S] [--sql <schema.sql 대신 쓸 전체 누적본>]\n' +
+  '  (옵션은 모두 -- 하나 뒤에 둔다. --games · --sample · --seed 는 --deep 값을 덮어쓴다)';
 function readOptions() {
   try {
     return parseArgs({
@@ -97,10 +99,15 @@ if (!Number.isInteger(GAMES) || GAMES < 0 || !(SAMPLE >= 0 && SAMPLE <= 1) || !N
 let failures = 0;
 let failuresAtLastOk = 0;
 let lastOkAt = Date.now();
-/** 지난 ok() 뒤로 실패가 없을 때만 ✓ 를 찍는다 — 있었으면 같은 줄을 ✗ 로 남긴다(원인은 위의 ❌ 줄). 걸린 시간도 붙인다. */
-const ok = (msg: string) => {
+/**
+ * 지난 ok() 뒤로 실패가 없을 때만 ✓ 를 찍는다 — 있었으면 같은 줄을 ✗ 로 남긴다(원인은 위의 ❌ 줄). 걸린 시간도 붙인다.
+ * 한 구간에 검사가 둘 섞여 있으면(⑤ 의 대국 · 전수 대조) 실패 수와 시간을 split 으로 직접 나눠 준다.
+ */
+const ok = (msg: string, split?: { failures: number; ms: number }) => {
   const now = Date.now();
-  console.log(`${failures === failuresAtLastOk ? '✓' : '✗'} ${msg} (${((now - lastOkAt) / 1000).toFixed(1)}초)`);
+  const failed = split ? split.failures : failures - failuresAtLastOk;
+  const ms = split ? split.ms : now - lastOkAt;
+  console.log(`${failed === 0 ? '✓' : '✗'} ${msg} (${(ms / 1000).toFixed(1)}초)`);
   failuresAtLastOk = failures;
   lastOkAt = now;
 };
@@ -147,7 +154,15 @@ async function makeDb(sqls: string[] = [schemaSql]): Promise<PGlite> {
   return pg;
 }
 
-let db = await makeDb();
+/** 검사하는 SQL 의 이름 — 메시지에서 저장소 schema.sql 과 --sql 초안을 구별한다. */
+const SQL_LABEL = opts.sql ? `--sql ${opts.sql}` : 'schema.sql';
+let db: PGlite;
+try {
+  db = await makeDb();
+} catch (e) {
+  console.error(`❌ ${SQL_LABEL} 을 흉내 DB 에 올리지 못함 — ${(e as Error).message}`);
+  process.exit(1);
+}
 const who = (await db.query<{ u: string; v: string }>('select current_user as u, version() as v')).rows[0];
 console.log('PGlite:', who.u, '|', who.v.split(',')[0]);
 ok('schema.sql 적용');
@@ -429,10 +444,16 @@ const TABLE_GRANTS: Record<string, string[]> = {
 
 /* ── 1-2. schema.sql = migrations/ 를 차례로 적용한 결과(실서버) ───────── */
 
-const clip = (v: unknown) => {
-  const s = JSON.stringify(v) ?? 'null';
-  return s.length > 160 ? s.slice(0, 160) + '…' : s;
-};
+/** 두 값이 처음 갈라지는 곳 앞뒤만 보여 준다 — 긴 함수 본문도 어디가 다른지 보이게. */
+function around(a: unknown, b: unknown): [string, string] {
+  const x = JSON.stringify(a) ?? 'null';
+  const y = JSON.stringify(b) ?? 'null';
+  let i = 0;
+  while (i < x.length && i < y.length && x[i] === y[i]) i++;
+  const from = Math.max(0, i - 40);
+  const cut = (s: string) => (from > 0 ? '…' : '') + s.slice(from, i + 100) + (i + 100 < s.length ? '…' : '');
+  return [cut(x), cut(y)];
+}
 
 /** tj_ 함수 · 테이블의 정의 · 권한 · 정책을 서로 견줄 수 있는 모양으로 읽는다(함수 본문은 공백을 접는다). */
 async function catalog(pg: PGlite): Promise<Map<string, Record<string, unknown>>> {
@@ -461,7 +482,9 @@ async function catalog(pg: PGlite): Promise<Map<string, Record<string, unknown>>
           || (select string_agg(case when r = 0 then 'PUBLIC' else r::regrole::text end, ',' order by r) from unnest(polroles) r)
           || ' using ' || coalesce(pg_get_expr(polqual, polrelid), '-') || ' check ' || coalesce(pg_get_expr(polwithcheck, polrelid), '-') as x
         from pg_policy where polrelid = c.oid`)},
-      '트리거', ${list(`select pg_get_triggerdef(t.oid) as x from pg_trigger t where t.tgrelid = c.oid and not t.tgisinternal`)},
+      '트리거', ${list(`select pg_get_triggerdef(t.oid) || ' enabled=' || t.tgenabled::text as x
+        from pg_trigger t where t.tgrelid = c.oid and not t.tgisinternal`)},
+      '옵션', c.reloptions,
       '뷰', case when c.relkind in ('v', 'm') then pg_get_viewdef(c.oid) end,
       'Realtime', exists (select 1 from pg_publication_tables pt
         where pt.pubname = 'supabase_realtime' and pt.schemaname = 'public' and pt.tablename = c.relname)) as v
@@ -474,25 +497,43 @@ async function catalog(pg: PGlite): Promise<Map<string, Record<string, unknown>>
 // 빠뜨림 · 옛 시그니처를 drop 하지 않아 오버로드가 남음 · 회수를 빠뜨림 · 본문이 다름) 여기의 대조가 실서버를 말해 주지 못한다.
 {
   const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql')).sort();
-  const replay = await makeDb(files.map((f) => readFileSync(join(MIGRATIONS_DIR, f), 'utf8')));
+  const replay = await makeDb([]);
   try {
-    const want = await catalog(db);
-    const got = await catalog(replay);
-    const diffs: string[] = [];
-    for (const k of [...new Set([...want.keys(), ...got.keys()])].sort()) {
-      const a = want.get(k);
-      const b = got.get(k);
-      if (!a || !b) diffs.push(`${k}: ${a ? 'migrations/ 에 없음' : 'migrations/ 에만 있음'}`);
-      else for (const field of Object.keys(a)) {
-        if (!same(a[field], b[field])) diffs.push(`${k} 의 ${field}: schema.sql ${clip(a[field])} / migrations ${clip(b[field])}`);
+    let replayed = true;
+    for (const f of files) {
+      try {
+        await replay.exec(readFileSync(join(MIGRATIONS_DIR, f), 'utf8'));
+      } catch (e) {
+        fail(`migrations/${f} 를 흉내 DB 에 차례로 적용하지 못함 — ${(e as Error).message}`);
+        replayed = false;
+        break;
       }
     }
-    for (const d of diffs.slice(0, 10)) fail(`schema.sql ≠ migrations/ — ${d}`);
-    if (diffs.length > 10) fail(`schema.sql ≠ migrations/ — 그 밖에 ${diffs.length - 10}건`);
-    if (diffs.length) {
-      console.error('  → schema.sql 을 고쳤으면 같은 변경을 새 마이그레이션(supabase/migrations/)에도 넣는다. 인자 목록을 바꿨다면 마이그레이션에서 옛 시그니처를 drop function 한다.');
-    }
-    ok(`schema.sql = migrations/ ${files.length}개를 차례로 적용한 결과(실서버) — 함수 · 테이블 ${want.size}개`);
+    if (replayed) {
+      const want = await catalog(db);
+      const got = await catalog(replay);
+      const diffs: string[] = [];
+      for (const k of [...new Set([...want.keys(), ...got.keys()])].sort()) {
+        const a = want.get(k);
+        const b = got.get(k);
+        if (!a || !b) diffs.push(`${k}: ${a ? 'migrations/ 에 없음' : 'migrations/ 에만 있음'}`);
+        else for (const field of Object.keys(a)) {
+          if (same(a[field], b[field])) continue;
+          const [x, y] = around(a[field], b[field]);
+          diffs.push(`${k} 의 ${field}\n    ${SQL_LABEL}: ${x}\n    migrations/: ${y}`);
+        }
+      }
+      for (const d of diffs.slice(0, 10)) fail(`${SQL_LABEL} ≠ migrations/ — ${d}`);
+      if (diffs.length > 10) fail(`${SQL_LABEL} ≠ migrations/ — 그 밖에 ${diffs.length - 10}건`);
+      if (diffs.length) {
+        console.error(
+          opts.sql
+            ? '  → --sql 초안도 저장소의 supabase/migrations/ 와 견준다. 초안의 마이그레이션을 아직 넣지 않았다면 이 차이는 예상된 것이다.'
+            : '  → schema.sql 을 고쳤으면 같은 변경을 새 마이그레이션(supabase/migrations/)에도 넣는다. 인자 목록을 바꿨다면 마이그레이션에서 옛 시그니처를 drop function 한다.',
+        );
+      }
+      ok(`${SQL_LABEL} = migrations/ ${files.length}개를 차례로 적용한 결과(실서버) — 함수 · 테이블 ${want.size}개`);
+    } else ok('migrations/ 차례 적용');
   } finally {
     await replay.close();
   }
@@ -615,6 +656,9 @@ async function playBoth(ctx: string, g: Game, s0: GameState, keys: string[]): Pr
 const PIECE_OPTIONS = [null, 1, 2, 3, 4, 5];
 let exhaustivePositions = 0;
 let exhaustiveCalls = 0;
+/** 전수 대조가 낸 실패 수와 걸린 시간 — ⑤ 의 요약 줄을 대국과 전수 대조로 나눠 찍는다. */
+let exhaustiveFailures = 0;
+let exhaustiveMs = 0;
 const hasMoveSamples: { board: number[]; hand: number[] }[] = [];
 
 /** 국면별 새 인스턴스의 원본(Supabase 흉내 + schema.sql). 오류를 내지 않고 clone() 에만 쓴다 — 클론은 처음부터 올리는 것보다
@@ -624,6 +668,8 @@ let template: PGlite | undefined;
 /** 지금 국면을 새 인스턴스로 옮겨 가능한 모든 tj_play 인자를 넣어 본다 — 서버가 받는 수 = legalMoves, 결과 = applyMove. */
 async function exhaustive(ctx: string, gMain: Game, s: GameState) {
   exhaustivePositions++;
+  const failuresBefore = failures;
+  const startedAt = Date.now();
   const src = (await su('select board, hand, turn, move_count from public.tj_rooms where id = $1', [gMain.id]))[0];
   const srcCounts = await positions(gMain.id);
   template ??= await makeDb();
@@ -639,6 +685,8 @@ async function exhaustive(ctx: string, gMain: Game, s: GameState) {
   } finally {
     await db.close();
     db = mainDb;
+    exhaustiveFailures += failures - failuresBefore;
+    exhaustiveMs += Date.now() - startedAt;
   }
 }
 
@@ -751,8 +799,16 @@ const FIXED: { name: string; spec: StateSpec | null }[] = [
       bump('미종료→기권');
     }
   }
-  ok(`무작위 대국 ${GAMES}판 매 ply 서버 = 로컬 — ${JSON.stringify(stats)}`);
-  ok(`국면 ${exhaustivePositions}개(고정 ${FIXED.length} + 표본 ${exhaustivePositions - FIXED.length}) × 모든 인자(${exhaustiveCalls}번 호출): 받는 수 = legalMoves, 결과 = applyMove`);
+  const sectionFailures = failures - failuresAtLastOk;
+  const sectionMs = Date.now() - lastOkAt;
+  ok(`무작위 대국 ${GAMES}판 매 ply 서버 = 로컬 — ${JSON.stringify(stats)}`, {
+    failures: sectionFailures - exhaustiveFailures,
+    ms: sectionMs - exhaustiveMs,
+  });
+  ok(
+    `국면 ${exhaustivePositions}개(고정 ${FIXED.length} + 표본 ${exhaustivePositions - FIXED.length}) × 모든 인자(${exhaustiveCalls}번 호출): 받는 수 = legalMoves, 결과 = applyMove`,
+    { failures: exhaustiveFailures, ms: exhaustiveMs },
+  );
 }
 
 /* ── 6. tj_has_move · tj_pos_key 대조 ─────────────────────────────────── */
