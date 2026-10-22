@@ -53,9 +53,9 @@
 
 - `npm run typecheck`
 - `npm test`
+- `npm run test:sql`(빠른 모드 — 서버·클라이언트 규칙 일치, 약 25초)
 - `npm run build`
-- 위 셋과 `npm run test:sql`(빠른 모드)은 PR 을 열면 CI(`.github/workflows/ci.yml`)가 다시 돌린다 — 실패하면 머지 버튼에
-  표시되고, 필수 검사라 머지가 막힌다.
+- 위 넷은 PR 을 열면 CI(`.github/workflows/ci.yml`)가 다시 돌린다 — 실패하면 머지 버튼에 표시되고, 필수 검사라 머지가 막힌다.
 - 로직 변경은 **테스트 먼저**(TDD 권장). 순수 로직은 `src/**/*.test.ts`(node 환경).
 - `src/core` 를 손댔다면 `src/engine` 강도 회귀 테스트까지 반드시 확인한다.
 - `src/core` 나 `supabase/` 의 규칙을 바꿨다면 서버·클라이언트 규칙 일치를 확인한다 — 먼저 로컬에서

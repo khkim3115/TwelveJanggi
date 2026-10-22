@@ -1,26 +1,27 @@
 // 서버(plpgsql)·클라이언트 규칙 일치를 로컬 Postgres(PGlite — WASM)로 검증한다. 실서버 e2e(npm run e2e:mp)와 달리
 // DB·비밀값 없이 돌아서 PR 마다 CI 가 빠른 모드를 돌린다. supabase/schema.sql 을 Supabase 와 비슷한 환경
-// (anon·authenticated 롤 · auth.uid() · 기본 ACL · pgcrypto)에 올리고 src/core 와 규칙·판정·권한을 대조한다.
-// 공유 DB 에 SQL 을 적용하기 전에도 돌린다(--sql 로 초안 파일을 줄 수 있다).
+// (anon·authenticated 롤 · auth.uid() · 기본 ACL · pgcrypto)의 빈 DB 에 올리고 src/core 와 규칙·판정·권한을 대조한다.
+// supabase/migrations/ 를 차례로 적용한 DB(= 실서버)가 schema.sql 과 같은지도 본다 — 대조한 것이 곧 배포되는 것이다.
 //
-//   npm run test:sql                         # 빠른 모드 — 4판 · 표본 국면 5%(약 20초). CI 가 PR 마다 돌린다
-//   npm run test:sql -- --deep               # 깊은 모드 — 60판 · 표본 8%. src/core 나 supabase/ 규칙을 고쳤을 때
+//   npm run test:sql                         # 빠른 모드 — 4판 · 표본 국면 5% + 고정 국면 3개(약 25초). CI 가 PR 마다 돌린다
+//   npm run test:sql -- --deep               # 깊은 모드 — 60판 · 표본 8%(약 3–4분). src/core 나 supabase/ 규칙을 고쳤을 때
 //   npm run test:sql -- --games 10 --sample 0.1 --seed 2   # 직접 지정(--deep 값 위에 덮어쓴다)
-//   npm run test:sql -- --sql <파일>         # 다른 SQL 로(기본 supabase/schema.sql)
+//   npm run test:sql -- --sql <파일>         # schema.sql 대신 쓸 전체 누적본(초안) — 델타 마이그레이션은 받지 않는다
 //
-// ① 권한 매트릭스 · 공개 RPC 시그니처 ② tj_can_step 전수 = STEPS ③ 판정 순서 9가지(gameState.test.ts 이식)
-// ④ 시작 국면 시나리오 ⑤ 무작위 대국 매 ply + 표본 국면마다 가능한 모든 tj_play 인자(받는 수 = legalMoves,
-// 결과 = applyMove) ⑥ tj_has_move = hasLegalMove · tj_pos_key ↔ computeKey ⑦ 방 흐름 · 오류 문구 · 시간초과 ·
-// 나가기 · 정리 · 제한 · 1000 ply 상한 · CHECK ⑧ 피드백
+// ① 권한 매트릭스(tj_ 함수 · 테이블 · 열) · 공개 RPC 시그니처 · schema.sql = migrations/ 적용 결과 ② tj_can_step 전수 = STEPS
+// ③ 판정 순서 9가지(gameState.test.ts 이식) ④ 시작 국면 시나리오 ⑤ 고정 국면 + 무작위 대국 매 ply + 표본 국면마다
+// 가능한 모든 tj_play 인자(받는 수 = legalMoves, 결과 = applyMove) ⑥ tj_has_move = hasLegalMove · tj_pos_key ↔ computeKey
+// ⑦ 방 흐름 · 오류 문구 · 시간초과 · 나가기 · 끝난 방 · 정리 · 제한 · 1000 ply 상한 · CHECK ⑧ 피드백
 //
-// ⚠️ PGlite 0.5.8 은 SQL 오류 1건마다 스택이 조금씩 새서, 한 인스턴스에서 약 1,870건 뒤에는 모든 문장이
-// 'stack depth limit exceeded' 로 실패한다(savepoint 로도 못 막는다). 그래서 오류를 많이 내는 ⑤ 의 전수 대조는
-// 국면마다 새 인스턴스에서 돌린다.
+// ⚠️ PGlite 0.5.8 은 클라이언트로 올라온 SQL 오류 1건마다 스택이 조금씩 새서, 한 인스턴스에서 수천 건(단순 오류 기준
+// 약 1,870건) 뒤에는 모든 문장이 'stack depth limit exceeded' 로 실패한다(트랜잭션 · savepoint 로도 못 막는다).
+// 그래서 오류를 많이 내는 ⑤ 의 전수 대조는 국면마다 새 인스턴스에서 돌린다.
 
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 import { canStep, type Kind } from '../src/core/board';
@@ -44,26 +45,65 @@ import { mulberry32 } from '../src/core/rng';
 import { formatBoard, formatHand, makeState, type StateSpec } from '../src/core/testkit';
 import { chooseMove } from '../src/engine/ai';
 
-const argv = process.argv.slice(2);
-const flag = (name: string) => argv.includes(`--${name}`);
-const opt = (name: string, fallback: string) => {
-  const i = argv.indexOf(`--${name}`);
-  return i >= 0 && argv[i + 1] ? argv[i + 1] : fallback;
-};
+// 인자를 잘못 주면 조용히 기본값(저장소의 schema.sql)으로 돌아 '통과'하지 않도록 엄격하게 읽고 멈춘다.
+// (--sql=초안, 값 없는 --sql, 오타 난 옵션, npm 의 -- 를 빼먹어 위치 인자로 온 경로가 그런 경우다)
+const USAGE = '사용법: npm run test:sql [-- --deep] [-- --games N --sample R --seed S] [-- --sql <schema.sql 대신 쓸 전체 누적본>]';
+function readOptions() {
+  try {
+    return parseArgs({
+      args: process.argv.slice(2),
+      strict: true,
+      allowPositionals: false,
+      options: {
+        deep: { type: 'boolean' },
+        sql: { type: 'string' },
+        games: { type: 'string' },
+        sample: { type: 'string' },
+        seed: { type: 'string' },
+      },
+    }).values;
+  } catch (e) {
+    console.error(`${(e as Error).message}\n${USAGE}`);
+    process.exit(2);
+  }
+}
+const opts = readOptions();
+/** 숫자 옵션. 빈 값은 Number('') = 0 이라 조용히 0판이 되므로 따로 막는다. */
+function num(name: 'games' | 'sample' | 'seed', fallback: number): number {
+  const v = opts[name];
+  if (v === undefined) return fallback;
+  if (v.trim() === '' || !Number.isFinite(Number(v))) {
+    console.error(`--${name} 값이 숫자가 아닙니다: '${v}'\n${USAGE}`);
+    process.exit(2);
+  }
+  return Number(v);
+}
 
-const DEEP = flag('deep');
-const sqlArg = opt('sql', '');
-const SQL_PATH = sqlArg ? resolve(sqlArg) : fileURLToPath(new URL('../supabase/schema.sql', import.meta.url));
-const GAMES = Number(opt('games', DEEP ? '60' : '4'));
-const SAMPLE = Number(opt('sample', DEEP ? '0.08' : '0.05'));
-const SEED = Number(opt('seed', '1'));
+const DEEP = opts.deep ?? false;
+if (opts.sql !== undefined && opts.sql.trim() === '') {
+  console.error(`--sql 에 파일 경로가 없습니다.\n${USAGE}`);
+  process.exit(2);
+}
+const SQL_PATH = opts.sql ? resolve(opts.sql) : fileURLToPath(new URL('../supabase/schema.sql', import.meta.url));
+const MIGRATIONS_DIR = fileURLToPath(new URL('../supabase/migrations/', import.meta.url));
+const GAMES = num('games', DEEP ? 60 : 4);
+const SAMPLE = num('sample', DEEP ? 0.08 : 0.05);
+const SEED = num('seed', 1);
 if (!Number.isInteger(GAMES) || GAMES < 0 || !(SAMPLE >= 0 && SAMPLE <= 1) || !Number.isInteger(SEED)) {
-  console.error('--games 는 0 이상 정수, --sample 은 0–1, --seed 는 정수여야 합니다.');
+  console.error(`--games 는 0 이상 정수, --sample 은 0–1, --seed 는 정수여야 합니다.\n${USAGE}`);
   process.exit(2);
 }
 
 let failures = 0;
-const ok = (msg: string) => console.log('✓ ' + msg);
+let failuresAtLastOk = 0;
+let lastOkAt = Date.now();
+/** 지난 ok() 뒤로 실패가 없을 때만 ✓ 를 찍는다 — 있었으면 같은 줄을 ✗ 로 남긴다(원인은 위의 ❌ 줄). 걸린 시간도 붙인다. */
+const ok = (msg: string) => {
+  const now = Date.now();
+  console.log(`${failures === failuresAtLastOk ? '✓' : '✗'} ${msg} (${((now - lastOkAt) / 1000).toFixed(1)}초)`);
+  failuresAtLastOk = failures;
+  lastOkAt = now;
+};
 const fail = (msg: string) => {
   failures++;
   console.error('❌ ' + msg);
@@ -79,8 +119,8 @@ console.log(`${DEEP ? '깊은' : '빠른'} 모드 — ${GAMES}판 · 표본 ${SA
 
 const schemaSql = readFileSync(SQL_PATH, 'utf8');
 
-/** Supabase 흉내를 낸 빈 DB 에 schema.sql 을 올린다. */
-async function makeDb(): Promise<PGlite> {
+/** Supabase 흉내를 낸 빈 DB 에 SQL 을 차례로 올린다(기본은 검사할 schema.sql 하나). */
+async function makeDb(sqls: string[] = [schemaSql]): Promise<PGlite> {
   const pg = await PGlite.create({ extensions: { pgcrypto } });
   await pg.exec(`
     create role anon nologin;
@@ -103,7 +143,7 @@ async function makeDb(): Promise<PGlite> {
     alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
     create publication supabase_realtime;
   `);
-  await pg.exec(schemaSql);
+  for (const sql of sqls) await pg.exec(sql);
   return pg;
 }
 
@@ -277,17 +317,27 @@ const bump = (k: string) => (stats[k] = (stats[k] ?? 0) + 1);
 
 /**
  * 클라이언트가 부르는 RPC. 이름 · 인자 · 반환은 옛 클라이언트(배포 전에 열어 둔 탭 · 설치한 PWA)와의 공개 계약이다.
- * 인자는 기본값을 붙여 뒤에만 더할 수 있다 — 그런 변경은 이 표를 고치지 않아도 통과하고, 깨는 변경은 여기서 걸린다.
+ * 인자는 기본값을 붙여 뒤에만 더한다 — 이 표는 그런 변경을 통과시키고, 이름 · 타입 · 필수 인자 · 반환이 바뀌면 걸린다.
+ * ⚠️ 인자 목록이 바뀐 create or replace 는 실서버에서 함수를 바꾸지 않고 오버로드를 하나 더 만든다(옛 호출이 'not unique').
+ *    마이그레이션에서 옛 시그니처를 drop function 한 뒤 새로 만들고 revoke/grant 를 다시 한다. 빠뜨리면 1-2 의
+ *    'schema.sql = migrations/ 적용 결과' 대조에서 남은 오버로드가 걸린다. (OUT 인자는 쓰지 않는다는 전제다)
  */
-const PUBLIC_RPCS: Record<string, { args: string; returns: string }> = {
-  tj_create_room: { args: 'p_display_name text', returns: 'jsonb' },
-  tj_join_room: { args: 'p_code text, p_display_name text', returns: 'jsonb' },
-  tj_start_game: { args: 'p_room uuid', returns: 'void' },
-  tj_play: { args: 'p_room uuid, p_from integer, p_to integer, p_piece integer', returns: 'void' },
-  tj_resign: { args: 'p_room uuid', returns: 'void' },
-  tj_claim_timeout: { args: 'p_room uuid', returns: 'void' },
-  tj_leave_room: { args: 'p_room uuid', returns: 'void' },
-  tj_submit_feedback: { args: 'p_kind text, p_message text, p_contact text, p_meta jsonb, p_hp text', returns: 'void' },
+const PUBLIC_RPCS: Record<string, { args: string[]; returns: string }> = {
+  tj_create_room: { args: ['p_display_name text'], returns: 'jsonb' },
+  tj_join_room: { args: ['p_code text', 'p_display_name text'], returns: 'jsonb' },
+  tj_start_game: { args: ['p_room uuid'], returns: 'void' },
+  tj_play: { args: ['p_room uuid', 'p_from integer', 'p_to integer', 'p_piece integer'], returns: 'void' },
+  tj_resign: { args: ['p_room uuid'], returns: 'void' },
+  tj_claim_timeout: { args: ['p_room uuid'], returns: 'void' },
+  tj_leave_room: { args: ['p_room uuid'], returns: 'void' },
+  tj_submit_feedback: { args: ['p_kind text', 'p_message text', 'p_contact text', 'p_meta jsonb', 'p_hp text'], returns: 'void' },
+};
+
+/** tj_ 테이블 · 뷰 · 시퀀스에서 anon · authenticated · PUBLIC 에 남겨 둘 권한. 여기 없는 것은 전부 회수돼 있어야 한다. */
+const TABLE_GRANTS: Record<string, string[]> = {
+  // 읽기는 Realtime 구독과 회원 SELECT(RLS) 재조회 — 쓰기는 RPC 로만
+  tj_rooms: ['authenticated:SELECT'],
+  tj_room_players: ['authenticated:SELECT'],
 };
 
 {
@@ -312,40 +362,41 @@ const PUBLIC_RPCS: Record<string, { args: string; returns: string }> = {
     if (!f.cfg.startsWith('search_path=public')) fail(`${f.name} search_path 없음: ${f.cfg}`);
   }
   console.log('  SECURITY DEFINER:', fns.filter((f) => f.definer).map((f) => f.name).sort().join(', '));
-  const PRIVS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN'];
-  for (const t of ['tj_rooms', 'tj_room_players', 'tj_room_positions', 'tj_feedback']) {
-    for (const role of ['anon', 'authenticated', 'public']) {
-      for (const p of PRIVS) {
-        let has: boolean;
-        try {
-          has =
-            role === 'public'
-              ? (await su(`select exists (select 1 from pg_class c, aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
-                    where c.oid = 'public.${t}'::regclass and a.grantee = 0 and a.privilege_type = $1) as h`, [p]))[0].h
-              : (await su(`select has_table_privilege($1, 'public.${t}', $2) as h`, [role, p]))[0].h;
-        } catch {
-          continue; // MAINTAIN 이 없는 버전
-        }
-        const want = role === 'authenticated' && p === 'SELECT' && (t === 'tj_rooms' || t === 'tj_room_players');
-        if (has !== want) fail(`${role} ${p} on ${t}: ${has}`);
-      }
-    }
+  // 테이블 · 뷰 · 시퀀스는 목록을 적지 않고 카탈로그에서 모두 찾는다 — 새 tj_ 객체가 이름별 회수를 빠뜨리면
+  // 기본 ACL(anon·authenticated 전 권한)이 남아 여기서 걸린다.
+  const rels = await su<{ relname: string; relkind: string; rls: boolean; grants: string[] }>(`
+    select c.relname, c.relkind, c.relrowsecurity as rls,
+      coalesce((select array_agg(g order by g) from (
+        select (case when a.grantee = 0 then 'PUBLIC' else a.grantee::regrole::text end) || ':' || a.privilege_type as g
+        from aclexplode(coalesce(c.relacl, acldefault((case when c.relkind = 'S' then 's' else 'r' end)::"char", c.relowner))) a
+        where a.grantee in (0::oid, 'anon'::regrole::oid, 'authenticated'::regrole::oid)) s), '{}') as grants
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and left(c.relname, 3) = 'tj_' and c.relkind in ('r', 'p', 'v', 'm', 'S', 'f')
+    order by 1`);
+  console.log(`  tj_ 테이블 · 뷰 · 시퀀스 ${rels.length}개: ${rels.map((r) => r.relname).join(', ')}`);
+  for (const r of rels) {
+    const want = TABLE_GRANTS[r.relname] ?? [];
+    if (!same([...r.grants].sort(), [...want].sort())) fail(`${r.relname} 권한 ${JSON.stringify(r.grants)} / 허용 ${JSON.stringify(want)}`);
+    if ((r.relkind === 'r' || r.relkind === 'p') && !r.rls) fail(`RLS 꺼짐: ${r.relname}`);
   }
-  const rls = await su<{ relname: string; relrowsecurity: boolean }>(`select relname, relrowsecurity from pg_class where relname like 'tj_%' and relkind = 'r' order by 1`);
-  for (const r of rls) if (!r.relrowsecurity) fail(`RLS 꺼짐: ${r.relname}`);
+  const colAcl = await su<{ col: string }>(`
+    select c.relname || '.' || a.attname as col
+    from pg_attribute a join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and left(c.relname, 3) = 'tj_' and a.attnum > 0 and a.attacl is not null`);
+  if (colAcl.length) fail(`열 단위 권한이 있음(쓰지 않는다): ${colAcl.map((x) => x.col).join(', ')}`);
   ok('권한 매트릭스 확인');
 
   for (const [name, want] of Object.entries(PUBLIC_RPCS)) {
     const found = fns.filter((f) => f.name === name);
     if (found.length !== 1) {
-      fail(`공개 RPC ${name}: ${found.length === 0 ? '없음' : `오버로드 ${found.length}개(이름 붙인 호출이 모호해진다)`}`);
+      fail(`공개 RPC ${name}: ${found.length === 0 ? '없음' : `오버로드 ${found.length}개(이름 붙인 호출이 'not unique' 로 실패한다)`}`);
       continue;
     }
     const f = found[0];
-    const extra = f.nargs - want.args.split(', ').length;
-    const prefixOk = f.args === want.args || f.args.startsWith(want.args + ', ');
-    if (!prefixOk || extra > f.ndefaults || f.returns !== want.returns) {
-      fail(`공개 RPC ${name} 시그니처가 바뀜 — 서버 (${f.args}) → ${f.returns} / 계약 (${want.args}) → ${want.returns}.
+    const wantArgs = want.args.join(', ');
+    const prefixOk = f.args === wantArgs || f.args.startsWith(wantArgs + ', ');
+    if (!prefixOk || f.nargs - want.args.length > f.ndefaults || f.returns !== want.returns) {
+      fail(`공개 RPC ${name} 시그니처가 바뀜 — 서버 (${f.args}) → ${f.returns} / 계약 (${wantArgs}) → ${want.returns}.
   옛 클라이언트가 부르는 이름 · 인자 · 반환은 그대로 두고, 인자는 기본값을 붙여 뒤에만 더한다.`);
     }
   }
@@ -374,6 +425,77 @@ const PUBLIC_RPCS: Record<string, { args: string; returns: string }> = {
     }
   }
   ok('직접 쓰기·피드백 읽기 거부');
+}
+
+/* ── 1-2. schema.sql = migrations/ 를 차례로 적용한 결과(실서버) ───────── */
+
+const clip = (v: unknown) => {
+  const s = JSON.stringify(v) ?? 'null';
+  return s.length > 160 ? s.slice(0, 160) + '…' : s;
+};
+
+/** tj_ 함수 · 테이블의 정의 · 권한 · 정책을 서로 견줄 수 있는 모양으로 읽는다(함수 본문은 공백을 접는다). */
+async function catalog(pg: PGlite): Promise<Map<string, Record<string, unknown>>> {
+  const acl = (col: string, kind: string, owner: string) => `(select array_agg(g order by g) from (
+      select (case when a.grantee = 0 then 'PUBLIC' else a.grantee::regrole::text end) || ':' || a.privilege_type as g
+      from aclexplode(coalesce(${col}, acldefault(${kind}, ${owner}))) a) s)`;
+  const list = (sql: string) => `(select array_agg(x order by x) from (${sql}) s)`;
+  const fns = await pg.query<{ k: string; v: Record<string, unknown> }>(`
+    select '함수 ' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' as k, json_build_object(
+      '인자', pg_get_function_arguments(p.oid), '반환', pg_get_function_result(p.oid), '언어', l.lanname,
+      'security definer', p.prosecdef, 'volatility', p.provolatile, 'strict', p.proisstrict, '설정', p.proconfig,
+      '권한', ${acl('p.proacl', `'f'`, 'p.proowner')}, '본문', btrim(regexp_replace(p.prosrc, '\\s+', ' ', 'g'))) as v
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace join pg_language l on l.oid = p.prolang
+    where n.nspname = 'public' and left(p.proname, 2) = 'tj'`);
+  const rels = await pg.query<{ k: string; v: Record<string, unknown> }>(`
+    select '테이블 ' || c.relname as k, json_build_object(
+      '종류', c.relkind, 'RLS', c.relrowsecurity, 'force RLS', c.relforcerowsecurity, 'replica identity', c.relreplident,
+      '권한', ${acl('c.relacl', `(case when c.relkind = 'S' then 's' else 'r' end)::"char"`, 'c.relowner')},
+      '열', ${list(`select a.attname || ' ' || format_type(a.atttypid, a.atttypmod) || case when a.attnotnull then ' not null' else '' end
+          || coalesce(' default ' || pg_get_expr(d.adbin, d.adrelid), '') || coalesce(' acl ' || a.attacl::text, '') as x
+        from pg_attribute a left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
+        where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped`)},
+      '제약', ${list(`select conname || ' ' || pg_get_constraintdef(oid) as x from pg_constraint where conrelid = c.oid`)},
+      '인덱스', ${list(`select pg_get_indexdef(indexrelid) as x from pg_index where indrelid = c.oid`)},
+      '정책', ${list(`select polname || ' ' || polcmd::text || case when polpermissive then '' else ' restrictive' end || ' to '
+          || (select string_agg(case when r = 0 then 'PUBLIC' else r::regrole::text end, ',' order by r) from unnest(polroles) r)
+          || ' using ' || coalesce(pg_get_expr(polqual, polrelid), '-') || ' check ' || coalesce(pg_get_expr(polwithcheck, polrelid), '-') as x
+        from pg_policy where polrelid = c.oid`)},
+      '트리거', ${list(`select pg_get_triggerdef(t.oid) as x from pg_trigger t where t.tgrelid = c.oid and not t.tgisinternal`)},
+      '뷰', case when c.relkind in ('v', 'm') then pg_get_viewdef(c.oid) end,
+      'Realtime', exists (select 1 from pg_publication_tables pt
+        where pt.pubname = 'supabase_realtime' and pt.schemaname = 'public' and pt.tablename = c.relname)) as v
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and left(c.relname, 3) = 'tj_' and c.relkind in ('r', 'p', 'v', 'm', 'S', 'f')`);
+  return new Map([...fns.rows, ...rels.rows].map((r) => [r.k, r.v]));
+}
+
+// 대조는 schema.sql 을 빈 DB 에 올려 하지만, 공유 DB 에는 마이그레이션이 차례로 쌓인다. 둘이 어긋나면(마이그레이션을
+// 빠뜨림 · 옛 시그니처를 drop 하지 않아 오버로드가 남음 · 회수를 빠뜨림 · 본문이 다름) 여기의 대조가 실서버를 말해 주지 못한다.
+{
+  const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql')).sort();
+  const replay = await makeDb(files.map((f) => readFileSync(join(MIGRATIONS_DIR, f), 'utf8')));
+  try {
+    const want = await catalog(db);
+    const got = await catalog(replay);
+    const diffs: string[] = [];
+    for (const k of [...new Set([...want.keys(), ...got.keys()])].sort()) {
+      const a = want.get(k);
+      const b = got.get(k);
+      if (!a || !b) diffs.push(`${k}: ${a ? 'migrations/ 에 없음' : 'migrations/ 에만 있음'}`);
+      else for (const field of Object.keys(a)) {
+        if (!same(a[field], b[field])) diffs.push(`${k} 의 ${field}: schema.sql ${clip(a[field])} / migrations ${clip(b[field])}`);
+      }
+    }
+    for (const d of diffs.slice(0, 10)) fail(`schema.sql ≠ migrations/ — ${d}`);
+    if (diffs.length > 10) fail(`schema.sql ≠ migrations/ — 그 밖에 ${diffs.length - 10}건`);
+    if (diffs.length) {
+      console.error('  → schema.sql 을 고쳤으면 같은 변경을 새 마이그레이션(supabase/migrations/)에도 넣는다. 인자 목록을 바꿨다면 마이그레이션에서 옛 시그니처를 drop function 한다.');
+    }
+    ok(`schema.sql = migrations/ ${files.length}개를 차례로 적용한 결과(실서버) — 함수 · 테이블 ${want.size}개`);
+  } finally {
+    await replay.close();
+  }
 }
 
 /* ── 2. tj_can_step 전수(2×5×12×12) ───────────────────────────────────── */
@@ -495,13 +617,18 @@ let exhaustivePositions = 0;
 let exhaustiveCalls = 0;
 const hasMoveSamples: { board: number[]; hand: number[] }[] = [];
 
+/** 국면별 새 인스턴스의 원본(Supabase 흉내 + schema.sql). 오류를 내지 않고 clone() 에만 쓴다 — 클론은 처음부터 올리는 것보다
+ *  몇 배 빠르고(0.5초 / 3초), 오류 스택 누수도 클론마다 새로 센다. */
+let template: PGlite | undefined;
+
 /** 지금 국면을 새 인스턴스로 옮겨 가능한 모든 tj_play 인자를 넣어 본다 — 서버가 받는 수 = legalMoves, 결과 = applyMove. */
 async function exhaustive(ctx: string, gMain: Game, s: GameState) {
   exhaustivePositions++;
   const src = (await su('select board, hand, turn, move_count from public.tj_rooms where id = $1', [gMain.id]))[0];
   const srcCounts = await positions(gMain.id);
+  template ??= await makeDb();
   const mainDb = db;
-  db = await makeDb();
+  db = (await template.clone()) as PGlite;
   try {
     const g = await newGame();
     await su('update public.tj_rooms set board = $1, hand = $2, turn = $3, move_count = $4 where id = $5', [
@@ -515,7 +642,8 @@ async function exhaustive(ctx: string, gMain: Game, s: GameState) {
   }
 }
 
-/** 후보마다 독립 트랜잭션(begin … rollback)이다 — PGlite 는 savepoint 안 예외가 쌓이면 스택이 넘친다. */
+/** 후보마다 begin … rollback 으로 착수를 되돌려 다음 후보도 같은 국면에서 둔다. 오류 스택 누수는 트랜잭션 · savepoint 와
+ *  무관하다 — 그래서 exhaustive() 가 국면마다 새 인스턴스를 쓴다(머리말). */
 async function exhaustiveIn(ctx: string, g: Game, s: GameState) {
   const legal = new Map<string, Move>();
   for (const m of legalMoves(s)) legal.set(`${m.from}:${m.to}:${m.piece}`, m);
@@ -571,7 +699,23 @@ async function exhaustiveIn(ctx: string, g: Game, s: GameState) {
   }
 }
 
+/**
+ * 표본 추첨과 상관없이 늘 전수 대조하는 국면 — 추첨은 시드와 엔진의 수에 따라 0개가 될 수도 있다.
+ * 양쪽 차례 · 종류 일부만 든 손패 · 비어 있는 상대 진영 줄(놓기 금지) · 승격 직전의 子 를 담았다.
+ */
+const FIXED: { name: string; spec: StateSpec | null }[] = [
+  { name: '시작 국면', spec: null },
+  { name: '녹 차례 · 손패 相子 · 子 승격 직전', spec: { board: '... Pk. ... K..', hand: ['BP', 'RRB'], turn: 1 } },
+  { name: '적 차례 · 손패 將子 · 子 승격 직전', spec: { board: '..k ... pK. ...', hand: ['RBB', 'RP'], turn: 2 } },
+];
+
 {
+  for (const f of FIXED) {
+    const g = await newGame();
+    const s = f.spec ? makeState(f.spec) : createInitialState();
+    if (f.spec) await inject(g, s);
+    await exhaustive(`고정 ${f.name}`, g, s);
+  }
   const rand = mulberry32(SEED);
   for (let gi = 0; gi < GAMES; gi++) {
     const g = await newGame();
@@ -608,7 +752,7 @@ async function exhaustiveIn(ctx: string, g: Game, s: GameState) {
     }
   }
   ok(`무작위 대국 ${GAMES}판 매 ply 서버 = 로컬 — ${JSON.stringify(stats)}`);
-  ok(`표본 국면 ${exhaustivePositions}개 × 모든 인자(${exhaustiveCalls}번 호출): 받는 수 = legalMoves, 결과 = applyMove`);
+  ok(`국면 ${exhaustivePositions}개(고정 ${FIXED.length} + 표본 ${exhaustivePositions - FIXED.length}) × 모든 인자(${exhaustiveCalls}번 호출): 받는 수 = legalMoves, 결과 = applyMove`);
 }
 
 /* ── 6. tj_has_move · tj_pos_key 대조 ─────────────────────────────────── */
@@ -669,6 +813,8 @@ async function backdate(sql: string, params: unknown[]) {
   if (pl[0].display_name.length !== 24 || pl[0].display_name.startsWith(' ')) fail('이름 정리(trim·24자) 안 됨: ' + pl[0].display_name);
   // 비회원은 RLS 로 방이 안 보인다
   if ((await room(guest, c.room_id)) !== undefined) fail('비회원에게 방이 보임');
+  const seats = await asUser(guest, 'authenticated', async () => (await db.query('select 1 from public.tj_room_players where room_id = $1', [c.room_id])).rows);
+  if (seats.length !== 0) fail('비회원에게 좌석이 보임');
   await expectErr('시작 전 착수', host, 'tj_play', { p_room: c.room_id, p_from: 7, p_to: 4, p_piece: 4 }, 'not playing');
   await expectErr('혼자 시작', host, 'tj_start_game', { p_room: c.room_id }, 'need 2 players');
   await expectErr('없는 코드', guest, 'tj_join_room', { p_code: 'NOPE00', p_display_name: 'g' }, 'room not found');
@@ -700,6 +846,7 @@ async function backdate(sql: string, params: unknown[]) {
   if (r?.status !== 'finished' || r.win_reason !== 'timeout' || r.winner_seat !== redSeat) fail(`시간초과 결과 ${r?.status} ${r?.win_reason} ${r?.winner_seat}`);
   await rpc(greenUid, 'tj_resign', { p_room: c.room_id }); // 끝난 방 기권은 그대로
   if ((await room(guest, c.room_id))?.win_reason !== 'timeout') fail('끝난 방 기권이 결과를 바꿈');
+  await expectErr('끝난 방에 착수', greenUid, 'tj_play', { p_room: c.room_id, p_from: 7, p_to: 4, p_piece: 4 }, 'not playing');
   await expectErr('끝난 방 비회원 참가', third, 'tj_join_room', { p_code: c.code, p_display_name: 't' }, 'room closed');
   const rejoin = await rpc<Entered>(host, 'tj_join_room', { p_code: c.code, p_display_name: 'h2' });
   if (rejoin.seat !== 0) fail('끝난 방 재접속 좌석');
@@ -874,6 +1021,7 @@ async function backdate(sql: string, params: unknown[]) {
 }
 
 await db.close();
+await template?.close();
 const secs = ((Date.now() - t0) / 1000).toFixed(1);
 console.log(`\n${failures === 0 ? '✅ 전부 통과' : `❌ 실패 ${failures}건`} (${secs}초)`);
 process.exit(failures === 0 ? 0 : 1);

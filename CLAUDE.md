@@ -74,8 +74,9 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
   `on all ... in schema`, `alter default privileges`, `create extension`, 다른 게임 객체(`rooms`·`room_players`·`leaderboard`·
   `feedback`·`room_status`·`nmm_*`) 변경은 금지.
 - SQL 을 바꿀 때(#4 의 적용 절차): 새 마이그레이션(`supabase/migrations/<version>_<name>.sql`) + `schema.sql` 누적본 갱신 →
-  `npm run test:sql -- --deep` 로 로컬 대조 → **적용 전에 SQL 전문을 보여 주고 승인을 받는다**(MCP `apply_migration`·`execute_sql` 의 DDL 포함) → 비-tj 객체 권한·정의
-  스냅샷 → 적용 → 스냅샷이 그대로인지와 tj_ 권한 매트릭스를 확인한다.
+  `npm run test:sql -- --deep` 로 로컬 대조(둘이 같은 결과를 내는지도 본다) → **적용 전에 SQL 전문을 보여 주고 승인을 받는다**
+  (MCP `apply_migration`·`execute_sql` 의 DDL 포함) → 비-tj 객체 권한·정의 스냅샷 → 적용 → 스냅샷이 그대로인지와
+  tj_ 권한 매트릭스를 확인한다.
 - `multiplayerStore.ts` 는 쓰기를 RPC 로만 한다. 읽기는 Realtime 구독과 회원 SELECT(RLS) 재조회·폴링이라
   `tj_rooms`·`tj_room_players` 의 authenticated `select` 권한과 select 정책을 빼면 안 된다(Realtime 전달도 이것으로 걸러진다).
   보드 클릭은 솔로와 같은 `core/view.resolveClick` 으로 해석한다.
@@ -85,14 +86,19 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
 - 채팅은 테이블 없이 Realtime **broadcast**(채널 `tj:<roomId>`, 이벤트 `chat`)만 쓴다. 받은 payload 는 `toChatMessage` 로 검증한다.
 - **규칙 일치 검증**은 두 가지다. `src/core` 나 plpgsql 규칙을 고쳤으면 둘 다 돌릴 것.
   - `npm run test:sql`(`scripts/sql-parity.ts`) — PGlite(WASM Postgres)에 Supabase 흉내(롤·`auth.uid()`·기본 ACL·pgcrypto)를
-    깔고 `schema.sql` 을 올려 권한 매트릭스, `tj_can_step` 전수, 판정 순서, 무작위 대국 매 ply, 표본 국면마다 가능한 모든
-    `tj_play` 인자, 방 흐름·제한·CHECK 를 대조한다. DB·비밀값이 없어 CI 가 PR 마다 빠른 모드를 돌린다.
-    `--sql <파일>` 로 적용 전 초안도 본다. PGlite 0.5.8 은 SQL 오류마다 스택이 새서(한 인스턴스에서 약 1,870건이면
-    `stack depth limit exceeded`) 오류를 많이 내는 전수 대조는 국면마다 새 인스턴스에서 돌린다.
+    깔고 `schema.sql` 을 빈 DB 에 올려 대조한다: 권한 매트릭스(tj_ 함수·테이블·열 — 허용 목록 밖은 전부 회수돼 있어야 한다),
+    `tj_can_step` 전수, 판정 순서, 무작위 대국 매 ply, 고정·표본 국면마다 가능한 모든 `tj_play` 인자, 방 흐름·제한·CHECK.
+    `migrations/` 를 차례로 적용한 DB(= 실서버)의 tj_ 함수·테이블이 `schema.sql` 과 같은지도 본다(마이그레이션 빠뜨림·
+    남은 오버로드·회수 누락·본문 차이). DB·비밀값이 없어 CI 가 PR 마다 빠른 모드를 돌린다.
+    `--sql <파일>` 은 `schema.sql` 대신 쓸 **전체 누적본**(초안)이다 — 델타 마이그레이션은 받지 않는다.
+    PGlite 0.5.8 은 SQL 오류마다 스택이 새서(한 인스턴스에서 수천 건 — 단순 오류 기준 약 1,870건 — 이면
+    `stack depth limit exceeded`) 오류를 많이 내는 전수 대조는 국면마다 새 인스턴스(템플릿의 `clone()`)에서 돌린다.
   - `npm run e2e:mp`(`scripts/mp-e2e.ts`) — 익명 세션 2개로 **실서버**에서 시나리오와 AI 자가대국을 두며 매 수
     판·손패·차례·직전 수·승패를 대조한다. `--steps-sql` 은 `tj_can_step` 전수 대조 SQL.
 - **공개 RPC 시그니처**(클라이언트가 부르는 `tj_*` 8개의 이름·인자·반환)는 옛 클라이언트(배포 전에 열어 둔 탭·설치한 PWA)와의
-  계약이다. 인자는 기본값을 붙여 뒤에만 더한다. `test:sql` 의 `PUBLIC_RPCS` 표가 이것을 지키게 한다.
+  계약이다. 인자는 기본값을 붙여 뒤에만 더한다. 인자 목록이 바뀐 `create or replace` 는 실서버에서 함수를 바꾸지 않고
+  오버로드를 하나 더 만들어 옛 호출을 'not unique' 로 깨므로, 마이그레이션에서 옛 시그니처를 `drop function` 한 뒤 새로 만들고
+  revoke/grant 를 다시 한다. `test:sql` 의 `PUBLIC_RPCS` 표와 'schema.sql = migrations/' 대조가 이것을 지키게 한다.
 - **⚠️ `.env.local` 이 있으면 e2e 가 확인 없이 실서버에 방·익명 사용자를 만든다.** 서브에이전트·리뷰를 돌릴 때는
   `.env.local` 을 레포 밖으로 치워 둔다. `service_role` 키는 절대 쓰지 않는다(스크립트가 거부한다).
 

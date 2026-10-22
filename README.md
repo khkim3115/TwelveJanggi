@@ -96,13 +96,15 @@ VITE_SUPABASE_ANON_KEY=<anon public key>
 서버(plpgsql)와 클라이언트(`src/core`)가 같은 규칙인지 확인합니다. 먼저 DB 없이 로컬에서:
 
 ```bash
-npm run test:sql                # PGlite(WASM Postgres)에 schema.sql 을 올려 대조 — 빠른 모드(4판 · 표본 국면 5%, 약 15초)
-npm run test:sql -- --deep      # 깊은 모드(60판 · 표본 8%)
-npm run test:sql -- --sql <파일> # 적용 전 SQL 초안으로
+npm run test:sql                # PGlite(WASM Postgres)에 schema.sql 을 올려 대조 — 빠른 모드(4판 · 표본 국면 5% + 고정 국면 3개, 약 25초)
+npm run test:sql -- --deep      # 깊은 모드(60판 · 표본 8%, 약 3–4분)
+npm run test:sql -- --sql <파일> # schema.sql 대신 쓸 전체 누적본(초안)으로 — 델타 마이그레이션은 받지 않습니다
 ```
 
-권한 매트릭스, 공개 RPC 시그니처, `tj_can_step` 전수, 판정 순서, 무작위 대국 매 수, 표본 국면마다 가능한 모든 `tj_play` 인자
-(받는 수 = 클라이언트 합법 수, 결과 = 클라이언트 착수), 방 흐름·제한·CHECK 를 봅니다. PR 마다 CI 가 빠른 모드를 돌립니다.
+권한 매트릭스(허용 목록 밖은 전부 회수돼 있어야 합니다), 공개 RPC 시그니처, `tj_can_step` 전수, 판정 순서, 무작위 대국 매 수,
+고정·표본 국면마다 가능한 모든 `tj_play` 인자(받는 수 = 클라이언트 합법 수, 결과 = 클라이언트 착수), 방 흐름·제한·CHECK 를 보고,
+[`supabase/migrations/`](supabase/migrations) 를 차례로 적용한 결과(= 실서버)가 `schema.sql` 과 같은지도 봅니다.
+PR 마다 CI 가 빠른 모드를 돌립니다.
 
 그다음 실제 프로젝트에서:
 
