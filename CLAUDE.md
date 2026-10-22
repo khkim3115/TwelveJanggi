@@ -87,6 +87,8 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
   보낸 사람·이름은 서버가 `tj_room_players` 에서 채우고, 읽기는 RLS select 와 `postgres_changes` INSERT(`room_id` 필터)다.
   방을 다시 읽을 때마다(진입·재연결·탭 복귀·착수 뒤·폴링) 최근 50개를 읽어 id 로 합친다(`mergeMessages`) — 처음 읽은 지난
   메시지는 안 읽음에 세지 않는다. `tj_chat` 의 replica identity 는 기본값으로 둔다(full 이면 필터·RLS 가 없는 DELETE 이벤트로 본문이 샌다).
+  읽기 정책이 '지금 회원'만 보므로, 대기실에서 누가 나가면(`tj_leave_room`) 그 방 채팅을 지운다 — 같은 코드로 다음에 들어오는
+  사람이 떠난 사람의 대화를 읽지 않게. `tj_send_chat` 은 방 행을 `for key share` 로 잠가 나가기와 줄을 세운다.
 - **규칙 일치 검증**은 두 가지다. `src/core` 나 plpgsql 규칙을 고쳤으면 둘 다 돌릴 것.
   - `npm run test:sql`(`scripts/sql-parity.ts`) — PGlite(WASM Postgres)에 Supabase 흉내(롤·`auth.uid()`·기본 ACL·pgcrypto)를
     깔고 `schema.sql` 을 빈 DB 에 올려 대조한다: 권한 매트릭스(tj_ 함수·테이블·열 — 허용 목록 밖은 전부 회수돼 있어야 한다),

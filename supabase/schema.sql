@@ -508,6 +508,9 @@ begin
 
   if r.status = 'lobby' then
     delete from public.tj_room_players where id = me.id;
+    -- 사람이 바뀌었다 — 대기실 채팅을 지운다. 읽기는 '지금 회원'만 보므로, 남겨 두면 같은 코드로 다음에 들어오는
+    -- 사람이 떠난 사람의 대화를 읽는다(#11). 대국 중·끝난 방은 좌석을 남기므로 그대로 둔다.
+    delete from public.tj_chat where room_id = r.id;
     select count(*) into remaining from public.tj_room_players where room_id = r.id;
     if remaining = 0 then
       update public.tj_rooms set status = 'abandoned' where id = r.id;
@@ -629,6 +632,9 @@ declare
   msg text := regexp_replace(coalesce(p_body, ''), '^\s+|\s+$', '', 'g');
 begin
   if uid is null then raise exception 'not authenticated'; end if;
+  -- 방 행을 잠가 tj_leave_room(for update)과 줄을 세운다 — 나가며 대기실 채팅을 지우는 사이에 회원 확인을 마친
+  -- 메시지가 지운 뒤에 남는 일이 없게. 수 두기와 겹쳐도 짧게 기다릴 뿐이다.
+  perform 1 from public.tj_rooms where id = p_room for key share;
   -- 회원이면 대국 중에 나갔거나(connected = false) 끝난 방이어도 보낼 수 있다.
   select display_name into name from public.tj_room_players where room_id = p_room and user_id = uid;
   if name is null then raise exception 'not a member'; end if;

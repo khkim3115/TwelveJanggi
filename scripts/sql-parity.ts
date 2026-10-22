@@ -1129,8 +1129,39 @@ async function backdate(sql: string, params: unknown[]) {
   await su(`update public.tj_chat set created_at = created_at - interval '11 seconds' where room_id = $1 and user_id = $2`, [g2.id, g2.host]);
   await send(g2.host, g2.id, '10초 뒤에는 다시');
 
+  // 다른 방 회원도 이 방에는 비회원이다 — 좌석이 아예 없는 사람만으로는 방 조건(room_id = p_room)이 빠진 회귀를 못 잡는다
+  if ((await chatOf(g2.host, g.id)).length !== 0) fail('다른 방 회원에게 이 방 채팅이 보임');
+  await expectErr('다른 방 회원 채팅', g2.host, 'tj_send_chat', { p_room: g.id, p_body: 'x' }, 'not a member');
+  if ((await room(g2.host, g.id)) !== undefined) fail('다른 방 회원에게 이 방이 보임');
+  const otherSeats = await asUser(g2.host, 'authenticated', async () => (await db.query('select 1 from public.tj_room_players where room_id = $1', [g.id])).rows);
+  if (otherSeats.length !== 0) fail('다른 방 회원에게 이 방 좌석이 보임');
+
+  // 대기실에서 사람이 바뀌면 채팅을 지운다 — 다음에 들어오는 사람이 떠난 사람의 대화를 읽지 않게.
+  // 사람이 바뀌지 않았으면 먼저 들어온 사람은 방장이 그 전에 남긴 인사를 읽는다.
+  {
+    const host = uid();
+    const a = uid();
+    const lobby = await rpc<Entered>(host, 'tj_create_room', { p_display_name: '방장' });
+    await send(host, lobby.room_id, '어서 오세요');
+    await rpc(a, 'tj_join_room', { p_code: lobby.code, p_display_name: '에이' });
+    if (!(await chatOf(a, lobby.room_id)).some((r) => r.body === '어서 오세요')) fail('먼저 들어온 사람이 방장의 인사를 못 읽음');
+    await send(a, lobby.room_id, '에이의 사적인 말');
+    await rpc(a, 'tj_leave_room', { p_room: lobby.room_id });
+    const c = uid();
+    await rpc(c, 'tj_join_room', { p_code: lobby.code, p_display_name: '씨' });
+    if ((await chatOf(c, lobby.room_id)).length !== 0) fail('대기실에서 나간 손님의 대화가 다음 사람에게 보임');
+    // 방장이 나가도(남은 사람이 방장이 된다) 지운다
+    await send(c, lobby.room_id, '씨의 말');
+    await rpc(host, 'tj_leave_room', { p_room: lobby.room_id });
+    const d = uid();
+    await rpc(d, 'tj_join_room', { p_code: lobby.code, p_display_name: '디' });
+    if ((await chatOf(d, lobby.room_id)).length !== 0) fail('방장이 나간 대기실의 대화가 다음 사람에게 보임');
+  }
+
   // 방마다 최근 200개 — 205개가 쌓인 방에 하나 보내면 가장 오래된 6개가 지워진다
   const g3 = await newGame();
+  const countIn = async (roomId: string) => (await su<{ n: number }>('select count(*)::int n from public.tj_chat where room_id = $1', [roomId]))[0].n;
+  const g2Before = await countIn(g2.id);
   await su(`insert into public.tj_chat(room_id, user_id, display_name, body, created_at)
             select $1::uuid, $2::uuid, '녹녹', 'old' || i, now() - interval '1 hour' from generate_series(1, 205) i`, [g3.id, g3.host]);
   await send(g3.guest, g3.id, '새 메시지');
@@ -1138,6 +1169,7 @@ async function backdate(sql: string, params: unknown[]) {
   if (kept.length !== 200 || kept[0].body !== 'old7' || kept[199].body !== '새 메시지') {
     fail(`채팅 200개 보관 — ${kept.length}개, 처음 '${kept[0]?.body}', 끝 '${kept[199]?.body}'`);
   }
+  if ((await countIn(g2.id)) !== g2Before) fail(`200개 정리가 다른 방 채팅을 건드림 — ${g2Before} → ${await countIn(g2.id)}`);
   // 방이 지워지면 채팅도 함께 지워진다
   await su('delete from public.tj_rooms where id = $1', [g3.id]);
   if ((await su<{ n: number }>('select count(*)::int n from public.tj_chat where room_id = $1', [g3.id]))[0].n !== 0) fail('방을 지워도 채팅이 남음');
