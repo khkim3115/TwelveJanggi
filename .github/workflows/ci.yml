@@ -1,6 +1,6 @@
 name: CI
 
-# PR(대상 main)마다 타입체크 · 테스트 · 빌드. 배포는 main push 때 deploy.yml 이 따로 한다.
+# PR(대상 main)마다 타입체크 · 테스트 · SQL 규칙 대조 · 빌드. 배포는 main push 때 deploy.yml 이 따로 한다.
 on:
   pull_request:
     branches: [main]
@@ -31,5 +31,7 @@ jobs:
       - run: npm run typecheck
       # 강도 회귀(strength.test.ts)는 시간이 아니라 노드 예산으로 돌아 러너 속도와 무관하게 같은 결과가 나온다.
       - run: npm test
+      # 서버(plpgsql)·클라이언트 규칙 일치 — 로컬 Postgres(PGlite) 빠른 모드(4판 · 표본 5%). 깊은 모드(--deep)는 로컬에서.
+      - run: npm run test:sql
       # Supabase Variables 없이 빌드한다(온라인 대전이 꺼진 번들). 배포용 값 확인은 deploy.yml 몫이다.
       - run: npm run build

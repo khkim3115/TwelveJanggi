@@ -21,6 +21,7 @@ npm run dev        # http://localhost:5173
 npm run build      # 타입체크 + vite build → dist/
 npm run preview    # PWA 설치·오프라인은 dev 가 아니라 여기서 확인(dev 에서는 서비스 워커가 꺼져 있다)
 npm test           # vitest — 규칙 계약 · AI 강도 회귀 · 스토어 계약 · 표기 가드
+npm run test:sql   # 서버(plpgsql)·클라이언트 규칙 일치 — 로컬 Postgres(PGlite), 아래 '규칙 일치 검증'
 ```
 
 ## 게임 규칙
@@ -92,7 +93,21 @@ VITE_SUPABASE_ANON_KEY=<anon public key>
 
 ### 규칙 일치 검증
 
-서버(plpgsql)와 클라이언트(`src/core`)가 같은 규칙인지 실제 프로젝트에서 확인합니다.
+서버(plpgsql)와 클라이언트(`src/core`)가 같은 규칙인지 확인합니다. 먼저 DB 없이 로컬에서:
+
+```bash
+npm run test:sql                # PGlite(WASM Postgres)에 schema.sql 을 올려 대조 — 빠른 모드(4판 · 표본 국면 5% + 고정 국면 3개, 약 25초)
+npm run test:sql -- --deep      # 깊은 모드(60판 · 표본 8%, 약 3–4분)
+npm run test:sql -- --sql <파일> # schema.sql 대신 쓸 전체 누적본(초안)으로 — 델타 마이그레이션은 받지 않습니다
+```
+
+권한 매트릭스(허용 목록 밖은 전부 회수돼 있어야 합니다), 공개 RPC 시그니처, `tj_can_step` 전수, 판정 순서, 무작위 대국 매 수,
+고정·표본 국면마다 가능한 모든 `tj_play` 인자(받는 수 = 클라이언트 합법 수, 결과 = 클라이언트 착수), 방 흐름·제한·CHECK 를 보고,
+[`supabase/migrations/`](supabase/migrations) 를 차례로 적용한 결과(= 실서버)가 `schema.sql` 과 같은지도 봅니다
+(`--sql` 초안도 저장소의 마이그레이션과 견주므로, 초안의 마이그레이션을 아직 넣지 않았다면 그 대조는 실패합니다).
+PR 마다 CI 가 빠른 모드를 돌립니다.
+
+그다음 실제 프로젝트에서:
 
 ```bash
 npm run e2e:mp                  # 익명 세션 2개 — 입성·3회 반복·王 잡기·승격·놓기·거부 13종·기권 + AI 자가대국, 매 수 대조
@@ -133,13 +148,13 @@ src/
   lib/         Supabase 클라이언트(지연 로드) · 채팅 · 피드백
   data/        패치노트 · 커뮤니티 링크
 supabase/      schema.sql(진실원본) · migrations/(적용본)
-scripts/       mp-e2e.ts(실서버 규칙 일치) · bench-seats.ts(선후공 실측)
+scripts/       sql-parity.ts(로컬 규칙 일치 — PGlite) · mp-e2e.ts(실서버 규칙 일치) · bench-seats.ts(선후공 실측)
 public/        icon.svg + 생성된 PWA 아이콘
 ```
 
 ## 검증
 
-PR 마다 GitHub Actions(`.github/workflows/ci.yml`)가 타입체크 · 테스트 · 빌드를 돌립니다.
+PR 마다 GitHub Actions(`.github/workflows/ci.yml`)가 타입체크 · 테스트 · SQL 규칙 대조(`test:sql` 빠른 모드) · 빌드를 돌립니다.
 
 - **규칙 계약**(`src/core/*.test.ts`) — 말별 이동, 잡기·손패·놓기 금지 줄, 승격(놓기는 승격 없음), 판정 순서와 겹침
   (王 잡기 > 입성 > 반복 > 둘 수 없음), 시작 국면을 포함한 3회 반복, 국면 키의 진법 계약, undo 완전 복원, 증분 해시 = 전체 재계산.

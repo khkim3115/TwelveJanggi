@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:sql": "tsx scripts/sql-parity.ts",
     "typecheck": "tsc --noEmit",
     "bench:seats": "tsx scripts/bench-seats.ts",
     "e2e:mp": "tsx scripts/mp-e2e.ts",
@@ -21,6 +22,7 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
