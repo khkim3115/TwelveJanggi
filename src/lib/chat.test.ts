@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHAT_KEEP, CHAT_MAX_LEN, appendCapped, sanitizeChatText, toChatMessage } from './chat';
+import { CHAT_COLUMNS, CHAT_KEEP, CHAT_MAX_LEN, mergeMessages, sanitizeChatText, toChatMessage } from './chat';
 import type { ChatMessage } from './chat';
 
 describe('sanitizeChatText (전송 전 정리/검증)', () => {
@@ -25,64 +25,80 @@ describe('sanitizeChatText (전송 전 정리/검증)', () => {
   });
 });
 
-describe('toChatMessage (받은 payload 검증)', () => {
-  const good = { userId: 'u1', displayName: '녹', text: '안녕', ts: 1 };
+describe('toChatMessage (tj_chat 행 검증)', () => {
+  const row = { id: 7, room_id: 'r1', user_id: 'u1', display_name: '녹', body: '안녕', created_at: '2026-10-22T05:00:00.123456+00:00' };
 
-  it('정상 payload 는 그대로', () => {
-    expect(toChatMessage(good)).toEqual(good);
+  it('CHAT_COLUMNS 는 읽어 올 열 목록이다', () => {
+    expect(CHAT_COLUMNS).toBe('id,user_id,display_name,body,created_at');
   });
 
-  it('모양이 다르면 버린다 — 문자열이 아닌 text 를 그리면 화면이 죽는다', () => {
+  it('toChatMessage 는 tj_chat 행을 메시지로 바꾼다', () => {
+    expect(toChatMessage(row)).toEqual({ id: 7, userId: 'u1', displayName: '녹', text: '안녕', ts: Date.UTC(2026, 9, 22, 5, 0, 0, 123) });
+  });
+
+  it('시간대가 없는 created_at 은 UTC 로 읽는다 — 기기 시간대로 읽으면 몇 시간 어긋난다', () => {
+    expect(toChatMessage({ ...row, created_at: '2026-10-22T05:00:00.123456' })?.ts).toBe(Date.UTC(2026, 9, 22, 5, 0, 0, 123));
+  });
+
+  it('모양이 틀린 행은 버린다 — 문자열이 아닌 본문을 그리면 화면이 죽는다', () => {
     expect(toChatMessage(null)).toBeNull();
     expect(toChatMessage('hi')).toBeNull();
-    expect(toChatMessage({ ...good, text: { evil: true } })).toBeNull();
-    expect(toChatMessage({ ...good, userId: 3 })).toBeNull();
-    expect(toChatMessage({ ...good, ts: 'now' })).toBeNull();
-    expect(toChatMessage({ ...good, ts: Number.NaN })).toBeNull();
-    expect(toChatMessage({ ...good, text: '   ' })).toBeNull();
+    expect(toChatMessage({ ...row, id: '7' })).toBeNull();
+    expect(toChatMessage({ ...row, id: Number.NaN })).toBeNull();
+    expect(toChatMessage({ ...row, user_id: 3 })).toBeNull();
+    expect(toChatMessage({ ...row, body: { evil: true } })).toBeNull();
+    expect(toChatMessage({ ...row, created_at: 'x' })).toBeNull();
+    expect(toChatMessage({ ...row, body: '   ' })).toBeNull();
   });
 
-  it('보낸 쪽이 규칙을 어겨도 길이는 다시 자른다', () => {
-    const m = toChatMessage({ ...good, displayName: '가'.repeat(40), text: 'x'.repeat(CHAT_MAX_LEN + 1) });
+  it('길이는 다시 자른다(서버 규칙과 같다)', () => {
+    const m = toChatMessage({ ...row, display_name: '가'.repeat(40), body: 'x'.repeat(CHAT_MAX_LEN + 1) });
     expect(m?.displayName).toHaveLength(24);
     expect(m?.text).toHaveLength(CHAT_MAX_LEN);
   });
 
   it('빈 이름은 익명', () => {
-    expect(toChatMessage({ ...good, displayName: '  ' })?.displayName).toBe('익명');
+    expect(toChatMessage({ ...row, display_name: '  ' })?.displayName).toBe('익명');
   });
 });
 
-describe('appendCapped (메모리 무한 증가 방지)', () => {
-  const msg = (i: number): ChatMessage => ({
-    userId: 'u',
-    displayName: 'n',
-    text: `m${i}`,
-    ts: i,
+describe('mergeMessages (id 로 합치기 · 메모리 상한)', () => {
+  const msg = (id: number): ChatMessage => ({ id, userId: 'u', displayName: 'n', text: `m${id}`, ts: id });
+  const ids = (list: readonly ChatMessage[]) => list.map((m) => m.id);
+
+  it('mergeMessages 는 id 로 중복을 없애고 순서를 맞춘다', () => {
+    const r = mergeMessages([msg(3), msg(1)], [msg(2), msg(3)]);
+    expect(ids(r.messages)).toEqual([1, 2, 3]);
+    expect(r.added).toBe(1);
   });
 
-  it('항목을 끝에 추가한다', () => {
-    const out = appendCapped([msg(1)], msg(2));
-    expect(out.map((m) => m.text)).toEqual(['m1', 'm2']);
+  it('이미 있는 id 는 다시 세지 않는다 — 보낸 뒤 재조회와 실시간 INSERT 가 겹쳐도 한 번', () => {
+    const once = mergeMessages([], [msg(5)]);
+    const twice = mergeMessages(once.messages, [msg(5)]);
+    expect(ids(twice.messages)).toEqual([5]);
+    expect(twice.added).toBe(0);
   });
 
-  it('원본 배열을 변형하지 않는다(불변)', () => {
-    const base = [msg(1)];
-    appendCapped(base, msg(2));
-    expect(base).toHaveLength(1);
+  it(`cap 을 넘으면 오래된 것부터 버린다(기본 ${CHAT_KEEP}개)`, () => {
+    const start = Array.from({ length: CHAT_KEEP }, (_, i) => msg(i + 1));
+    const r = mergeMessages(start, [msg(CHAT_KEEP + 1), msg(CHAT_KEEP + 2)]);
+    expect(r.messages).toHaveLength(CHAT_KEEP);
+    expect(r.messages[0].id).toBe(3);
+    expect(r.messages[CHAT_KEEP - 1].id).toBe(CHAT_KEEP + 2);
+    expect(r.added).toBe(2);
   });
 
-  it(`기본으로 최근 ${CHAT_KEEP}개만 유지한다`, () => {
-    let list: ChatMessage[] = [];
-    for (let i = 0; i < CHAT_KEEP + 20; i++) list = appendCapped(list, msg(i));
-    expect(list).toHaveLength(CHAT_KEEP);
-    // 가장 오래된 것이 버려지고 최신이 끝에 남는다.
-    expect(list[0].ts).toBe(20);
-    expect(list[CHAT_KEEP - 1].ts).toBe(CHAT_KEEP + 19);
+  it('added 는 남은 새 메시지만 센다 — 상한 밖으로 밀려난 옛 메시지는 안 읽음이 될 수 없다', () => {
+    const r = mergeMessages([msg(10), msg(11)], [msg(1), msg(2), msg(12)], 3);
+    expect(ids(r.messages)).toEqual([10, 11, 12]);
+    expect(r.added).toBe(1);
   });
 
-  it('cap 을 직접 지정할 수 있다', () => {
-    const out = appendCapped([msg(1), msg(2), msg(3)], msg(4), 2);
-    expect(out.map((m) => m.text)).toEqual(['m3', 'm4']);
+  it('입력 배열을 바꾸지 않는다(불변)', () => {
+    const list = [msg(1)];
+    const incoming = [msg(2)];
+    mergeMessages(list, incoming);
+    expect(ids(list)).toEqual([1]);
+    expect(ids(incoming)).toEqual([2]);
   });
 });
