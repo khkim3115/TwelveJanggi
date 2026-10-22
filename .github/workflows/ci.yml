@@ -15,7 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # 검사 이름 = 잡 id(check). 저장소 설정에서 필수 검사로 지정할 때 이 이름을 쓴다 — 바꾸면 설정도 함께 고친다.
+  # 검사 이름 = 잡 id(check). main 브랜치 보호의 필수 검사라 이름을 바꾸면 보호 설정도 함께 고친다.
+  # 경로 필터(paths-ignore)를 걸지 않는 것도 같은 이유 — 검사가 안 도는 PR 은 머지가 막힌다.
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 10

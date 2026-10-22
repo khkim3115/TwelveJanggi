@@ -99,7 +99,8 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
 - `main` push 마다 `.github/workflows/deploy.yml` 이 GitHub Pages 로 배포한다(Node 24). repo Variables
   `VITE_SUPABASE_URL`·`VITE_SUPABASE_ANON_KEY` 가 비어 있으면 온라인 대전이 꺼진 채 나가지 않게 빌드가 멈춘다.
 - PR(대상 `main`)마다 `.github/workflows/ci.yml` 이 `npm ci` → typecheck → test → build 를 돌린다(Node 24, `ubuntu-latest`
-  잡 `check` 하나, Supabase 값 없이 빌드).
+  잡 `check` 하나, Supabase 값 없이 빌드). `check` 는 `main` 브랜치 보호의 **필수 검사**다 — 잡 이름을 바꾸거나 경로 필터를
+  걸면 검사가 보고되지 않는 PR 이 머지 대기로 막힌다(바꿀 때는 보호 설정도 함께).
 
 ## Contributing & releases
 
