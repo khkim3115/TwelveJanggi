@@ -54,10 +54,11 @@
 - `npm run typecheck`
 - `npm test`
 - `npm run build`
-- 위 셋은 PR 을 열면 CI(`.github/workflows/ci.yml`)가 다시 돌린다 — 실패하면 머지 버튼에 표시된다.
+- 위 셋과 `npm run test:sql`(빠른 모드)은 PR 을 열면 CI(`.github/workflows/ci.yml`)가 다시 돌린다 — 실패하면 머지 버튼에
+  표시되고, 필수 검사라 머지가 막힌다.
 - 로직 변경은 **테스트 먼저**(TDD 권장). 순수 로직은 `src/**/*.test.ts`(node 환경).
 - `src/core` 를 손댔다면 `src/engine` 강도 회귀 테스트까지 반드시 확인한다.
-- `src/core` 나 `supabase/` 의 규칙을 바꿨다면 `npm run e2e:mp` 로 서버·클라이언트 규칙 일치를 확인한다
-  (실서버에 방·익명 사용자를 만든다 — `README.md` 의 '규칙 일치 검증').
+- `src/core` 나 `supabase/` 의 규칙을 바꿨다면 서버·클라이언트 규칙 일치를 확인한다 — 먼저 로컬에서
+  `npm run test:sql -- --deep`, 그다음 `npm run e2e:mp`(실서버에 방·익명 사용자를 만든다 — `README.md` 의 '규칙 일치 검증').
 - Supabase 스키마는 공유 프로젝트다 — 바꿀 때는 새 마이그레이션 파일과 `supabase/schema.sql` 을 함께 고치고,
   `tj_` 객체 이름을 하나씩 적어 권한을 다룬다(`CLAUDE.md` 의 '멀티플레이').
