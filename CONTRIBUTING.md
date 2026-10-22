@@ -54,6 +54,7 @@
 - `npm run typecheck`
 - `npm test`
 - `npm run build`
+- 위 셋은 PR 을 열면 CI(`.github/workflows/ci.yml`)가 다시 돌린다 — 실패하면 머지 버튼에 표시된다.
 - 로직 변경은 **테스트 먼저**(TDD 권장). 순수 로직은 `src/**/*.test.ts`(node 환경).
 - `src/core` 를 손댔다면 `src/engine` 강도 회귀 테스트까지 반드시 확인한다.
 - `src/core` 나 `supabase/` 의 규칙을 바꿨다면 `npm run e2e:mp` 로 서버·클라이언트 규칙 일치를 확인한다

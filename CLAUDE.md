@@ -87,7 +87,7 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
 - **⚠️ `.env.local` 이 있으면 e2e 가 확인 없이 실서버에 방·익명 사용자를 만든다.** 서브에이전트·리뷰를 돌릴 때는
   `.env.local` 을 레포 밖으로 치워 둔다. `service_role` 키는 절대 쓰지 않는다(스크립트가 거부한다).
 
-## PWA · 배포
+## PWA · 배포 · CI
 
 - `vite-plugin-pwa` 0.21(Vite 6 까지만 지원 — Vite 메이저를 올릴 때 함께 확인), `registerType: 'prompt'`.
   서비스 워커 등록은 `ui/PwaStatus.tsx` 한 곳(새 버전은 사용자가 '업데이트'를 눌러 적용). dev 에서는 꺼져 있다.
@@ -98,6 +98,9 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
 - 아이콘은 `public/icon.svg` 하나가 원본이다(王 은 글꼴이 아니라 획으로 그린다). 고친 뒤 `npm run generate-pwa-assets`.
 - `main` push 마다 `.github/workflows/deploy.yml` 이 GitHub Pages 로 배포한다(Node 24). repo Variables
   `VITE_SUPABASE_URL`·`VITE_SUPABASE_ANON_KEY` 가 비어 있으면 온라인 대전이 꺼진 채 나가지 않게 빌드가 멈춘다.
+- PR(대상 `main`)마다 `.github/workflows/ci.yml` 이 `npm ci` → typecheck → test → build 를 돌린다(Node 24, `ubuntu-latest`
+  잡 `check` 하나, Supabase 값 없이 빌드). `check` 는 `main` 브랜치 보호의 **필수 검사**다 — 잡 이름을 바꾸거나 경로 필터를
+  걸면 검사가 보고되지 않는 PR 이 머지 대기로 막힌다(바꿀 때는 보호 설정도 함께).
 
 ## Contributing & releases
 
