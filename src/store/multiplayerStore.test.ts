@@ -22,21 +22,32 @@ const h = vi.hoisted(() => {
     playersGate: null as Promise<void> | null,
     /** 설정하면 익명 세션 준비가 이 약속이 풀릴 때까지 걸린다(첫 사용의 느린 구간). */
     sessionGate: null as Promise<void> | null,
+    /** 서버 tj_chat 행(읽을 때 room_id 로 거르고 최근 것부터 limit 개). */
+    chat: [] as { id: number; room_id: string; [k: string]: unknown }[],
+    /** 설정하면 채팅 읽기 응답이 이 약속이 풀릴 때까지 늦게 온다(읽는 시점의 행은 그대로). */
+    chatGate: null as Promise<void> | null,
   };
   const rpc = vi.fn(async (_fn: string, _args?: Record<string, unknown>) => fake.rpcResult);
   const supabase = {
     rpc,
     from(table: string) {
       let eqVal = '';
+      const players = async () => {
+        const snapshot = fake.players.filter((p) => p.room_id === eqVal);
+        if (fake.playersGate) await fake.playersGate;
+        return { data: snapshot, error: null };
+      };
       const q = {
         select: () => q,
         eq: (_col: string, val: string) => {
           eqVal = val;
           return q;
         },
-        order: async () => {
-          const snapshot = fake.players.filter((p) => p.room_id === eqVal);
-          if (fake.playersGate) await fake.playersGate;
+        // tj_chat 은 .order(...).limit(n) 으로 이어지고, 좌석은 .order('seat') 에서 끝난다.
+        order: (..._args: unknown[]) => (table === 'tj_chat' ? q : players()),
+        limit: async (n: number) => {
+          const snapshot = fake.chat.filter((m) => m.room_id === eqVal).sort((a, b) => b.id - a.id).slice(0, n);
+          if (fake.chatGate) await fake.chatGate;
           return { data: snapshot, error: null };
         },
         maybeSingle: async () => {
@@ -131,15 +142,23 @@ const PLAYERS = [
   { id: 'p1', room_id: 'r1', user_id: 'you', seat: 1, display_name: '너', is_host: false, connected: true },
 ];
 
-function emit(table: 'tj_rooms' | 'tj_room_players', payload: unknown) {
+function emit(table: 'tj_rooms' | 'tj_room_players' | 'tj_chat', payload: unknown) {
   const handler = h.fake.handlers.find((x) => x.type === 'postgres_changes' && x.filter.table === table);
   if (!handler) throw new Error('구독 없음: ' + table);
   handler.cb(payload);
 }
 
-function emitChat(payload: unknown) {
-  h.fake.handlers.find((x) => x.type === 'broadcast')!.cb({ payload });
-}
+/** 서버 tj_chat 행 — 기본은 상대가 r1 에 보낸 것. */
+const chatRow = (id: number, over: Record<string, unknown> = {}) => ({
+  id,
+  room_id: 'r1',
+  user_id: 'you',
+  display_name: '너',
+  body: `m${id}`,
+  created_at: '2026-10-22T05:00:00+00:00',
+  ...over,
+});
+const unread = () => store().chatCount - store().chatSeen;
 
 const rpcCalls = (fn: string) => h.rpc.mock.calls.filter((c) => c[0] === fn).map((c) => c[1]);
 
@@ -170,6 +189,8 @@ beforeEach(async () => {
   h.fake.rpcResult = { data: null, error: null };
   h.fake.playersGate = null;
   h.fake.sessionGate = null;
+  h.fake.chat = [];
+  h.fake.chatGate = null;
   h.fake.subscribeCb = null;
   h.rpc.mockClear();
   memory.clear();
@@ -504,37 +525,101 @@ describe('착수', () => {
 });
 
 describe('채팅', () => {
-  it('모양이 틀린 payload 는 버리고, 정상 메시지는 쌓으며 받은 수를 센다', async () => {
+  it('들어오면 최근 메시지를 읽되 새 메시지로 세지 않는다', async () => {
+    h.fake.chat = [chatRow(1), chatRow(2), chatRow(3), chatRow(9, { room_id: 'r2' })];
     await enterRoom();
-    emitChat({ userId: 'you', displayName: '너', text: { bad: true }, ts: 1 });
-    emitChat({ userId: 'you', displayName: '너', text: '안녕', ts: 2 });
+    h.fake.subscribeCb!('SUBSCRIBED');
+    await flush();
+    expect(store().messages.map((m) => m.text)).toEqual(['m1', 'm2', 'm3']);
+    expect(unread()).toBe(0);
+  });
+
+  it('실시간 INSERT 는 새 메시지로 센다 — 이 방 · tj_chat INSERT 만 구독한다', async () => {
+    await enterRoom();
+    h.fake.subscribeCb!('SUBSCRIBED');
+    await flush();
+    expect(h.fake.handlers.find((x) => x.filter.table === 'tj_chat')?.filter).toMatchObject({ event: 'INSERT', filter: 'room_id=eq.r1' });
+    expect(h.fake.handlers.some((x) => x.type === 'broadcast')).toBe(false);
+    emit('tj_chat', { eventType: 'INSERT', new: chatRow(4, { body: '안녕' }) });
     expect(store().messages.map((m) => m.text)).toEqual(['안녕']);
+    expect(unread()).toBe(1);
+  });
+
+  it('모양이 틀린 행 · 다른 방 행은 버린다', async () => {
+    await enterRoom();
+    emit('tj_chat', { eventType: 'INSERT', new: chatRow(5, { body: { bad: true } }) });
+    emit('tj_chat', { eventType: 'INSERT', new: chatRow(6, { room_id: 'r2' }) });
+    expect(store().messages).toHaveLength(0);
+    expect(store().chatCount).toBe(0);
+  });
+
+  it('재연결하면 놓친 메시지를 따라잡고 새 메시지로 센다', async () => {
+    h.fake.chat = [chatRow(1)];
+    await enterRoom();
+    h.fake.subscribeCb!('SUBSCRIBED');
+    await flush();
+    h.fake.subscribeCb!('CLOSED');
+    h.fake.chat.push(chatRow(2), chatRow(3));
+    h.fake.subscribeCb!('SUBSCRIBED');
+    await flush();
+    expect(store().messages.map((m) => m.id)).toEqual([1, 2, 3]);
+    expect(unread()).toBe(2);
+  });
+
+  it('보낸 뒤 재조회와 실시간 INSERT 가 겹쳐도 한 번만', async () => {
+    await enterRoom();
+    h.fake.subscribeCb!('SUBSCRIBED');
+    await flush();
+    expect(store().sendChat('   ')).toBe(false);
+    h.fake.chat.push(chatRow(10, { user_id: 'me', display_name: '나', body: 'gg' }));
+    expect(store().sendChat('  gg  ')).toBe(true);
+    await flush();
+    emit('tj_chat', { eventType: 'INSERT', new: chatRow(10, { user_id: 'me', display_name: '나', body: 'gg' }) });
+    expect(rpcCalls('tj_send_chat')).toEqual([{ p_room: 'r1', p_body: 'gg' }]);
+    expect(store().messages.map((m) => [m.id, m.text])).toEqual([[10, 'gg']]);
     expect(store().chatCount).toBe(1);
   });
 
-  it('연결이 끊겨 있으면 보내지 않는다(REST 로 돌면 내 메시지가 내게 돌아오지 않는다)', async () => {
+  it('방을 나간 뒤 도착한 채팅 읽기는 버린다', async () => {
+    await enterRoom();
+    h.fake.subscribeCb!('SUBSCRIBED');
+    await flush();
+    h.fake.chat.push(chatRow(1));
+    let release!: () => void;
+    h.fake.chatGate = new Promise<void>((r) => (release = r));
+    h.fake.subscribeCb!('SUBSCRIBED');
+    await store().leave();
+    release();
+    await flush();
+    expect(store().messages).toHaveLength(0);
+    expect(store().chatCount).toBe(0);
+  });
+
+  it('도배 제한 오류는 오류 줄에 보인다', async () => {
+    await enterRoom();
+    h.fake.subscribeCb!('SUBSCRIBED');
+    await flush();
+    h.fake.rpcResult = { data: null, error: { message: 'too many messages' } };
+    expect(store().sendChat('gg')).toBe(true);
+    await flush();
+    expect(store().error).toBe(humanError({ message: 'too many messages' }));
+    expect(store().error).toContain('너무 빨리');
+  });
+
+  it('연결이 끊겨 있으면 보내지 않는다(입력은 남겨 둔다)', async () => {
     await enterRoom();
     expect(store().sendChat('gg')).toBe(false);
-    expect(h.fake.sent).toHaveLength(0);
+    expect(rpcCalls('tj_send_chat')).toHaveLength(0);
   });
 
   it('읽은 수는 스토어에 둔다 — 창을 다시 그려도 읽은 메시지가 새 메시지로 돌아오지 않고, 방을 나가면 0', async () => {
     await enterRoom();
-    emitChat({ userId: 'you', displayName: '너', text: '1', ts: 1 });
-    emitChat({ userId: 'you', displayName: '너', text: '2', ts: 2 });
+    emit('tj_chat', { eventType: 'INSERT', new: chatRow(1) });
+    emit('tj_chat', { eventType: 'INSERT', new: chatRow(2) });
     store().markChatSeen();
-    emitChat({ userId: 'you', displayName: '너', text: '3', ts: 3 });
-    expect(store().chatCount - store().chatSeen).toBe(1);
+    emit('tj_chat', { eventType: 'INSERT', new: chatRow(3) });
+    expect(unread()).toBe(1);
     await store().leave();
     expect([store().chatCount, store().chatSeen]).toEqual([0, 0]);
-  });
-
-  it('보낼 때는 정리한 문구를 broadcast 로 보낸다', async () => {
-    await enterRoom();
-    h.fake.subscribeCb!('SUBSCRIBED');
-    expect(store().sendChat('   ')).toBe(false);
-    expect(store().sendChat('  gg  ')).toBe(true);
-    expect(h.fake.sent).toHaveLength(1);
-    expect(h.fake.sent[0]).toMatchObject({ type: 'broadcast', event: 'chat', payload: { userId: 'me', displayName: '나', text: 'gg' } });
   });
 });

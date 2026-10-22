@@ -90,10 +90,10 @@ export function ChatPanel() {
         {messages.length === 0 ? (
           <div className="chat-empty">아직 메시지가 없어요. 먼저 인사를 건네 보세요!</div>
         ) : (
-          messages.map((m, i) => {
+          messages.map((m) => {
             const mine = m.userId === myUserId;
             return (
-              <div key={`${m.ts}-${m.userId}-${i}`} className={`chat-msg${mine ? ' me' : ''}`}>
+              <div key={m.id} className={`chat-msg${mine ? ' me' : ''}`}>
                 <div className="chat-meta">
                   <span className="chat-name">{mine ? '나' : m.displayName}</span>
                   <span className="chat-time">{hhmm(m.ts)}</span>

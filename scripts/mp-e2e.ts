@@ -12,6 +12,7 @@
 //  ⑥ 거부 — 시작 전 착수·비방장 시작·차례 아님·상대 진영 놓기·빈 손패·점유 칸·상대 말 이동·틀린 p_piece·범위 밖,
 //     RLS(비회원 읽기)·직접 쓰기·내부 함수 호출
 //  ⑦ 기권
+//  ⑧ 채팅 — 비회원은 읽지도 보내지도 못하고 직접 쓰기도 거부, 보낸 사람 · 이름은 서버가 채운다
 // ⚠️ 실제 DB 에 방을 만든다(끝난 방은 tj_create_room 이 24시간 뒤 정리한다). anon 키로만 돈다 — 서비스 롤 키 금지.
 
 import { readFileSync } from 'node:fs';
@@ -331,6 +332,36 @@ async function selfPlay(i: number, difficulty: Difficulty) {
   await leaveBoth(g);
 }
 
+/** ⑧ 채팅(#11): 비회원은 읽지도 보내지도 못하고, 보낸 사람 · 이름은 서버가 채운다. 둘 다 나가면 방이 정리될 때 함께 지워진다. */
+async function chatScenario(uidA: string) {
+  console.log('\n⑧ 채팅 — 방 참가자 전용');
+  const created = (await rpc(A, 'tj_create_room', { p_display_name: '앨리스' })) as { room_id: string; code: string };
+  const id = created.room_id;
+  const read = async (c: SupabaseClient) => {
+    const { data, error } = await c.from('tj_chat').select('id,user_id,display_name,body').eq('room_id', id).order('id');
+    if (error) throw new Error('채팅 읽기: ' + error.message);
+    return data as { id: number; user_id: string; display_name: string; body: string }[];
+  };
+  await rpc(A, 'tj_send_chat', { p_room: id, p_body: '  안녕하세요  ' });
+  if ((await read(B)).length === 0) ok('비회원은 채팅을 읽지 못한다(RLS)');
+  else fail('비회원에게 채팅이 보임');
+  await rejects('비회원 채팅 보내기', B, 'tj_send_chat', { p_room: id, p_body: 'x' }, 'not a member');
+  const { error: insertError } = await B.from('tj_chat').insert({ room_id: id, user_id: uidA, display_name: '앨리스', body: '사칭' });
+  if (insertError) ok(`거부 — tj_chat 직접 쓰기 (${insertError.message})`);
+  else fail('tj_chat 직접 쓰기가 통과');
+  await rpc(B, 'tj_join_room', { p_code: created.code, p_display_name: '밥' });
+  const seen = await read(B);
+  if (seen.length === 1 && seen[0].user_id === uidA && seen[0].display_name === '앨리스' && seen[0].body === '안녕하세요') {
+    ok('참가하면 읽는다 — 보낸 사람 · 이름은 서버가 채운 값, 앞뒤 공백 정리');
+  } else fail('채팅 내용 ' + JSON.stringify(seen));
+  await rpc(B, 'tj_send_chat', { p_room: id, p_body: '반가워요' });
+  const both = await read(A);
+  if (both.map((m) => m.body).join('|') === '안녕하세요|반가워요') ok('서로 주고받는다(id 순)');
+  else fail('채팅 순서 ' + JSON.stringify(both));
+  await rpc(A, 'tj_leave_room', { p_room: id });
+  await rpc(B, 'tj_leave_room', { p_room: id });
+}
+
 async function leaveBoth(g: Game) {
   await rpc(g.host, 'tj_leave_room', { p_room: g.id });
   await rpc(g.guest, 'tj_leave_room', { p_room: g.id });
@@ -392,6 +423,8 @@ async function main() {
   if (compare('⑦ 기권', g.row, g.local, null, 0)) ok(`⑦ 기권 — ${JSON.stringify(g.local.result)}`);
   await rejects('끝난 방에 착수', g.bySide[1], 'tj_play', { p_room: g.id, p_from: 4, p_to: 1, p_piece: 1 }, 'not playing');
   await leaveBoth(g);
+
+  await chatScenario(a.data.user!.id);
 
   const games = Number(opt('games', '4'));
   const levels: Difficulty[] = ['normal', 'easy', 'hard', 'normal'];

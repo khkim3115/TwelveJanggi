@@ -83,7 +83,12 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
   Supabase 클라이언트는 `lib/supabase` 를 **동적 import** 로만 불러온다 — 첫 화면(Home 등)은 `lib/env` 만 본다(번들 크기).
 - 동기화: 방 행 `version`(UPDATE 마다 +1)보다 낮은 스냅샷은 버린다. Realtime **DELETE 는 필터가 걸리지 않으므로**
   `payload.old.id` 가 내 방일 때만 처리한다. 구독이 (다시) 붙을 때·탭 복귀·수를 보낸 뒤 방을 다시 읽고, 끊긴 동안은 폴링한다.
-- 채팅은 테이블 없이 Realtime **broadcast**(채널 `tj:<roomId>`, 이벤트 `chat`)만 쓴다. 받은 payload 는 `toChatMessage` 로 검증한다.
+- 채팅은 `tj_chat` 테이블 + `tj_send_chat` RPC 다(#11 — 예전 공개 broadcast 는 누구나 읽고 보낸 사람을 꾸밀 수 있었다).
+  보낸 사람·이름은 서버가 `tj_room_players` 에서 채우고, 읽기는 RLS select 와 `postgres_changes` INSERT(`room_id` 필터)다.
+  방을 다시 읽을 때마다(진입·재연결·탭 복귀·착수 뒤·폴링) 최근 50개를 읽어 id 로 합친다(`mergeMessages`) — 처음 읽은 지난
+  메시지는 안 읽음에 세지 않는다. `tj_chat` 의 replica identity 는 기본값으로 둔다(full 이면 필터·RLS 가 없는 DELETE 이벤트로 본문이 샌다).
+  읽기 정책이 '지금 회원'만 보므로, 대기실에서 누가 나가면(`tj_leave_room`) 그 방 채팅을 지운다 — 같은 코드로 다음에 들어오는
+  사람이 떠난 사람의 대화를 읽지 않게. `tj_send_chat` 은 방 행을 `for key share` 로 잠가 나가기와 줄을 세운다.
 - **규칙 일치 검증**은 두 가지다. `src/core` 나 plpgsql 규칙을 고쳤으면 둘 다 돌릴 것.
   - `npm run test:sql`(`scripts/sql-parity.ts`) — PGlite(WASM Postgres)에 Supabase 흉내(롤·`auth.uid()`·기본 ACL·pgcrypto)를
     깔고 `schema.sql` 을 빈 DB 에 올려 대조한다: 권한 매트릭스(tj_ 함수·테이블·열 — 허용 목록 밖은 전부 회수돼 있어야 한다),
@@ -96,12 +101,15 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
     `stack depth limit exceeded`) 오류를 많이 내는 전수 대조는 국면마다 새 인스턴스(템플릿의 `clone()`)에서 돌린다.
   - `npm run e2e:mp`(`scripts/mp-e2e.ts`) — 익명 세션 2개로 **실서버**에서 시나리오와 AI 자가대국을 두며 매 수
     판·손패·차례·직전 수·승패를 대조한다. `--steps-sql` 은 `tj_can_step` 전수 대조 SQL.
-- **공개 RPC 시그니처**(클라이언트가 부르는 `tj_*` 8개의 이름·인자·반환)는 옛 클라이언트(배포 전에 열어 둔 탭·설치한 PWA)와의
+- **공개 RPC 시그니처**(클라이언트가 부르는 `tj_*` 9개의 이름·인자·반환)는 옛 클라이언트(배포 전에 열어 둔 탭·설치한 PWA)와의
   계약이다. 인자는 기본값을 붙여 뒤에만 더한다. 인자 목록이 바뀐 `create or replace` 는 실서버에서 함수를 바꾸지 않고
   오버로드를 하나 더 만들어 옛 호출을 'not unique' 로 깨므로, 마이그레이션에서 옛 시그니처를 `drop function` 한 뒤 새로 만들고
   revoke/grant 를 다시 한다. `test:sql` 의 `PUBLIC_RPCS` 표와 'schema.sql = migrations/' 대조가 이것을 지키게 한다.
 - **⚠️ `.env.local` 이 있으면 e2e 가 확인 없이 실서버에 방·익명 사용자를 만든다.** 서브에이전트·리뷰를 돌릴 때는
   `.env.local` 을 레포 밖으로 치워 둔다. `service_role` 키는 절대 쓰지 않는다(스크립트가 거부한다).
+- 단위 테스트(vitest)는 `.env*` 를 읽지 않는다(`vitest.config.ts` 의 `envDir`, `src/lib/env.test.ts` 가 지킨다). #11 에서 스토어의
+  동시 `import('../lib/supabase')` 가 vitest mock 을 새게 해 테스트가 실서버로 읽기 요청을 보낸 적이 있다 — 그래서 스토어는
+  `loadSupabase()` 의 import 약속 하나를 나눠 쓴다. 동적 import 를 새로 만들 때도 같은 약속을 쓴다.
 
 ## PWA · 배포 · CI
 

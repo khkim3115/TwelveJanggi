@@ -27,16 +27,23 @@ import {
   type WinReason,
 } from '../core/gameState';
 import { resolveClick, type Selection } from '../core/view';
-import { appendCapped, sanitizeChatText, toChatMessage, type ChatMessage } from '../lib/chat';
+import { CHAT_COLUMNS, CHAT_KEEP, mergeMessages, sanitizeChatText, toChatMessage, type ChatMessage } from '../lib/chat';
 
 /**
  * Supabase 클라이언트를 불러온다. 청크를 못 받으면(오프라인·배포 뒤 남은 옛 탭) 브라우저마다 다른 영문 오류 대신
  * 정해 둔 문구로 바꿀 수 있게 표시를 단다 — 실패한 동적 import 는 브라우저가 기억해서 새로고침해야 풀린다.
  */
+/**
+ * Supabase 클라이언트 모듈(동적 import — 첫 화면 번들에서 뺀다). 약속을 하나만 만들어 나눠 쓴다: 동시에 여러 번
+ * import 하면 vitest 의 모듈 mock 이 그중 하나에 진짜 모듈을 돌려주어 단위 테스트가 실서버로 나간 일이 있었다(#11).
+ * 불러오지 못하면 비워 두어 다음 호출이 다시 시도한다.
+ */
+let supabaseModule: Promise<typeof import('../lib/supabase')> | null = null;
 const loadSupabase = () =>
-  import('../lib/supabase').catch(() => {
+  (supabaseModule ??= import('../lib/supabase').catch(() => {
+    supabaseModule = null;
     throw new Error('client load failed');
-  });
+  }));
 
 export type MpStatus = 'lobby' | 'playing' | 'finished' | 'abandoned';
 
@@ -232,6 +239,8 @@ const ERROR_KO: Record<string, string> = {
   'illegal move': '둘 수 없는 수입니다. 판을 다시 불러왔어요.',
   'your turn': '지금은 내 차례입니다.',
   'not timed out yet': '아직 상대의 제한 시간이 남았습니다.',
+  'empty message': '빈 메시지는 보낼 수 없습니다.',
+  'too many messages': '메시지를 너무 빨리 보내고 있어요. 잠시 뒤에 다시 보내 주세요.',
 };
 
 export function humanError(e: unknown): string {
@@ -346,6 +355,8 @@ let session = 0;
 let playersEpoch = 0;
 /** enter() 가 서버 응답(또는 나간 뒤의 자리 반납)을 기다리는 중 — 그동안은 leave() 도 잠금을 풀지 않는다. */
 let entering = false;
+/** 채팅을 한 번이라도 읽어 온 방. 처음 읽은 지난 메시지는 '새 메시지'로 세지 않고, 그 뒤 따라잡은 것은 센다. */
+let chatLoadedFor: string | null = null;
 
 export const useMultiplayerStore = create<MpState>((set, get) => {
   function applyRoom(next: MpRoom) {
@@ -360,6 +371,7 @@ export const useMultiplayerStore = create<MpState>((set, get) => {
     // 순서가 중요하다: removeChannel 은 구독 콜백을 곧바로 CLOSED 로 부른다 — 방 표시와 폴링을 먼저 거둬야
     // 떠난 방의 폴링이 다시 걸리지 않는다.
     currentRoomId = null;
+    chatLoadedFor = null;
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = null;
     if (onVisible && typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible);
@@ -376,9 +388,39 @@ export const useMultiplayerStore = create<MpState>((set, get) => {
     set({ room: null, players: [], selection: null, sending: false, live: false, ...NO_CHAT, error: message });
   }
 
-  /** 방과 좌석을 다시 읽는다. 그 사이 방을 떠났으면 버린다. */
+  /** 채팅을 id 로 합친다. countAsNew 가 아니면(처음 읽은 지난 메시지) 읽은 것으로 친다. */
+  function addChat(incoming: ChatMessage[], countAsNew: boolean) {
+    set((s) => {
+      const { messages, added } = mergeMessages(s.messages, incoming);
+      if (added === 0) return s;
+      return { messages, chatCount: s.chatCount + added, chatSeen: countAsNew ? s.chatSeen : s.chatSeen + added };
+    });
+  }
+
+  /** 최근 채팅을 읽어 합친다 — 끊긴 동안 놓친 메시지도 이 길로 따라잡는다. 그 사이 방을 떠났으면 버린다. */
+  async function loadChat(roomId: string): Promise<void> {
+    const token = session;
+    try {
+      const { supabase } = await loadSupabase();
+      const { data, error } = await supabase
+        .from('tj_chat')
+        .select(CHAT_COLUMNS)
+        .eq('room_id', roomId)
+        .order('id', { ascending: false })
+        .limit(CHAT_KEEP);
+      if (token !== session || currentRoomId !== roomId || error || !data) return;
+      const msgs = (data as unknown[]).map(toChatMessage).filter((m): m is ChatMessage => m !== null);
+      addChat(msgs, chatLoadedFor === roomId);
+      chatLoadedFor = roomId;
+    } catch {
+      // 네트워크 오류 — 다음 재조회에서 다시 읽는다.
+    }
+  }
+
+  /** 방과 좌석(과 채팅)을 다시 읽는다. 그 사이 방을 떠났으면 버린다. */
   async function refetch(roomId: string): Promise<void> {
     const epoch = playersEpoch;
+    const chat = loadChat(roomId);
     try {
       const { supabase } = await loadSupabase();
       const [roomRes, playersRes] = await Promise.all([
@@ -394,6 +436,8 @@ export const useMultiplayerStore = create<MpState>((set, get) => {
       if (playersEpoch === epoch) set({ players: (playersRes.data as PlayerRow[]).map(mapPlayer) });
     } catch {
       // 네트워크 오류 — 구독이 다시 붙을 때·다음 폴링에서 다시 읽는다.
+    } finally {
+      await chat;
     }
   }
 
@@ -416,12 +460,19 @@ export const useMultiplayerStore = create<MpState>((set, get) => {
     set({ ...NO_CHAT, live: false });
     channelClient = supabase;
     channel = supabase
-      .channel(`tj:${roomId}`, { config: { broadcast: { self: true } } })
-      .on('broadcast', { event: 'chat' }, ({ payload }) => {
-        if (currentRoomId !== roomId) return;
-        const msg = toChatMessage(payload);
-        if (msg) set((s) => ({ messages: appendCapped(s.messages, msg), chatCount: s.chatCount + 1 }));
-      })
+      .channel(`tj:${roomId}`)
+      // 채팅은 tj_chat INSERT 로 받는다 — 서버가 RLS 로 회원에게만 보낸다(보낸 사람도 서버가 채운 값).
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'tj_chat', filter: `room_id=eq.${roomId}` },
+        (payload) => {
+          if (currentRoomId !== roomId) return;
+          const row = payload.new as { room_id?: unknown } | null;
+          if (row?.room_id !== roomId) return;
+          const msg = toChatMessage(row);
+          if (msg) addChat([msg], true);
+        },
+      )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'tj_rooms', filter: `id=eq.${roomId}` },
@@ -584,21 +635,24 @@ export const useMultiplayerStore = create<MpState>((set, get) => {
       }
     },
 
-    // 채팅은 테이블 없이 broadcast 만 쓴다(self: true 라 내 메시지도 같은 경로로 들어와 표시된다).
-    // 끊겨 있을 때 보내면 realtime-js 가 REST 로 돌려 보내는데, 그 길로는 내 메시지가 내게 돌아오지 않는다 —
-    // 그래서 연결돼 있을 때만 보낸다.
+    // 채팅은 tj_send_chat 하나로 보낸다 — 보낸 사람 · 이름은 서버가 채운다. 내 메시지도 실시간 INSERT 로 돌아오고,
+    // 보낸 뒤 한 번 다시 읽어 실시간이 늦어도 보이게 한다(id 로 합치므로 두 길로 와도 한 번).
+    // 연결이 끊겨 있으면 보내지 않는다 — 창이 '연결되면 보낼 수 있어요'를 보이고 입력을 남겨 둔다.
     sendChat: (text) => {
       const clean = sanitizeChatText(text);
-      const { myUserId, players, live } = get();
-      if (!clean || !channel || !myUserId || !live) return false;
-      const me = players.find((p) => p.userId === myUserId);
-      const payload: ChatMessage = {
-        userId: myUserId,
-        displayName: me?.displayName || rememberedName() || '익명',
-        text: clean,
-        ts: Date.now(),
-      };
-      void channel.send({ type: 'broadcast', event: 'chat', payload });
+      const roomId = currentRoomId;
+      if (!clean || !roomId || !get().live) return false;
+      const token = session;
+      void (async () => {
+        try {
+          const { supabase } = await loadSupabase();
+          const { error } = await supabase.rpc('tj_send_chat', { p_room: roomId, p_body: clean });
+          if (error) throw error;
+          await loadChat(roomId);
+        } catch (e) {
+          if (token === session && currentRoomId === roomId) set({ error: humanError(e) });
+        }
+      })();
       return true;
     },
 
