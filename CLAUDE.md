@@ -96,7 +96,7 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
     `stack depth limit exceeded`) 오류를 많이 내는 전수 대조는 국면마다 새 인스턴스(템플릿의 `clone()`)에서 돌린다.
   - `npm run e2e:mp`(`scripts/mp-e2e.ts`) — 익명 세션 2개로 **실서버**에서 시나리오와 AI 자가대국을 두며 매 수
     판·손패·차례·직전 수·승패를 대조한다. `--steps-sql` 은 `tj_can_step` 전수 대조 SQL.
-- **공개 RPC 시그니처**(클라이언트가 부르는 `tj_*` 8개의 이름·인자·반환)는 옛 클라이언트(배포 전에 열어 둔 탭·설치한 PWA)와의
+- **공개 RPC 시그니처**(클라이언트가 부르는 `tj_*` 9개의 이름·인자·반환)는 옛 클라이언트(배포 전에 열어 둔 탭·설치한 PWA)와의
   계약이다. 인자는 기본값을 붙여 뒤에만 더한다. 인자 목록이 바뀐 `create or replace` 는 실서버에서 함수를 바꾸지 않고
   오버로드를 하나 더 만들어 옛 호출을 'not unique' 로 깨므로, 마이그레이션에서 옛 시그니처를 `drop function` 한 뒤 새로 만들고
   revoke/grant 를 다시 한다. `test:sql` 의 `PUBLIC_RPCS` 표와 'schema.sql = migrations/' 대조가 이것을 지키게 한다.

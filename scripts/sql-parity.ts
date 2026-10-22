@@ -11,7 +11,7 @@
 // ① 권한 매트릭스(tj_ 함수 · 테이블 · 열) · 공개 RPC 시그니처 · schema.sql = migrations/ 적용 결과 ② tj_can_step 전수 = STEPS
 // ③ 판정 순서 9가지(gameState.test.ts 이식) ④ 시작 국면 시나리오 ⑤ 고정 국면 + 무작위 대국 매 ply + 표본 국면마다
 // 가능한 모든 tj_play 인자(받는 수 = legalMoves, 결과 = applyMove) ⑥ tj_has_move = hasLegalMove · tj_pos_key ↔ computeKey
-// ⑦ 방 흐름 · 오류 문구 · 시간초과 · 나가기 · 끝난 방 · 정리 · 제한 · 1000 ply 상한 · CHECK ⑧ 피드백
+// ⑦ 방 흐름 · 오류 문구 · 시간초과 · 나가기 · 끝난 방 · 정리 · 제한 · 1000 ply 상한 · CHECK ⑧ 피드백 ⑨ 채팅
 //
 // ⚠️ PGlite 0.5.8 은 클라이언트로 올라온 SQL 오류 1건마다 스택이 조금씩 새서, 한 인스턴스에서 수천 건(단순 오류 기준
 // 약 1,870건) 뒤에는 모든 문장이 'stack depth limit exceeded' 로 실패한다(트랜잭션 · savepoint 로도 못 막는다).
@@ -346,6 +346,7 @@ const PUBLIC_RPCS: Record<string, { args: string[]; returns: string }> = {
   tj_claim_timeout: { args: ['p_room uuid'], returns: 'void' },
   tj_leave_room: { args: ['p_room uuid'], returns: 'void' },
   tj_submit_feedback: { args: ['p_kind text', 'p_message text', 'p_contact text', 'p_meta jsonb', 'p_hp text'], returns: 'void' },
+  tj_send_chat: { args: ['p_room uuid', 'p_body text'], returns: 'void' },
 };
 
 /** tj_ 테이블 · 뷰 · 시퀀스에서 anon · authenticated · PUBLIC 에 남겨 둘 권한. 여기 없는 것은 전부 회수돼 있어야 한다. */
@@ -353,6 +354,8 @@ const TABLE_GRANTS: Record<string, string[]> = {
   // 읽기는 Realtime 구독과 회원 SELECT(RLS) 재조회 — 쓰기는 RPC 로만
   tj_rooms: ['authenticated:SELECT'],
   tj_room_players: ['authenticated:SELECT'],
+  // 채팅도 읽기만 — 보내기는 tj_send_chat 이 보낸 사람을 채워 넣는다
+  tj_chat: ['authenticated:SELECT'],
 };
 
 {
@@ -429,6 +432,9 @@ const TABLE_GRANTS: Record<string, string[]> = {
     `truncate public.tj_rooms`,
     `select * from public.tj_feedback`,
     `insert into public.tj_room_players(room_id, user_id, seat, display_name) values ('${u}', '${u}', 0, 'x')`,
+    `insert into public.tj_chat(room_id, user_id, display_name, body) values ('${u}', '${u}', 'x', 'x')`,
+    `update public.tj_chat set body = 'x'`,
+    `delete from public.tj_chat`,
   ]) {
     for (const role of ['anon', 'authenticated'] as const) {
       try {
@@ -1074,6 +1080,74 @@ async function backdate(sql: string, params: unknown[]) {
   const fb = await su('select * from public.tj_feedback where user_id = $1', [u2]);
   if (fb.length !== 1 || fb[0].contact !== null || fb[0].screen !== 'lobby' || fb[0].hint_used !== false) fail('피드백 저장 ' + JSON.stringify(fb[0]));
   ok('피드백 RPC');
+}
+
+/* ── 9. 채팅(#11) ─────────────────────────────────────────────────────── */
+{
+  interface ChatRow {
+    id: number;
+    user_id: string;
+    display_name: string;
+    body: string;
+  }
+  const chatOf = (u: string, room: string) =>
+    asUser(u, 'authenticated', async () => (await db.query<ChatRow>('select * from public.tj_chat where room_id = $1 order by id', [room])).rows);
+  const send = (u: string, room: string, body: string) => rpc(u, 'tj_send_chat', { p_room: room, p_body: body });
+
+  // 보낸 사람은 서버가 채운다 — 이름은 tj_room_players 값, 본문은 앞뒤 공백(탭·줄바꿈 포함)을 지운다
+  const g = await newGame();
+  await send(g.host, g.id, '  \t안녕\n ');
+  const hostName = (await su<{ display_name: string }>('select display_name from public.tj_room_players where room_id = $1 and user_id = $2', [g.id, g.host]))[0].display_name;
+  let rows = await chatOf(g.host, g.id);
+  if (rows.length !== 1 || rows[0].user_id !== g.host || rows[0].display_name !== hostName || rows[0].body !== '안녕') fail('채팅 저장 ' + JSON.stringify(rows));
+  // 200자에서 자른다 — 글자 수 기준이라 이모지도 한 글자
+  await send(g.guest, g.id, '가'.repeat(199) + '😀' + '나');
+  rows = await chatOf(g.guest, g.id);
+  const cut = rows[rows.length - 1].body;
+  if ([...cut].length !== 200 || !cut.endsWith('😀')) fail(`채팅 200자 자르기 — ${[...cut].length}자, 끝 '${cut.slice(-2)}'`);
+  await expectErr('빈 채팅', g.host, 'tj_send_chat', { p_room: g.id, p_body: '  \t ' }, 'empty message');
+  await expectErr('null 채팅', g.host, 'tj_send_chat', { p_room: g.id, p_body: null }, 'empty message');
+  await expectErr('세션 없는 채팅', null, 'tj_send_chat', { p_room: g.id, p_body: 'x' }, 'not authenticated');
+  await expectErr('anon 채팅', g.host, 'tj_send_chat', { p_room: g.id, p_body: 'x' }, 'permission denied', 'anon');
+  const stranger = uid();
+  await expectErr('비회원 채팅', stranger, 'tj_send_chat', { p_room: g.id, p_body: 'x' }, 'not a member');
+  if ((await chatOf(stranger, g.id)).length !== 0) fail('비회원에게 채팅이 보임');
+  if ((await chatOf(g.guest, g.id)).length !== 2) fail('회원에게 채팅이 안 보임');
+  // 대국 중 나간 회원(connected=false)도 회원이다 — 보내고 읽는다. 끝난 방(기권)도 회원은 보낸다.
+  await rpc(g.guest, 'tj_leave_room', { p_room: g.id });
+  await send(g.guest, g.id, '잠깐 나갔다');
+  if (!(await chatOf(g.guest, g.id)).some((r) => r.body === '잠깐 나갔다')) fail('대국 중 나간 회원의 채팅');
+  await rpc(g.uidOf[1], 'tj_resign', { p_room: g.id });
+  await send(g.host, g.id, 'gg');
+  if (!(await chatOf(g.host, g.id)).some((r) => r.body === 'gg')) fail('끝난 방의 채팅');
+
+  // 도배 제한 — 같은 방 · 같은 사용자 10초에 10개(상대는 따로 센다)
+  const g2 = await newGame();
+  for (let i = 0; i < 10; i++) await send(g2.host, g2.id, 'm' + i);
+  await expectErr('채팅 도배', g2.host, 'tj_send_chat', { p_room: g2.id, p_body: 'm10' }, 'too many messages');
+  await send(g2.guest, g2.id, '상대는 따로 센다');
+  await su(`update public.tj_chat set created_at = created_at - interval '11 seconds' where room_id = $1 and user_id = $2`, [g2.id, g2.host]);
+  await send(g2.host, g2.id, '10초 뒤에는 다시');
+
+  // 방마다 최근 200개 — 205개가 쌓인 방에 하나 보내면 가장 오래된 6개가 지워진다
+  const g3 = await newGame();
+  await su(`insert into public.tj_chat(room_id, user_id, display_name, body, created_at)
+            select $1::uuid, $2::uuid, '녹녹', 'old' || i, now() - interval '1 hour' from generate_series(1, 205) i`, [g3.id, g3.host]);
+  await send(g3.guest, g3.id, '새 메시지');
+  const kept = await su<{ body: string }>('select body from public.tj_chat where room_id = $1 order by id', [g3.id]);
+  if (kept.length !== 200 || kept[0].body !== 'old7' || kept[199].body !== '새 메시지') {
+    fail(`채팅 200개 보관 — ${kept.length}개, 처음 '${kept[0]?.body}', 끝 '${kept[199]?.body}'`);
+  }
+  // 방이 지워지면 채팅도 함께 지워진다
+  await su('delete from public.tj_rooms where id = $1', [g3.id]);
+  if ((await su<{ n: number }>('select count(*)::int n from public.tj_chat where room_id = $1', [g3.id]))[0].n !== 0) fail('방을 지워도 채팅이 남음');
+  // Realtime 으로 받는다. replica identity 는 기본값 — full 이면 필터 · RLS 가 걸리지 않는 DELETE 이벤트로 본문이 샌다.
+  if ((await su(`select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'tj_chat'`)).length !== 1) {
+    fail('tj_chat 이 Realtime 발행에 없음');
+  }
+  const ident = (await su<{ r: string }>(`select relreplident as r from pg_class where oid = 'public.tj_chat'::regclass`))[0].r;
+  if (ident !== 'd') fail(`tj_chat replica identity '${ident}' — 기본값(d)이어야 한다`);
+  ok('채팅 — 보낸 사람 · 공백 · 200자 · 권한 · 나간 회원 · 끝난 방 · 도배 · 200개 보관 · 방과 함께 삭제');
 }
 
 await db.close();
