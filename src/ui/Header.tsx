@@ -1,5 +1,5 @@
 // 모든 화면 공통 상단 바: 브랜드 + (홈/화면별 추가요소) + 테마전환·도움말·패치노트·피드백·앱 설치·설정.
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { useAppStore } from '../store/appStore';
 import { useGameStore } from '../store/gameStore';
 import { LATEST_VERSION } from '../data/changelog';
@@ -38,8 +38,11 @@ export function Header({ title, subtitle, showHome, showSettings, autoHelp, chil
   const feedbackOpen = useAppStore((s) => s.feedbackOpen);
   const setFeedbackOpen = useAppStore((s) => s.setFeedbackOpen);
   const hasUnseen = seenVersion !== LATEST_VERSION;
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
+  // 창 열림은 앱 스토어에 둔다 — 결과 창이 보고 자기를 미룬다(화면을 바꾸면 setScreen 이 닫는다).
+  const settingsOpen = useAppStore((s) => s.settingsOpen);
+  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
+  const helpOpen = useAppStore((s) => s.helpOpen);
+  const setHelpOpen = useAppStore((s) => s.setHelpOpen);
 
   // 처음 방문한 사용자에게는 도움말(규칙)을 한 번 자동으로 띄운다 — 규칙을 모르는 게임이라 특히 필요.
   useEffect(() => {
@@ -49,7 +52,7 @@ export function Header({ title, subtitle, showHome, showSettings, autoHelp, chil
     } catch {
       // localStorage 사용 불가(사파리 사생활 모드 등) — 자동 표시만 생략.
     }
-  }, [autoHelp]);
+  }, [autoHelp, setHelpOpen]);
 
   // 새 버전이 나오면(이전에 확인한 적 있는 사용자 한정) 최초 1회 패치노트를 자동으로 띄운다.
   useEffect(() => {

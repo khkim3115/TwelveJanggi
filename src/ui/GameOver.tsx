@@ -1,11 +1,11 @@
 // 솔로 결과 화면. 승패 이유까지 한국어로 풀어 준다(왜 끝났는지 모르면 배울 수 없으니).
 // '판 보기'로 창을 접으면 마지막 국면을 그대로 둔 채 판 위에 짧은 결과 줄만 남긴다.
-import { useRef, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { DEFAULT_RULES, ONLINE_MAX_PLIES } from '../core/rules';
 import type { DrawReason, GameResult, Player, WinReason } from '../core/gameState';
 import { SIDE_LABEL } from '../core/view';
 import { DIFFICULTY_LABEL } from '../engine/ai';
-import { useAppStore } from '../store/appStore';
+import { isPanelOpen, useAppStore } from '../store/appStore';
 import { useGameStore } from '../store/gameStore';
 import { useDialog } from './useDialog';
 
@@ -48,6 +48,12 @@ function GameOverView({ result }: { result: GameResult }) {
   const ply = useGameStore((s) => s.state.ply);
   const newGame = useGameStore((s) => s.newGame);
   const setScreen = useAppStore((s) => s.setScreen);
+  // 도움말·설정·패치노트·피드백이 열린 채 판이 끝나면 결과 창은 그 창이 닫힌 뒤에 띄운다 — aria-modal 대화상자가
+  // 둘이 되지 않게, 쓰던 피드백이 날아가지 않게. (차례 배너는 승패를 알리지 않는다 — '게임이 끝났습니다.' 뿐이다.)
+  const panelOpen = useAppStore(isPanelOpen);
+  // 미뤄서 뜨는 결과 창은 제목에 초점을 둔다 — 창을 닫은 Enter 가 이어져 '다시 하기'를 누르지 않게.
+  // 이 컴포넌트는 판이 끝날 때마다 generation key 로 한 번 마운트되므로 처음 값이 곧 '미뤘는가'다.
+  const [deferred] = useState(panelOpen);
   const [peek, setPeek] = useState(false);
 
   const { title, detail } = resultText(result, humanSeat);
@@ -73,12 +79,14 @@ function GameOverView({ result }: { result: GameResult }) {
       </div>
     );
   }
+  if (panelOpen) return null;
   return (
     <OverDialog
       title={title}
       detail={detail}
       tone={tone}
       chips={chips}
+      focusTitle={deferred}
       onPeek={() => setPeek(true)}
       onAgain={() => newGame()}
       onMenu={() => setScreen('home')}
@@ -116,15 +124,27 @@ export function OverDialog({
   onMenu,
 }: OverDialogProps) {
   const titleRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const detailId = useId();
   // ESC 는 창을 접어 판을 보여 준다(결과 자체는 그대로).
   const cardRef = useDialog<HTMLDivElement>(onPeek, focusTitle ? titleRef : undefined);
+  // 승패와 이유를 대화상자 설명으로 잇는다 — 첫 초점이 버튼이어도 낭독기가 결과를 읽는다.
   return (
     <div className="over">
-      <div ref={cardRef} className="over-card" role="dialog" aria-modal="true" aria-label="게임 결과">
-        <div ref={titleRef} className={`over-title over-${tone}`} tabIndex={focusTitle ? -1 : undefined}>
+      <div
+        ref={cardRef}
+        className="over-card"
+        role="dialog"
+        aria-modal="true"
+        aria-label="게임 결과"
+        aria-describedby={`${titleId} ${detailId}`}
+      >
+        <div ref={titleRef} id={titleId} className={`over-title over-${tone}`} tabIndex={focusTitle ? -1 : undefined}>
           {title}
         </div>
-        <p className="over-detail">{detail}</p>
+        <p id={detailId} className="over-detail">
+          {detail}
+        </p>
         <div className="over-meta">
           {chips.map((c) => (
             <span key={c} className="chip">
