@@ -116,7 +116,7 @@ export function Lobby() {
             방을 만들면 6자리 코드가 나옵니다. 친구에게 코드를 알려 주면 같은 방에서 1:1 로 둘 수 있어요.
           </p>
           {error && (
-            <div className="mp-error" role="alert">
+            <div className="error-box" role="alert">
               {error}
             </div>
           )}
@@ -174,7 +174,7 @@ export function Lobby() {
           </button>
           <ConnectionNote />
           {error && (
-            <div className="mp-error" role="alert">
+            <div className="error-box" role="alert">
               {error}
             </div>
           )}

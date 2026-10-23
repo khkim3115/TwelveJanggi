@@ -152,7 +152,7 @@ export function OverDialog({
             </span>
           ))}
         </div>
-        <div className="over-actions">
+        <div className="modal-actions over-actions">
           <button className="btn-primary" onClick={onAgain}>
             {againLabel}
           </button>

@@ -75,7 +75,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
           <button className="btn-primary" onClick={startFresh}>
             이 설정으로 새 게임
           </button>
-          <button className="pn-close" onClick={onClose}>
+          <button className="btn-ghost" onClick={onClose}>
             닫기
           </button>
         </div>

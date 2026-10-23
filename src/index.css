@@ -198,8 +198,7 @@ a {
 
 /* ── 버튼 ─────────────────────────────────────────────────────────────── */
 
-.btn-primary,
-.mp-primary {
+.btn-primary {
   background: var(--accent);
   color: var(--on-accent);
   border: none;
@@ -209,8 +208,7 @@ a {
   transition: filter 0.15s;
 }
 
-.btn-primary:hover:not(:disabled),
-.mp-primary:hover:not(:disabled) {
+.btn-primary:hover:not(:disabled) {
   filter: brightness(1.1);
 }
 
@@ -220,10 +218,7 @@ a {
   font-size: 1rem;
 }
 
-.btn-ghost,
-.ghost-btn,
-.settings-close,
-.pn-close {
+.btn-ghost {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 11px;
@@ -231,10 +226,7 @@ a {
   transition: background 0.15s, border-color 0.15s;
 }
 
-.btn-ghost:hover:not(:disabled),
-.ghost-btn:hover:not(:disabled),
-.settings-close:hover,
-.pn-close:hover {
+.btn-ghost:hover:not(:disabled) {
   background: var(--surface-2);
   border-color: var(--accent);
 }
@@ -573,8 +565,8 @@ a {
   justify-content: center;
 }
 
-.over-actions,
-.go-actions {
+/* 창 아래 버튼 줄(결과 창 · 피드백 창). 결과 창은 over-actions 로 버튼 폭을 나눠 갖는다. */
+.modal-actions {
   display: flex;
   gap: 8px;
   width: 100%;
@@ -795,7 +787,7 @@ a {
   font-size: 0.72rem;
 }
 
-.mp-error {
+.error-box {
   background: rgba(242, 85, 90, 0.12);
   border: 1px solid var(--danger);
   color: var(--danger-text);
@@ -1406,14 +1398,14 @@ span.tray-tile {
   border: 0;
 }
 
-.mp-error-row {
+.error-box-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 
-.mp-error-close {
+.error-box-close {
   background: transparent;
   border: none;
   color: inherit;
