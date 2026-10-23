@@ -39,13 +39,17 @@ function declarations(body: string): [string, string][] {
 
 const RULES_PARSED = topLevelRules(CSS);
 
-/** 선택자 sel 이 들어 있는 맨 바깥 규칙들 가운데 마지막으로 prop 을 정한 값(같은 우선순위에서는 뒤가 이긴다). */
+/**
+ * 선택자 sel 이 들어 있는 맨 바깥 규칙들 가운데 마지막으로 prop 을 정한 값(같은 우선순위에서는 뒤가 이긴다).
+ * '.a.on .b' 처럼 자손 선택자에 맞는 규칙이 없으면 마지막 단순 선택자('.b')의 값으로 내려간다(그 요소가 실제로 받는 값).
+ */
 function ruleValue(sel: string, props: string[]): string {
   let found: string | undefined;
   for (const [sels, body] of RULES_PARSED) {
     if (!sels.includes(sel)) continue;
     for (const [p, v] of declarations(body)) if (props.includes(p)) found = v;
   }
+  if (found === undefined && /\s/.test(sel)) return ruleValue(sel.split(/\s+/).pop()!, props);
   if (found === undefined) throw new Error(`${sel} 에 ${props.join('/')} 가 없다`);
   return found;
 }
@@ -72,29 +76,50 @@ function resolve(t: Theme, spec: string): string {
   return /^#[0-9a-f]{3}$/i.test(v) ? `#${[...v.slice(1)].map((c) => c + c).join('')}` : v;
 }
 
-function luminance(hex: string): number {
+type Rgb = [number, number, number];
+/** 바탕: 색 하나, 또는 [반투명 덮개, 그 아래 바탕](예: 고른 줄의 --accent-soft 가 카드 --surface 위에 깔린 것). */
+type Bg = string | [overlay: string, base: string];
+
+const HEX = /^#[0-9a-f]{6}$/i;
+const RGBA = /^rgba\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*\)$/i;
+
+function hexRgb(hex: string): Rgb {
   const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/** 색 명세를 실제 RGB 로. #rrggbb 가 아니면(덮개는 rgba 도 허용) 그 사실을 실패로 남기고 null. */
+function rgbOf(t: Theme, spec: Bg, label: string): Rgb | null {
+  if (typeof spec === 'string') {
+    const v = resolve(t, spec);
+    expect.soft(v, label).toMatch(HEX);
+    return HEX.test(v) ? hexRgb(v) : null;
+  }
+  const base = rgbOf(t, spec[1], `${label} (아래 바탕)`);
+  const top = resolve(t, spec[0]);
+  const m = RGBA.exec(top);
+  expect.soft(HEX.test(top) || m !== null, `${label} (덮개 ${top})`).toBe(true);
+  if (!base || (!HEX.test(top) && !m)) return null;
+  if (!m) return hexRgb(top);
+  const a = Number(m[4]);
+  return [0, 1, 2].map((k) => Number(m[k + 1]) * a + base[k] * (1 - a)) as Rgb;
+}
+
+function luminance([r, g, b]: Rgb): number {
   const lin = (c: number) => {
     const s = c / 255;
     return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
   };
-  return 0.2126 * lin((n >> 16) & 255) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255);
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
 }
 
-/** fg · bg 의 대비. 둘 다 #rrggbb 로 풀리지 않으면 그 사실을 실패로 남기고 null. */
-function contrast(t: Theme, fg: string, bg: string, label: string): number | null {
-  const a = resolve(t, fg);
-  const b = resolve(t, bg);
-  expect.soft(a, `${label}: 글자색`).toMatch(/^#[0-9a-f]{6}$/i);
-  expect.soft(b, `${label}: 바탕색`).toMatch(/^#[0-9a-f]{6}$/i);
-  if (!/^#[0-9a-f]{6}$/i.test(a) || !/^#[0-9a-f]{6}$/i.test(b)) return null;
+function expectReadable(t: Theme, fg: string, bg: Bg, label: string) {
+  const a = rgbOf(t, fg, `${label}: 글자색`);
+  const b = rgbOf(t, bg, `${label}: 바탕색`);
+  if (!a || !b) return;
   const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (hi + 0.05) / (lo + 0.05);
-}
-
-function expectReadable(t: Theme, fg: string, bg: string, label: string) {
-  const r = contrast(t, fg, bg, label);
-  if (r !== null) expect.soft(r, `${label} = ${r.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+  const r = (hi + 0.05) / (lo + 0.05);
+  expect.soft(r, `${label} = ${r.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
 }
 
 describe('글자 대비', () => {
@@ -108,7 +133,7 @@ describe('글자 대비', () => {
 
   it('작은 글자 규칙은 제 바탕 위 4.5:1 이상', () => {
     // [선택자, 바탕들] — null 이면 그 규칙의 background
-    const RULES: [string, string[] | null][] = [
+    const RULES: [string, Bg[] | null][] = [
       ['.pn-chip-feature', ['--surface']],
       ['.pn-chip-improvement', ['--surface']],
       ['.pn-chip-fix', ['--surface']],
@@ -118,6 +143,9 @@ describe('글자 대비', () => {
       ['.pn-new', null],
       ['.chat-badge', null],
       ['.chip-alert', null],
+      // 난이도 설명 — 보통 줄은 --surface-2, 고른 줄은 카드(--surface) 위에 반투명 --accent-soft
+      ['.diff-desc', ['--surface-2']],
+      ['.diff-row.on .diff-desc', [['--accent-soft', '--surface']]],
     ];
     for (const t of [dark, light])
       for (const [sel, bgs] of RULES) {

@@ -367,6 +367,11 @@ a {
   line-height: 1.45;
 }
 
+/* 고른 줄은 반투명 강조색 바탕이라 흐린 글자가 다크에서 4.5:1 에 못 미친다(4.45) — 본문 글자색으로 올린다. */
+.diff-row.on .diff-desc {
+  color: var(--text);
+}
+
 .seg {
   display: flex;
   gap: 6px;
