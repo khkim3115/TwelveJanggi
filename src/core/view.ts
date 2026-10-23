@@ -4,7 +4,7 @@
 // 판 칸 클릭과 손패 클릭을 같은 함수가 받고, 착수는 항상 legalMoves 가 만든 Move 객체를 그대로 돌려준다
 // (승격 플래그 같은 파생값을 화면이 다시 계산하지 않게).
 
-import { CELL_LABEL, ROW_OF, farRow, rotate, type HandKind } from './board';
+import { CELL_COUNT, CELL_LABEL, COLS, COL_OF, ROWS, ROW_OF, farRow, rotate, type HandKind } from './board';
 import {
   DROP,
   findKing,
@@ -139,6 +139,56 @@ export function displayToIndex(display: number, viewer: Player): number {
  */
 export function isUpsideDown(side: Player, viewer: Player): boolean {
   return side !== viewer;
+}
+
+/* ── 판 키보드 이동 ──────────────────────────────────────────────────── */
+//
+// 판은 Tab 순서에 칸 하나만 두고(roving tabindex) 판 안은 방향키로 옮긴다. 방향은 언제나 화면 기준이다 —
+// 적으로 두면 판을 뒤집어 그리므로, 보드 인덱스로 계산하면 ↑ 가 화면 아래로 간다.
+
+/**
+ * 판 칸 사이 키보드 이동. 보드 인덱스를 받아 보드 인덱스를 돌려준다.
+ * 화살표는 화면 기준 한 칸(판 밖이면 제자리 — 줄을 넘어 감기지 않는다), Home·End 는 그 화면 줄의 처음·끝,
+ * ctrl 과 함께면 화면 왼쪽 위·오른쪽 아래. 다루지 않는 키는 null.
+ */
+export function nextFocusCell(cell: number, viewer: Player, key: string, ctrl = false): number | null {
+  const d = indexToDisplay(cell, viewer);
+  const r = ROW_OF[d];
+  const c = COL_OF[d];
+  let next: number;
+  switch (key) {
+    case 'ArrowUp':
+      next = Math.max(r - 1, 0) * COLS + c;
+      break;
+    case 'ArrowDown':
+      next = Math.min(r + 1, ROWS - 1) * COLS + c;
+      break;
+    case 'ArrowLeft':
+      next = r * COLS + Math.max(c - 1, 0);
+      break;
+    case 'ArrowRight':
+      next = r * COLS + Math.min(c + 1, COLS - 1);
+      break;
+    case 'Home':
+      next = ctrl ? 0 : r * COLS;
+      break;
+    case 'End':
+      next = ctrl ? CELL_COUNT - 1 : r * COLS + COLS - 1;
+      break;
+    default:
+      return null;
+  }
+  return displayToIndex(next, viewer);
+}
+
+/**
+ * 판이 처음 초점을 받을 칸: 판 위에서 고른 칸 → 보는 쪽 王 → 화면 아래 가운데.
+ * 한 번 초점을 받은 뒤에는 Board 가 마지막 초점 칸(화면 위치)을 기억해 그 칸을 Tab 순서에 둔다.
+ */
+export function entryCell(s: GameState, viewer: Player, sel: Selection | null): number {
+  if (sel?.kind === 'cell') return sel.cell;
+  const king = findKing(s.board, viewer);
+  return king >= 0 ? king : displayToIndex((ROWS - 1) * COLS + 1, viewer);
 }
 
 /* ── 말 이름 ─────────────────────────────────────────────────────────── */

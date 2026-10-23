@@ -9,9 +9,11 @@ import {
   SIDE_LABEL,
   boardView,
   displayToIndex,
+  entryCell,
   indexToDisplay,
   isUpsideDown,
   moveLabel,
+  nextFocusCell,
   phaseLabel,
   resolveClick,
   resolveSeat,
@@ -180,6 +182,54 @@ describe('화면 방향', () => {
         }
       }
     }
+  });
+});
+
+describe('판 키보드 이동', () => {
+  it('녹으로 보면 방향키가 한 칸씩, 판 밖으로는 나가지 않는다', () => {
+    expect(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].map((k) => nextFocusCell(4, 1, k))).toEqual([1, 7, 3, 5]);
+    expect([
+      nextFocusCell(0, 1, 'ArrowUp'),
+      nextFocusCell(0, 1, 'ArrowLeft'),
+      nextFocusCell(11, 1, 'ArrowDown'),
+      nextFocusCell(11, 1, 'ArrowRight'),
+    ]).toEqual([0, 0, 11, 11]);
+    expect(nextFocusCell(3, 1, 'ArrowLeft')).toBe(3); // 윗줄 끝으로 감기지 않는다
+  });
+
+  it('적으로 보면 방향키는 화면 방향이다', () => {
+    // 적 화면에서 b3(4)는 아래에서 둘째 줄 가운데 — 화면 위는 b2(7), 아래는 b4(1), 왼쪽은 c3(5), 오른쪽은 a3(3)
+    expect(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].map((k) => nextFocusCell(4, 2, k))).toEqual([7, 1, 5, 3]);
+    expect(nextFocusCell(11, 2, 'ArrowUp')).toBe(11); // c1 은 적 화면의 왼쪽 위
+  });
+
+  it('Home·End 는 그 줄 끝, Ctrl 과 함께면 판 끝', () => {
+    expect([
+      nextFocusCell(4, 1, 'Home'),
+      nextFocusCell(4, 1, 'End'),
+      nextFocusCell(4, 1, 'Home', true),
+      nextFocusCell(4, 1, 'End', true),
+    ]).toEqual([3, 5, 0, 11]);
+    expect([nextFocusCell(4, 2, 'Home', true), nextFocusCell(4, 2, 'End', true)]).toEqual([11, 0]);
+  });
+
+  it('다루지 않는 키는 null', () => {
+    expect(['Enter', ' ', 'Tab', 'a'].map((k) => nextFocusCell(4, 1, k))).toEqual([null, null, null, null]);
+  });
+
+  it('처음 들어오면 고른 칸, 없으면 내 王, 王 이 없으면 화면 아래 가운데', () => {
+    const s = createInitialState();
+    expect([entryCell(s, 1, null), entryCell(s, 2, null)]).toEqual([10, 1]);
+    expect(entryCell(s, 1, cell(7))).toBe(7);
+    expect(entryCell(s, 1, handP)).toBe(10);
+    // 녹 王 이 잡혀 끝난 판 — 남은 적 王(7)이 아니라 녹 화면 아래 가운데(10)
+    const done = applyMove(makeState({ board: '... .k. .K. ...', turn: 2, hand: ['RBP', 'RBP'] }), {
+      from: 4,
+      to: 7,
+      piece: 1,
+      promote: false,
+    });
+    expect(entryCell(done, 1, null)).toBe(10);
   });
 });
 
