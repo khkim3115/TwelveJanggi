@@ -97,7 +97,7 @@ export function FeedbackModal({ onClose }: { onClose: () => void }) {
         {done ? (
           <>
             <p className="fb-done">✅ 피드백을 보냈어요. 소중한 의견 감사합니다!</p>
-            <button className="settings-close" onClick={onClose} autoFocus>
+            <button className="btn-ghost" onClick={onClose} autoFocus>
               닫기
             </button>
           </>
@@ -164,14 +164,18 @@ export function FeedbackModal({ onClose }: { onClose: () => void }) {
                 지금은 인앱 제출이 비활성화돼 있어요. 아래 GitHub 링크로 등록해 주세요.
               </div>
             )}
-            {error && <div className="mp-error">{error}</div>}
+            {error && (
+              <div className="error-box" role="alert">
+                {error}
+              </div>
+            )}
 
-            <div className="go-actions">
-              <button className="ghost-btn" onClick={onClose}>
+            <div className="modal-actions">
+              <button className="btn-ghost" onClick={onClose}>
                 취소
               </button>
               <button
-                className="mp-primary fb-submit"
+                className="btn-primary fb-submit"
                 disabled={!canSubmit}
                 onClick={() => void onSubmit()}
               >

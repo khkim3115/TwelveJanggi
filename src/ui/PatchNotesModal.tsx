@@ -122,7 +122,7 @@ export function PatchNotesModal({ onClose }: { onClose: () => void }) {
 
         <div className="pn-foot">
           <span className="pn-cur">현재 버전 v{LATEST_VERSION}</span>
-          <button className="pn-close" onClick={onClose} autoFocus>
+          <button className="btn-ghost" onClick={onClose} autoFocus>
             닫기
           </button>
         </div>

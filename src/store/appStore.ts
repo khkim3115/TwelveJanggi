@@ -1,5 +1,6 @@
 // 화면 전환(라이트 라우팅). 정적 SPA 라 react-router 대신 뷰 상태로 충분.
-// + 패치노트 모달 열림/마지막 확인 버전(seen) 도 앱 전역 상태로 보관(헤더가 모든 화면에서 공유).
+// + 헤더의 창(도움말·설정·패치노트·피드백) 열림과 패치노트 마지막 확인 버전(seen)도 앱 전역 상태로 보관
+//   (헤더가 모든 화면에서 공유하고, 결과 창은 창 열림을 보고 자기를 미룬다).
 import { create } from 'zustand';
 import { LATEST_VERSION } from '../data/changelog';
 
@@ -24,9 +25,17 @@ function persistSeenVersion(v: string) {
   }
 }
 
-interface AppState {
+export interface AppState {
   screen: Screen;
+  /** 화면을 바꾼다. 도움말·설정은 함께 닫는다 — 헤더가 화면마다 새로 뜨며 닫히던 동작(대기실 → 대국 자동 전환 등). */
   setScreen: (s: Screen) => void;
+
+  /** 도움말 창. */
+  helpOpen: boolean;
+  setHelpOpen: (open: boolean) => void;
+  /** 설정 창(혼자 하기 화면 전용). */
+  settingsOpen: boolean;
+  setSettingsOpen: (open: boolean) => void;
 
   /** 패치노트 모달 표시 여부. */
   patchNotesOpen: boolean;
@@ -43,7 +52,12 @@ interface AppState {
 
 export const useAppStore = create<AppState>((set) => ({
   screen: 'home',
-  setScreen: (screen) => set({ screen }),
+  setScreen: (screen) => set({ screen, helpOpen: false, settingsOpen: false }),
+
+  helpOpen: false,
+  setHelpOpen: (helpOpen) => set({ helpOpen }),
+  settingsOpen: false,
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
 
   patchNotesOpen: false,
   seenVersion: readSeenVersion(),
@@ -56,3 +70,11 @@ export const useAppStore = create<AppState>((set) => ({
   feedbackOpen: false,
   setFeedbackOpen: (feedbackOpen) => set({ feedbackOpen }),
 }));
+
+/**
+ * 헤더의 창(도움말·설정·패치노트·피드백) 중 하나라도 열려 있는가. 결과 창은 이것이 false 가 된 뒤에 뜬다 —
+ * aria-modal 대화상자가 둘이 되지 않게, 쓰던 피드백이 날아가지 않게. 창을 더하면 여기에도 더한다(appStore.test 가 지킨다).
+ */
+export function isPanelOpen(s: AppState): boolean {
+  return s.helpOpen || s.settingsOpen || s.patchNotesOpen || s.feedbackOpen;
+}

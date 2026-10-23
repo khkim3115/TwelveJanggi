@@ -233,9 +233,9 @@ export function MultiplayerGame() {
       )}
       <ConnectionNote />
       {error && (
-        <div className="mp-error mp-error-row" role="alert">
+        <div className="error-box error-box-row" role="alert">
           <span>{error}</span>
-          <button className="mp-error-close" onClick={clearError} aria-label="오류 닫기">
+          <button className="error-box-close" onClick={clearError} aria-label="오류 닫기">
             ✕
           </button>
         </div>

@@ -53,6 +53,7 @@ src/core/      순수 규칙 (UI·네트워크 무관, 테스트 1급 대상)
   gameState.ts   legalMoves · applyMoveInPlace/undoMove · applyMove · 판정 · computeKey · 스냅샷/전송형
   zobrist.ts     국면 해시(전치표)
   view.ts        boardView(하이라이트) · resolveClick(클릭 의미) · turnHint/phaseLabel(문구) · SeatPref/resolveSeat
+                 · nextFocusCell/entryCell(판 키보드 이동) · cellLabel/handTileLabel(낭독 문구)
   testkit.ts     테스트 전용 국면 빌더(12글자 보드 문자열)
 src/engine/    AI (UI 무관)
   evaluate.ts    평가함수 / search.ts 알파베타+반복심화+전치표+전술 판정

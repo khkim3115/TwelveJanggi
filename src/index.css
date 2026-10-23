@@ -12,9 +12,10 @@
   --accent-soft: rgba(110, 168, 254, 0.16);
   --hint: #f0b429;
   --danger: #f2555a;
-  /* 글자로 쓰는 경고·오류색 — 배경 위 4.5:1 이상(라이트에서 --hint·--danger 를 글자로 쓰면 모자란다). */
+  /* 글자로 쓰는 경고·오류·성공색 — 배경 위 4.5:1 이상(라이트에서 --hint·--danger·--ok 를 글자로 쓰면 모자란다, theme.test 가 지킨다). */
   --warn-text: #f0b429;
   --danger-text: #ff7378;
+  --ok-text: #3fb950;
   --ok: #3fb950;
 
   /* 진영 색 — 장기의 초(녹)·한(적)처럼 먹 색으로 쓴다. */
@@ -62,6 +63,7 @@
   --danger: #cf3339;
   --warn-text: #8a5a00;
   --danger-text: #a3242a;
+  --ok-text: #187436;
   --ok: #1f8b3a;
 
   --side-1: #1d7a4a;
@@ -196,8 +198,7 @@ a {
 
 /* ── 버튼 ─────────────────────────────────────────────────────────────── */
 
-.btn-primary,
-.mp-primary {
+.btn-primary {
   background: var(--accent);
   color: var(--on-accent);
   border: none;
@@ -207,8 +208,7 @@ a {
   transition: filter 0.15s;
 }
 
-.btn-primary:hover:not(:disabled),
-.mp-primary:hover:not(:disabled) {
+.btn-primary:hover:not(:disabled) {
   filter: brightness(1.1);
 }
 
@@ -218,10 +218,7 @@ a {
   font-size: 1rem;
 }
 
-.btn-ghost,
-.ghost-btn,
-.settings-close,
-.pn-close {
+.btn-ghost {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 11px;
@@ -229,16 +226,13 @@ a {
   transition: background 0.15s, border-color 0.15s;
 }
 
-.btn-ghost:hover:not(:disabled),
-.ghost-btn:hover:not(:disabled),
-.settings-close:hover,
-.pn-close:hover {
+.btn-ghost:hover:not(:disabled) {
   background: var(--surface-2);
   border-color: var(--accent);
 }
 
 .btn-danger {
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .btn-danger:hover:not(:disabled) {
@@ -371,6 +365,11 @@ a {
   color: var(--muted);
   font-size: 0.78rem;
   line-height: 1.45;
+}
+
+/* 고른 줄은 반투명 강조색 바탕이라 흐린 글자가 다크에서 4.5:1 에 못 미친다(4.45) — 본문 글자색으로 올린다. */
+.diff-row.on .diff-desc {
+  color: var(--text);
 }
 
 .seg {
@@ -547,7 +546,7 @@ a {
 }
 
 .over-win {
-  color: var(--ok);
+  color: var(--ok-text);
 }
 
 .over-lose {
@@ -571,8 +570,8 @@ a {
   justify-content: center;
 }
 
-.over-actions,
-.go-actions {
+/* 창 아래 버튼 줄(결과 창 · 피드백 창). 결과 창은 over-actions 로 버튼 폭을 나눠 갖는다. */
+.modal-actions {
   display: flex;
   gap: 8px;
   width: 100%;
@@ -623,9 +622,10 @@ a {
   font-weight: 700;
 }
 
+/* 배지 글자는 배경색 — 빨강 위 흰 글자는 다크에서 대비가 모자란다(.chat-badge 와 같다). */
 .pn-new {
   background: var(--danger);
-  color: #fff;
+  color: var(--bg);
   border-radius: 999px;
   padding: 1px 7px;
   font-size: 0.66rem;
@@ -659,7 +659,7 @@ a {
 }
 
 .pn-chip-feature {
-  color: var(--ok);
+  color: var(--ok-text);
   border-color: var(--ok);
 }
 
@@ -669,7 +669,7 @@ a {
 }
 
 .pn-chip-fix {
-  color: var(--hint);
+  color: var(--warn-text);
   border-color: var(--hint);
 }
 
@@ -771,7 +771,7 @@ a {
 
 .fb-done {
   margin: 0;
-  color: var(--ok);
+  color: var(--ok-text);
   font-size: 0.92rem;
 }
 
@@ -792,7 +792,7 @@ a {
   font-size: 0.72rem;
 }
 
-.mp-error {
+.error-box {
   background: rgba(242, 85, 90, 0.12);
   border: 1px solid var(--danger);
   color: var(--danger-text);
@@ -830,8 +830,9 @@ a {
   border-color: var(--hint);
 }
 
+/* 금색 바탕 위 글자 — 라이트 금색(#b7791f)에서도 4.5:1 이 되게 거의 검정으로. */
 .chip-alert {
-  color: #1b2027;
+  color: #0d1117;
   background: var(--hint);
   border-color: var(--hint);
   font-weight: 700;
@@ -1077,6 +1078,11 @@ a {
 
 .hint-ring {
   animation: pulse 1.2s ease-in-out infinite;
+}
+
+/* 투입 힌트: 놓을 칸에 그 말을 흐리게 — 실제 말로 보이지 않게 반투명, 위의 금색 테만 깜빡인다. */
+.hint-ghost {
+  opacity: 0.5;
 }
 
 .hint-from {
@@ -1397,14 +1403,14 @@ span.tray-tile {
   border: 0;
 }
 
-.mp-error-row {
+.error-box-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 
-.mp-error-close {
+.error-box-close {
   background: transparent;
   border: none;
   color: inherit;

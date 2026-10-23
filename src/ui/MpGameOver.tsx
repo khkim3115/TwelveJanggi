@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import type { GameResult, Player } from '../core/gameState';
 import { SIDE_LABEL } from '../core/view';
-import { useAppStore } from '../store/appStore';
+import { isPanelOpen, useAppStore } from '../store/appStore';
 import { useMultiplayerStore } from '../store/multiplayerStore';
 import { OverDialog, resultText } from './GameOver';
 
@@ -16,6 +16,8 @@ interface MpGameOverProps {
 export function MpGameOver({ result, mySide, moveCount }: MpGameOverProps) {
   const setScreen = useAppStore((s) => s.setScreen);
   const leave = useMultiplayerStore((s) => s.leave);
+  // 솔로 결과와 같다 — 다른 창이 열려 있으면 그 창이 닫힌 뒤에 띄운다(온라인 결과 창은 늘 제목에 초점).
+  const panelOpen = useAppStore(isPanelOpen);
   const [peek, setPeek] = useState(false);
 
   const { title, detail } = resultText(result, mySide);
@@ -44,6 +46,7 @@ export function MpGameOver({ result, mySide, moveCount }: MpGameOverProps) {
       </div>
     );
   }
+  if (panelOpen) return null;
   return (
     <OverDialog
       title={title}

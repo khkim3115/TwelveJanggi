@@ -4,10 +4,11 @@
 // 판 칸 클릭과 손패 클릭을 같은 함수가 받고, 착수는 항상 legalMoves 가 만든 Move 객체를 그대로 돌려준다
 // (승격 플래그 같은 파생값을 화면이 다시 계산하지 않게).
 
-import { CELL_LABEL, ROW_OF, farRow, rotate, type HandKind } from './board';
+import { CELL_COUNT, CELL_LABEL, COLS, COL_OF, ROWS, ROW_OF, farRow, rotate, type HandKind } from './board';
 import {
   DROP,
   findKing,
+  kindOf,
   legalMoves,
   other,
   sideOf,
@@ -141,6 +142,67 @@ export function isUpsideDown(side: Player, viewer: Player): boolean {
   return side !== viewer;
 }
 
+/* ── 판 키보드 이동 ──────────────────────────────────────────────────── */
+//
+// 판은 Tab 순서에 칸 하나만 두고(roving tabindex) 판 안은 방향키로 옮긴다. 방향은 언제나 화면 기준이다 —
+// 적으로 두면 판을 뒤집어 그리므로, 보드 인덱스로 계산하면 ↑ 가 화면 아래로 간다.
+
+/**
+ * 판 칸 사이 키보드 이동. 보드 인덱스를 받아 보드 인덱스를 돌려준다.
+ * 화살표는 화면 기준 한 칸(판 밖이면 제자리 — 줄을 넘어 감기지 않는다), Home·End 는 그 화면 줄의 처음·끝,
+ * ctrl 과 함께면 화면 왼쪽 위·오른쪽 아래. 다루지 않는 키는 null.
+ */
+export function nextFocusCell(cell: number, viewer: Player, key: string, ctrl = false): number | null {
+  const d = indexToDisplay(cell, viewer);
+  const r = ROW_OF[d];
+  const c = COL_OF[d];
+  let next: number;
+  switch (key) {
+    case 'ArrowUp':
+      next = Math.max(r - 1, 0) * COLS + c;
+      break;
+    case 'ArrowDown':
+      next = Math.min(r + 1, ROWS - 1) * COLS + c;
+      break;
+    case 'ArrowLeft':
+      next = r * COLS + Math.max(c - 1, 0);
+      break;
+    case 'ArrowRight':
+      next = r * COLS + Math.min(c + 1, COLS - 1);
+      break;
+    case 'Home':
+      next = ctrl ? 0 : r * COLS;
+      break;
+    case 'End':
+      next = ctrl ? CELL_COUNT - 1 : r * COLS + COLS - 1;
+      break;
+    default:
+      return null;
+  }
+  return displayToIndex(next, viewer);
+}
+
+/**
+ * 판이 처음 초점을 받을 칸: 판 위에서 고른 칸 → 보는 쪽 王 → 화면 아래 가운데.
+ * 한 번 초점을 받은 뒤에는 Board 가 마지막 초점 칸(화면 위치)을 기억해 그 칸을 Tab 순서에 둔다.
+ */
+export function entryCell(s: GameState, viewer: Player, sel: Selection | null): number {
+  if (sel?.kind === 'cell') return sel.cell;
+  const king = findKing(s.board, viewer);
+  return king >= 0 ? king : displayToIndex((ROWS - 1) * COLS + 1, viewer);
+}
+
+/* ── 단축키 ──────────────────────────────────────────────────────────── */
+
+/**
+ * 단축키 N(새 게임)을 받는가 — 판이 시작 전이거나 끝났을 때만. 판 중간에는 버튼으로만 새로 시작한다:
+ * 낭독기는 판(grid)에서 초점 모드로 넘어가 글자 키를 페이지에 넘기는데, N 은 탐색 모드에서 흔히 누르는 키라
+ * 진행 중인 판을 확인 없이 날릴 수 있다.
+ */
+export function newGameShortcutAllowed(s: GameState): boolean {
+  return s.ply === 0 || s.phase === 'over';
+}
+
 /* ── 말 이름 ─────────────────────────────────────────────────────────── */
 
 export const KIND_HANJA: readonly string[] = ['', '王', '將', '相', '子', '侯'];
@@ -152,6 +214,58 @@ export function moveLabel(m: Move, board?: Int8Array): string {
   if (m.from === DROP) return `${piece} ${CELL_LABEL[m.to]}에 놓기`;
   const sep = board && board[m.to] !== 0 ? '×' : '→';
   return `${piece} ${CELL_LABEL[m.from]}${sep}${CELL_LABEL[m.to]}${m.promote ? ' 侯 승격' : ''}`;
+}
+
+/* ── 힌트 표시 ───────────────────────────────────────────────────────── */
+
+/**
+ * 투입 힌트를 놓을 칸에 반투명하게 그릴 말. 아무것도 안 골랐거나 그 손패를 골랐을 때만 그린다 —
+ * 다른 말을 고르면 그 말의 목적지 점이 우선이다(다른 말이 그려져 있으면 그 칸이 목적지가 아닌 것처럼 보인다).
+ */
+export function hintGhost(hint: Move | null, sel: Selection | null): HandKind | null {
+  if (hint === null || hint.from !== DROP) return null;
+  if (sel !== null && !(sel.kind === 'hand' && sel.piece === hint.piece)) return null;
+  return hint.piece as HandKind;
+}
+
+/* ── 낭독 문구 ───────────────────────────────────────────────────────── */
+//
+// 판 칸·손패 타일의 접근성 이름. 화면이 색·테·점·반투명 말로 보여 주는 것을 낭독기도 같은 말로 듣게 한다.
+
+/**
+ * 판 칸의 낭독 이름 — 칸 이름과 말, 그리고 지금 상태(선택·잡기·둘 수 있음·승격·입성·추천 수)를 ' — ' 로 잇는다.
+ * view 는 같은 국면의 boardView 다.
+ */
+export function cellLabel(
+  s: GameState,
+  cell: number,
+  view: BoardView,
+  opts: { selected: boolean; hint: Move | null },
+): string {
+  const v = s.board[cell];
+  const parts = [
+    v === 0 ? `${CELL_LABEL[cell]} 빈칸` : `${CELL_LABEL[cell]} ${SIDE_LABEL[sideOf(v)]} ${KIND_NAME[kindOf(v)]}`,
+  ];
+  if (opts.selected) parts.push('선택됨');
+  if (view.captures.has(cell)) parts.push('잡을 수 있음');
+  else if (view.targets.has(cell)) parts.push('여기로 둘 수 있음');
+  if (view.promotions.has(cell)) parts.push('侯 승격');
+  if (view.tryPending !== null && findKing(s.board, view.tryPending) === cell) parts.push('입성 중');
+  const { hint } = opts;
+  if (hint?.from === cell) parts.push('추천 수 출발');
+  if (hint?.to === cell) parts.push(hint.from === DROP ? `추천 수: 손패 ${KIND_NAME[hint.piece]} 놓기` : '추천 수 도착');
+  return parts.join(' — ');
+}
+
+/** 손패 타일의 낭독 이름. hinted 면 추천 수, can 이면 눌러서 놓을 칸을 고를 수 있다는 안내를 붙인다. */
+export function handTileLabel(
+  trayLabel: string,
+  kind: HandKind,
+  count: number,
+  opts: { can?: boolean; hinted?: boolean } = {},
+): string {
+  const name = `${KIND_NAME[kind]}${count > 1 ? ` ${count}개` : ''}`;
+  return `${trayLabel} ${name}${opts.hinted ? ' — 추천 수' : ''}${opts.can ? ' — 눌러서 놓을 칸 고르기' : ''}`;
 }
 
 /* ── 상태 문구(솔로·멀티가 같은 말을 쓰도록 여기서 만든다) ───────────── */
