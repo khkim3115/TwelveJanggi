@@ -8,6 +8,7 @@ import { CELL_COUNT, CELL_LABEL, COLS, COL_OF, ROWS, ROW_OF, farRow, rotate, typ
 import {
   DROP,
   findKing,
+  kindOf,
   legalMoves,
   other,
   sideOf,
@@ -202,6 +203,46 @@ export function moveLabel(m: Move, board?: Int8Array): string {
   if (m.from === DROP) return `${piece} ${CELL_LABEL[m.to]}에 놓기`;
   const sep = board && board[m.to] !== 0 ? '×' : '→';
   return `${piece} ${CELL_LABEL[m.from]}${sep}${CELL_LABEL[m.to]}${m.promote ? ' 侯 승격' : ''}`;
+}
+
+/* ── 낭독 문구 ───────────────────────────────────────────────────────── */
+//
+// 판 칸·손패 타일의 접근성 이름. 화면이 색·테·점·반투명 말로 보여 주는 것을 낭독기도 같은 말로 듣게 한다.
+
+/**
+ * 판 칸의 낭독 이름 — 칸 이름과 말, 그리고 지금 상태(선택·잡기·둘 수 있음·승격·입성·추천 수)를 ' — ' 로 잇는다.
+ * view 는 같은 국면의 boardView 다.
+ */
+export function cellLabel(
+  s: GameState,
+  cell: number,
+  view: BoardView,
+  opts: { selected: boolean; hint: Move | null },
+): string {
+  const v = s.board[cell];
+  const parts = [
+    v === 0 ? `${CELL_LABEL[cell]} 빈칸` : `${CELL_LABEL[cell]} ${SIDE_LABEL[sideOf(v)]} ${KIND_NAME[kindOf(v)]}`,
+  ];
+  if (opts.selected) parts.push('선택됨');
+  if (view.captures.has(cell)) parts.push('잡을 수 있음');
+  else if (view.targets.has(cell)) parts.push('여기로 둘 수 있음');
+  if (view.promotions.has(cell)) parts.push('侯 승격');
+  if (view.tryPending !== null && findKing(s.board, view.tryPending) === cell) parts.push('입성 중');
+  const { hint } = opts;
+  if (hint?.from === cell) parts.push('추천 수 출발');
+  if (hint?.to === cell) parts.push(hint.from === DROP ? `추천 수: 손패 ${KIND_NAME[hint.piece]} 놓기` : '추천 수 도착');
+  return parts.join(' — ');
+}
+
+/** 손패 타일의 낭독 이름. hinted 면 추천 수, can 이면 눌러서 놓을 칸을 고를 수 있다는 안내를 붙인다. */
+export function handTileLabel(
+  trayLabel: string,
+  kind: HandKind,
+  count: number,
+  opts: { can?: boolean; hinted?: boolean } = {},
+): string {
+  const name = `${KIND_NAME[kind]}${count > 1 ? ` ${count}개` : ''}`;
+  return `${trayLabel} ${name}${opts.hinted ? ' — 추천 수' : ''}${opts.can ? ' — 눌러서 놓을 칸 고르기' : ''}`;
 }
 
 /* ── 상태 문구(솔로·멀티가 같은 말을 쓰도록 여기서 만든다) ───────────── */

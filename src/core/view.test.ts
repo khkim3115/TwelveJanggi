@@ -1,6 +1,6 @@
 // 클릭 해석·하이라이트·화면 방향·선후공 선택의 계약. 솔로와 멀티 화면이 같은 함수를 쓰므로 여기서 한 번만 지킨다.
 import { describe, expect, it } from 'vitest';
-import { CELL_COUNT, COL_OF, JA, KINDS, KIND_DIRS, ROWS, ROW_OF, STEPS } from './board';
+import { CELL_COUNT, COL_OF, JA, KINDS, KIND_DIRS, ROWS, ROW_OF, SANG, STEPS } from './board';
 import { DROP, applyMove, createInitialState, legalMoves, moveKey, type GameState, type Move } from './gameState';
 import { makeState } from './testkit';
 import {
@@ -8,8 +8,10 @@ import {
   SEAT_PREF_LABEL,
   SIDE_LABEL,
   boardView,
+  cellLabel,
   displayToIndex,
   entryCell,
+  handTileLabel,
   indexToDisplay,
   isUpsideDown,
   moveLabel,
@@ -26,6 +28,11 @@ import {
 const cell = (c: number) => ({ kind: 'cell' as const, cell: c });
 const handP = { kind: 'hand' as const, piece: JA as 4 };
 const find = (s: GameState, key: string): Move => legalMoves(s).find((m) => moveKey(m) === key)!;
+/** 녹 王 이 적 진영(b4)에 막 들어가 한 턴을 버티는 중인 국면. */
+const entered = applyMove(
+  makeState({ board: '... .K. ..k ...', hand: ['RBP', 'RBP'] }),
+  { from: 4, to: 1, piece: 1, promote: false },
+);
 
 describe('resolveClick — 판 위 이동', () => {
   it('내 말을 고르고 갈 칸을 누르면 그 합법 수가 나온다', () => {
@@ -115,11 +122,6 @@ describe('boardView', () => {
 });
 
 describe('王 입성 표시', () => {
-  const entered = applyMove(
-    makeState({ board: '... .K. ..k ...', hand: ['RBP', 'RBP'] }),
-    { from: 4, to: 1, piece: 1, promote: false },
-  );
-
   it('들어간 쪽이 입성 대기로 표시된다', () => {
     expect(tryPendingSide(entered)).toBe(1);
     expect(boardView(entered, 2, null).tryPending).toBe(1);
@@ -230,6 +232,54 @@ describe('판 키보드 이동', () => {
       promote: false,
     });
     expect(entryCell(done, 1, null)).toBe(10);
+  });
+});
+
+describe('낭독 문구', () => {
+  const none = { selected: false, hint: null };
+
+  it('칸 이름과 말, 빈칸', () => {
+    const s = createInitialState();
+    const v = boardView(s, 1, null);
+    expect([cellLabel(s, 10, v, none), cellLabel(s, 1, v, none), cellLabel(s, 5, v, none)]).toEqual([
+      'b1 녹 왕',
+      'b4 적 왕',
+      'c3 빈칸',
+    ]);
+  });
+
+  it('선택·잡기·둘 수 있음·승격·입성', () => {
+    const s = createInitialState();
+    const v = boardView(s, 1, cell(7));
+    expect(cellLabel(s, 7, v, { selected: true, hint: null })).toBe('b2 녹 자 — 선택됨');
+    expect(cellLabel(s, 4, v, none)).toBe('b3 적 자 — 잡을 수 있음');
+    const d = makeState({ board: 'r.b .k. .P. BKR', hand: ['P', ''] });
+    expect(cellLabel(d, 3, boardView(d, 1, handP), none)).toBe('a3 빈칸 — 여기로 둘 수 있음');
+    const p = makeState({ board: '.rb P.. ..k BKR', hand: ['', 'P'] });
+    expect(cellLabel(p, 0, boardView(p, 1, cell(3)), none)).toBe('a4 빈칸 — 여기로 둘 수 있음 — 侯 승격');
+    expect(cellLabel(entered, 1, boardView(entered, 2, null), none)).toBe('b4 녹 왕 — 입성 중');
+  });
+
+  it('추천 수 — 이동은 출발·도착, 투입은 놓을 칸에 손패 이름', () => {
+    const s = createInitialState();
+    const v = boardView(s, 1, null);
+    const hint: Move = { from: 7, to: 4, piece: JA, promote: false };
+    expect([cellLabel(s, 7, v, { selected: false, hint }), cellLabel(s, 4, v, { selected: false, hint })]).toEqual([
+      'b2 녹 자 — 추천 수 출발',
+      'b3 적 자 — 추천 수 도착',
+    ]);
+    const d = makeState({ board: 'r.b .k. .P. BKR', hand: ['P', ''] });
+    const drop: Move = { from: DROP, to: 5, piece: JA, promote: false };
+    expect(cellLabel(d, 5, boardView(d, 1, null), { selected: false, hint: drop })).toBe('c3 빈칸 — 추천 수: 손패 자 놓기');
+  });
+
+  it('손패 타일', () => {
+    expect(handTileLabel('내 손패', JA, 1)).toBe('내 손패 자');
+    expect(handTileLabel('내 손패', JA, 2, { can: true })).toBe('내 손패 자 2개 — 눌러서 놓을 칸 고르기');
+    expect(handTileLabel('내 손패', JA, 2, { can: true, hinted: true })).toBe(
+      '내 손패 자 2개 — 추천 수 — 눌러서 놓을 칸 고르기',
+    );
+    expect(handTileLabel('AI (보통) 손패', SANG, 1)).toBe('AI (보통) 손패 상');
   });
 });
 

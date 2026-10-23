@@ -1079,6 +1079,11 @@ a {
   animation: pulse 1.2s ease-in-out infinite;
 }
 
+/* 투입 힌트: 놓을 칸에 그 말을 흐리게 — 실제 말로 보이지 않게 반투명, 위의 금색 테만 깜빡인다. */
+.hint-ghost {
+  opacity: 0.5;
+}
+
 .hint-from {
   fill: none;
   stroke: var(--hint);

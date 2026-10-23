@@ -3,7 +3,7 @@
 
 import { HAND_KINDS, type HandKind } from '../core/board';
 import { handCount, type GameState, type Player } from '../core/gameState';
-import { KIND_NAME, isUpsideDown } from '../core/view';
+import { handTileLabel, isUpsideDown } from '../core/view';
 import { Piece } from './Piece';
 
 export interface HandTrayProps {
@@ -36,7 +36,6 @@ export function HandTray({ state, side, viewer, label, droppable, selected, hint
         {held.length === 0 && <span className="tray-empty">잡은 말 없음</span>}
         {held.map((k) => {
           const n = handCount(state, side, k);
-          const name = `${KIND_NAME[k]}${n > 1 ? ` ${n}개` : ''}`;
           const glyph = (
             <>
               <svg viewBox="-44 -44 88 88" aria-hidden="true">
@@ -50,7 +49,7 @@ export function HandTray({ state, side, viewer, label, droppable, selected, hint
           // 상대 손패는 누를 수 없는 그림일 뿐이다 — 버튼으로 두면 낭독기에서 내 손패와 구분되지 않는다.
           if (!onPick) {
             return (
-              <span key={k} className="tray-tile" role="img" aria-label={`${label} ${name}`}>
+              <span key={k} className="tray-tile" role="img" aria-label={handTileLabel(label, k, n)}>
                 {glyph}
               </span>
             );
@@ -72,7 +71,7 @@ export function HandTray({ state, side, viewer, label, droppable, selected, hint
               className={classes}
               aria-disabled={!can}
               aria-pressed={selected === k}
-              aria-label={`${label} ${name}${can ? ' — 눌러서 놓을 칸 고르기' : ''}`}
+              aria-label={handTileLabel(label, k, n, { can, hinted: hintPiece === k })}
               onClick={() => can && onPick(k)}
             >
               {glyph}

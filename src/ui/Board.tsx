@@ -8,9 +8,9 @@ import { useId, useRef, useState } from 'react';
 import { CELL_LABEL, COLS, COL_OF, KING, ROWS, ROW_OF } from '../core/board';
 import { DROP, findKing, kindOf, other, sideOf, type GameState, type Move, type Player } from '../core/gameState';
 import {
-  KIND_NAME,
   SIDE_LABEL,
   boardView,
+  cellLabel,
   displayToIndex,
   entryCell,
   indexToDisplay,
@@ -30,7 +30,7 @@ export interface BoardProps {
   viewer?: Player;
   selection: Selection | null;
   lastMove?: Move | null;
-  /** 힌트로 제안된 수. 이동이면 출발→도착 화살표, 투입이면 도착 칸만 표시한다(손패 쪽은 HandTray 가 표시). */
+  /** 힌트로 제안된 수. 이동이면 출발→도착 화살표, 투입이면 도착 칸에 그 말을 흐리게 그린다(손패 쪽은 HandTray 가 표시). */
   hint?: Move | null;
   /** true 면 클릭을 받지 않는다(AI 계산 중 등). */
   disabled?: boolean;
@@ -41,12 +41,6 @@ export interface BoardProps {
 function centerOf(cell: number, viewer: Player): [number, number] {
   const d = indexToDisplay(cell, viewer);
   return [COL_OF[d] * CELL + CELL / 2, ROW_OF[d] * CELL + CELL / 2];
-}
-
-function describe(state: GameState, cell: number): string {
-  const v = state.board[cell];
-  if (v === 0) return `${CELL_LABEL[cell]} 빈칸`;
-  return `${CELL_LABEL[cell]} ${SIDE_LABEL[sideOf(v)]} ${KIND_NAME[kindOf(v)]}`;
 }
 
 export function Board({ state, me, viewer: viewerProp, selection, lastMove, hint, disabled, onCell }: BoardProps) {
@@ -92,16 +86,8 @@ export function Board({ state, me, viewer: viewerProp, selection, lastMove, hint
     ]
       .filter(Boolean)
       .join(' ');
-
-    const label = [
-      describe(state, i),
-      selectedCell === i ? '선택됨' : '',
-      view.captures.has(i) ? '잡을 수 있음' : isTarget ? '여기로 둘 수 있음' : '',
-      view.promotions.has(i) ? '侯 승격' : '',
-      i === pendingKing ? '입성 중' : '',
-    ]
-      .filter(Boolean)
-      .join(' — ');
+    // 투입 힌트면 놓을 칸에 그 말을 흐리게 그린다 — 판 밖(HTML)의 손패와 화살표로 잇기보다 '무엇을 어디에'가 바로 보인다.
+    const ghost = hint && hint.from === DROP && hint.to === i ? hint.piece : null;
 
     // 칸은 화면 칸 번호로 key 를 단다 — 좌석이 바뀌어 판이 뒤집혀도 같은 화면 칸의 노드가 남아,
     // 초점과 결과 창의 초점 복귀가 끊기지 않는다(보드 인덱스로 달면 다른 줄로 옮겨지며 새로 그려진다).
@@ -121,6 +107,11 @@ export function Board({ state, me, viewer: viewerProp, selection, lastMove, hint
               <Piece kind={kindOf(v)} side={side} />
             </g>
           )}
+          {ghost !== null && (
+            <g className="hint-ghost" transform={isUpsideDown(state.turn, viewer) ? 'rotate(180)' : undefined}>
+              <Piece kind={ghost} side={state.turn} />
+            </g>
+          )}
           {selectedCell === i && (
             <g className="sel-ring">
               <circle className="ring-under" r={46} />
@@ -135,7 +126,8 @@ export function Board({ state, me, viewer: viewerProp, selection, lastMove, hint
           )}
           {isTarget &&
             (v === 0 ? (
-              <circle className="target-dot" r={11} />
+              // 놓을 칸에 반투명 말이 있으면 점은 그리지 않는다 — 말 글자를 가리고, 말과 테가 이미 목적지를 말한다.
+              ghost === null && <circle className="target-dot" r={11} />
             ) : (
               <g className="capture-ring">
                 <circle className="ring-under" r={45} />
@@ -175,7 +167,7 @@ export function Board({ state, me, viewer: viewerProp, selection, lastMove, hint
           role="gridcell"
           tabIndex={d === tabD ? 0 : -1}
           aria-disabled={!clickable}
-          aria-label={label}
+          aria-label={cellLabel(state, i, view, { selected: selectedCell === i, hint: hint ?? null })}
           onFocus={() => setFocusD(d)}
           onClick={() => !disabled && onCell(i)}
           onKeyDown={(e) => {
