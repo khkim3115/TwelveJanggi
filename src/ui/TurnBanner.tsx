@@ -15,13 +15,15 @@ interface TurnBannerProps {
   boardBefore?: Int8Array;
   /** 화면에 떠 있는 힌트. */
   hint?: Move | null;
+  /** 잠깐 띄우는 안내(누른 키에 대한 답 등) — 있으면 아래 줄을 대신한다. */
+  notice?: string | null;
 }
 
-export function TurnBanner({ state, me, names, waiting, lastMove, boardBefore, hint }: TurnBannerProps) {
+export function TurnBanner({ state, me, names, waiting, lastMove, boardBefore, hint, notice }: TurnBannerProps) {
   const s = state;
   const alert = tryPendingSide(s) !== null;
   const last = lastMove ? `직전 수 ${moveLabel(lastMove, boardBefore)}` : null;
-  const now = waiting ? '생각 중…' : hint ? `💡 추천: ${moveLabel(hint, s.board)}` : turnHint(s, me);
+  const now = notice ?? (waiting ? '생각 중…' : hint ? `💡 추천: ${moveLabel(hint, s.board)}` : turnHint(s, me));
   return (
     <div className={`turnbar${alert ? ' turnbar-alert' : ''}`}>
       <div className="turnbar-main">

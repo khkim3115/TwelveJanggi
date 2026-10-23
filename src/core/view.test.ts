@@ -1,6 +1,6 @@
 // 클릭 해석·하이라이트·화면 방향·선후공 선택의 계약. 솔로와 멀티 화면이 같은 함수를 쓰므로 여기서 한 번만 지킨다.
 import { describe, expect, it } from 'vitest';
-import { CELL_COUNT, COL_OF, JA, KINDS, KIND_DIRS, ROWS, ROW_OF, SANG, STEPS } from './board';
+import { CELL_COUNT, COL_OF, JA, JANG, KINDS, KIND_DIRS, ROWS, ROW_OF, SANG, STEPS } from './board';
 import { DROP, applyMove, createInitialState, legalMoves, moveKey, type GameState, type Move } from './gameState';
 import { makeState } from './testkit';
 import {
@@ -12,9 +12,11 @@ import {
   displayToIndex,
   entryCell,
   handTileLabel,
+  hintGhost,
   indexToDisplay,
   isUpsideDown,
   moveLabel,
+  newGameShortcutAllowed,
   nextFocusCell,
   phaseLabel,
   resolveClick,
@@ -235,6 +237,22 @@ describe('판 키보드 이동', () => {
   });
 });
 
+describe('단축키', () => {
+  it('새 게임(N)은 판이 시작 전이거나 끝났을 때만 — 판 중간에는 진행 중인 판을 확인 없이 날리지 않게', () => {
+    const s = createInitialState();
+    expect(newGameShortcutAllowed(s)).toBe(true);
+    expect(newGameShortcutAllowed(applyMove(s, find(s, '7-4')))).toBe(false);
+    expect(newGameShortcutAllowed(entered)).toBe(false); // 입성 대기도 진행 중
+    const done = applyMove(makeState({ board: '.k. .K. ... ...', hand: ['RBP', 'RBP'] }), {
+      from: 4,
+      to: 1,
+      piece: 1,
+      promote: false,
+    });
+    expect(newGameShortcutAllowed(done)).toBe(true);
+  });
+});
+
 describe('낭독 문구', () => {
   const none = { selected: false, hint: null };
 
@@ -271,6 +289,16 @@ describe('낭독 문구', () => {
     const d = makeState({ board: 'r.b .k. .P. BKR', hand: ['P', ''] });
     const drop: Move = { from: DROP, to: 5, piece: JA, promote: false };
     expect(cellLabel(d, 5, boardView(d, 1, null), { selected: false, hint: drop })).toBe('c3 빈칸 — 추천 수: 손패 자 놓기');
+  });
+
+  it('투입 힌트의 반투명 말은 아무것도 안 골랐거나 그 손패를 골랐을 때만 — 다른 것을 고르면 그 말의 목적지가 우선', () => {
+    const drop: Move = { from: DROP, to: 4, piece: JANG, promote: false };
+    expect(hintGhost(drop, null)).toBe(JANG);
+    expect(hintGhost(drop, { kind: 'hand', piece: JANG })).toBe(JANG);
+    expect(hintGhost(drop, { kind: 'hand', piece: SANG })).toBeNull();
+    expect(hintGhost(drop, cell(7))).toBeNull();
+    expect(hintGhost({ from: 7, to: 4, piece: JA, promote: false }, null)).toBeNull(); // 이동 힌트는 화살표
+    expect(hintGhost(null, null)).toBeNull();
   });
 
   it('손패 타일', () => {

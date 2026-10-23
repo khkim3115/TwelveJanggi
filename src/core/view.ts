@@ -192,6 +192,17 @@ export function entryCell(s: GameState, viewer: Player, sel: Selection | null): 
   return king >= 0 ? king : displayToIndex((ROWS - 1) * COLS + 1, viewer);
 }
 
+/* ── 단축키 ──────────────────────────────────────────────────────────── */
+
+/**
+ * 단축키 N(새 게임)을 받는가 — 판이 시작 전이거나 끝났을 때만. 판 중간에는 버튼으로만 새로 시작한다:
+ * 낭독기는 판(grid)에서 초점 모드로 넘어가 글자 키를 페이지에 넘기는데, N 은 탐색 모드에서 흔히 누르는 키라
+ * 진행 중인 판을 확인 없이 날릴 수 있다.
+ */
+export function newGameShortcutAllowed(s: GameState): boolean {
+  return s.ply === 0 || s.phase === 'over';
+}
+
 /* ── 말 이름 ─────────────────────────────────────────────────────────── */
 
 export const KIND_HANJA: readonly string[] = ['', '王', '將', '相', '子', '侯'];
@@ -203,6 +214,18 @@ export function moveLabel(m: Move, board?: Int8Array): string {
   if (m.from === DROP) return `${piece} ${CELL_LABEL[m.to]}에 놓기`;
   const sep = board && board[m.to] !== 0 ? '×' : '→';
   return `${piece} ${CELL_LABEL[m.from]}${sep}${CELL_LABEL[m.to]}${m.promote ? ' 侯 승격' : ''}`;
+}
+
+/* ── 힌트 표시 ───────────────────────────────────────────────────────── */
+
+/**
+ * 투입 힌트를 놓을 칸에 반투명하게 그릴 말. 아무것도 안 골랐거나 그 손패를 골랐을 때만 그린다 —
+ * 다른 말을 고르면 그 말의 목적지 점이 우선이다(다른 말이 그려져 있으면 그 칸이 목적지가 아닌 것처럼 보인다).
+ */
+export function hintGhost(hint: Move | null, sel: Selection | null): HandKind | null {
+  if (hint === null || hint.from !== DROP) return null;
+  if (sel !== null && !(sel.kind === 'hand' && sel.piece === hint.piece)) return null;
+  return hint.piece as HandKind;
 }
 
 /* ── 낭독 문구 ───────────────────────────────────────────────────────── */

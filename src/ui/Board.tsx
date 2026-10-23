@@ -13,6 +13,7 @@ import {
   cellLabel,
   displayToIndex,
   entryCell,
+  hintGhost,
   indexToDisplay,
   isUpsideDown,
   nextFocusCell,
@@ -53,6 +54,7 @@ export function Board({ state, me, viewer: viewerProp, selection, lastMove, hint
   const lastTo = lastMove ? lastMove.to : -1;
   const lastFrom = lastMove && lastMove.from !== DROP ? lastMove.from : -1;
   const promotedNow = lastMove?.promote ? lastMove.to : -1;
+  const ghostPiece = hintGhost(hint ?? null, selection);
 
   // Tab 순서에 둘 칸(화면 칸 번호). 한 번 초점을 받은 뒤에는 마지막 초점 칸 — 화면 위치로 기억하므로
   // 새 판에서 좌석이 바뀌어 판이 뒤집혀도 같은 자리다. 처음에는 고른 칸 → 내 王 → 화면 아래 가운데.
@@ -87,7 +89,8 @@ export function Board({ state, me, viewer: viewerProp, selection, lastMove, hint
       .filter(Boolean)
       .join(' ');
     // 투입 힌트면 놓을 칸에 그 말을 흐리게 그린다 — 판 밖(HTML)의 손패와 화살표로 잇기보다 '무엇을 어디에'가 바로 보인다.
-    const ghost = hint && hint.from === DROP && hint.to === i ? hint.piece : null;
+    // 다른 말을 고른 동안에는 그리지 않는다(view.hintGhost) — 그 말의 목적지 점이 우선이다.
+    const ghost = ghostPiece !== null && hint?.to === i ? ghostPiece : null;
 
     // 칸은 화면 칸 번호로 key 를 단다 — 좌석이 바뀌어 판이 뒤집혀도 같은 화면 칸의 노드가 남아,
     // 초점과 결과 창의 초점 복귀가 끊기지 않는다(보드 인덱스로 달면 다른 줄로 옮겨지며 새로 그려진다).

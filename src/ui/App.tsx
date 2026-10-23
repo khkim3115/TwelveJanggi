@@ -1,8 +1,8 @@
 // 솔로 게임 화면 — 차례 배너 + 상대 손패 + 보드 + 내 손패 + 조작 버튼 + 결과 오버레이.
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import type { HandKind } from '../core/board';
 import { DROP, other, type Player } from '../core/gameState';
-import { SIDE_LABEL, boardView } from '../core/view';
+import { SIDE_LABEL, boardView, newGameShortcutAllowed } from '../core/view';
 import { DIFFICULTY_LABEL } from '../engine/ai';
 import { canUndo, useGameStore } from '../store/gameStore';
 import { Board } from './Board';
@@ -14,6 +14,8 @@ import { TurnBanner } from './TurnBanner';
 import { isDialogOpen } from './useDialog';
 
 const NONE: ReadonlySet<HandKind> = new Set();
+const NEW_GAME_NOTICE = '판 중간에는 ↺ 새 게임 버튼으로 새로 시작합니다(N 은 판이 끝난 뒤).';
+const NOTICE_MS = 4000;
 
 export default function App() {
   const state = useGameStore((s) => s.state);
@@ -47,7 +49,15 @@ export default function App() {
   const prev = past[past.length - 1];
   const boardBefore = prev && prev.ply === state.ply - 1 ? prev.board : undefined;
 
-  // 단축키: H 힌트 · Z(또는 Backspace) 되돌리기 · N 새 게임.
+  // 판 중간에 N 을 누르면 새 게임 대신 잠깐 띄우는 안내(차례 배너의 낭독 줄에 나온다).
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (notice === null) return;
+    const t = window.setTimeout(() => setNotice(null), NOTICE_MS);
+    return () => window.clearTimeout(t);
+  }, [notice]);
+
+  // 단축키: H 힌트 · Z(또는 Backspace) 되돌리기 · N 새 게임(판이 시작 전이거나 끝났을 때만 — view.newGameShortcutAllowed).
   // 물리 키(e.code)로 본다 — 한글 입력 상태에서는 e.key 가 'ㅗ' 등으로 바뀐다. 모달이 열려 있거나
   // 조합 중·반복 입력·수정 키 조합이면 무시한다(모달 뒤의 판을 건드리거나 되돌리기가 연타되지 않게).
   useEffect(() => {
@@ -58,7 +68,10 @@ export default function App() {
       if (isDialogOpen()) return;
       if (e.code === 'KeyH') askHint();
       else if (e.code === 'KeyZ' || e.code === 'Backspace') undo();
-      else if (e.code === 'KeyN') newGame();
+      else if (e.code === 'KeyN') {
+        if (newGameShortcutAllowed(useGameStore.getState().state)) newGame();
+        else setNotice(NEW_GAME_NOTICE);
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -76,6 +89,7 @@ export default function App() {
         lastMove={lastMove}
         boardBefore={boardBefore}
         hint={hint}
+        notice={notice}
       />
 
       <div className="table">
