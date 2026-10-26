@@ -120,6 +120,10 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
 - 설치 버튼(`ui/InstallButton.tsx`)은 `beforeinstallprompt` 를 모듈에서 한 번 받아 두고 모든 버튼이 나눠 쓴다.
   헤더에는 아이콘(📥, `compact`)만 두고 페이지가 최대 폭(560px)보다 좁으면 숨긴다 — 첫 방문엔 이벤트가 판 도중에 와서
   헤더가 한 줄 늘며 판을 밀어내기 때문(좁은 화면은 홈 카드가 창구). 글자 버튼(`⬇ 앱 설치`)을 헤더에 넣으면 솔로 헤더가 늘 두 줄이 된다.
+- 보드게임 모음(허브, `data/links.ts` 의 `HUB_URL`)으로 가는 `← 보드게임 모음` 은 헤더 **줄이 아니라 그 위 한 줄**이다(`.hub-link`)
+  — 솔로 헤더 줄은 390px 에서 12px 남짓, 데스크톱도 📥 가 뜨면 35px 만 남아 무엇을 더해도 두 줄이 된다. `.page` 위 여백·간격을
+  음수 여백으로 빌려 화면이 12px 만 내려간다. 같은 탭으로 가고(허브도 게임을 같은 탭으로 연다), 설치한 앱(standalone)에서는
+  그리지 않는다(허브 `/` 는 앱 범위 밖).
 - 아이콘은 `public/icon.svg` 하나가 원본이다(王 은 글꼴이 아니라 획으로 그린다). 고친 뒤 `npm run generate-pwa-assets`.
 - `main` push 마다 `.github/workflows/deploy.yml` 이 GitHub Pages 로 배포한다(Node 24). repo Variables
   `VITE_SUPABASE_URL`·`VITE_SUPABASE_ANON_KEY` 가 비어 있으면 온라인 대전이 꺼진 채 나가지 않게 빌드가 멈춘다.
