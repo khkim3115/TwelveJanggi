@@ -46,14 +46,30 @@ export function isStandalone(): boolean {
   );
 }
 
+const subscribeDisplayMode = (cb: () => void) => {
+  if (typeof window === 'undefined') return () => {};
+  const mq = window.matchMedia('(display-mode: standalone)');
+  mq.addEventListener('change', cb);
+  return () => mq.removeEventListener('change', cb);
+};
+
+/**
+ * isStandalone 을 화면에 쓸 때. 데스크톱 크롬·엣지는 설치하면 지금 탭을 새로고침 없이 앱 창으로 옮기고('Chrome 에서 열기'는
+ * 그 반대) — 그때 바로 다시 그린다. 렌더 때 한 번 읽기만 하면 엉뚱한 다음 렌더(판 클릭 등)에 가서야 바뀌어 화면이 그때 움직인다.
+ */
+export function useStandalone(): boolean {
+  return useSyncExternalStore(subscribeDisplayMode, isStandalone, () => false);
+}
+
 /**
  * 설치할 수 있을 때만 그린다. 이미 설치한 앱으로 열었거나 브라우저가 제안하지 않으면 아무것도 그리지 않는다.
  * compact: 헤더용 아이콘 버튼(📥) — 옆 아이콘 버튼과 같은 폭이라 솔로 헤더도 한 줄에 들어가고, 좁은 화면에서는 CSS 로 숨긴다.
  */
 export function InstallButton({ compact = false }: { compact?: boolean }) {
   const prompt = useSyncExternalStore(subscribe, () => deferred, () => null);
-  const done = useSyncExternalStore(subscribe, () => installed || isStandalone(), () => false);
-  if (done || !prompt) return null;
+  const installedHere = useSyncExternalStore(subscribe, () => installed, () => false);
+  const standalone = useStandalone();
+  if (installedHere || standalone || !prompt) return null;
 
   const install = async () => {
     await prompt.prompt();

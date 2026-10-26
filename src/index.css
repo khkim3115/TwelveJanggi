@@ -127,6 +127,32 @@ a {
   gap: 14px;
 }
 
+/* 헤더 줄 위 '← 보드게임 모음'(Header) — 헤더 줄에는 자리가 없어 그 위 한 줄에 둔다. 24px 줄 상자를 .page 위 여백(12px)에
+   올리고 아래 간격(14px)을 지워 헤더가 12px 만 내려간다(.page 여백·간격을 바꾸면 margin 도 함께). 폭은 글자만큼 — 늘어나면
+   그 줄 전체가 링크가 된다. 상자가 페이지 위 끝에 닿아 초점 테는 안쪽에 그린다. */
+.hub-link {
+  display: block;
+  width: fit-content;
+  margin: -12px -4px -14px;
+  padding: 0 4px;
+  font-size: 0.8rem;
+  line-height: 24px;
+  white-space: nowrap;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.hub-link:hover,
+.hub-link:focus-visible {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.hub-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .topbar {
   display: flex;
   align-items: center;

@@ -13,10 +13,16 @@ export interface CommunityLink {
   url: string;
 }
 
+/**
+ * 보드게임 모음(허브) — 유저 사이트 루트(khkim3115/khkim3115.github.io). 이 게임은 그 아래 하위 경로라 '../' 로도
+ * 가지만, 어디로 가는지 드러나게 절대 주소를 쓴다.
+ */
+export const HUB_URL = 'https://khkim3115.github.io/';
+
 /** 카카오 오픈채팅 초대 링크. 변경은 여기 한 곳만. */
 export const KAKAO_OPEN_CHAT_URL = 'https://open.kakao.com/o/sR8A9fBi';
 
-// 디스코드는 이번 범위 아님(#54). 채널을 만들면 아래 url 만 채우면 자동 노출된다.
+// 디스코드 채널은 아직 없다. 채널을 만들면 아래 url 만 채우면 자동 노출된다.
 const DISCORD_INVITE_URL = '';
 
 /** 커뮤니티 링크 목록(확장 가능). url 이 채워진 항목만 노출된다. */
