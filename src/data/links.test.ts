@@ -1,6 +1,13 @@
-// 커뮤니티 링크(외부) 단일 진실원본의 무결성 + graceful 필터 테스트.
+// 외부 링크 단일 진실원본의 무결성 + graceful 필터 테스트.
 import { describe, it, expect } from 'vitest';
-import { COMMUNITY_LINKS, KAKAO_OPEN_CHAT_URL, activeCommunityLinks } from './links';
+import { COMMUNITY_LINKS, HUB_URL, KAKAO_OPEN_CHAT_URL, activeCommunityLinks } from './links';
+
+describe('보드게임 모음(허브) 링크', () => {
+  it('HUB_URL 은 https 로 보드게임 모음(유저 사이트 루트)을 가리킨다', () => {
+    expect(new URL(HUB_URL).protocol).toBe('https:');
+    expect(HUB_URL).toBe('https://khkim3115.github.io/');
+  });
+});
 
 describe('커뮤니티 링크', () => {
   it('카카오 오픈채팅 URL 상수가 채워져 있다', () => {
