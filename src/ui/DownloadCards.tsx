@@ -1,8 +1,9 @@
 // 앱으로 받기 — PWA 설치 안내. 이미 설치한 앱(독립 창)으로 열었으면 그리지 않는다.
-import { InstallButton, isStandalone } from './InstallButton';
+import { InstallButton, useStandalone } from './InstallButton';
 
 export function DownloadCards() {
-  if (isStandalone()) return null;
+  const standalone = useStandalone();
+  if (standalone) return null;
   return (
     <section className="home-card">
       <h2>📥 앱으로 받기</h2>

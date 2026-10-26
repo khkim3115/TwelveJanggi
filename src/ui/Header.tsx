@@ -9,7 +9,7 @@ import { SettingsPanel } from './SettingsPanel';
 import { HelpPanel } from './HelpPanel';
 import { PatchNotesModal } from './PatchNotesModal';
 import { FeedbackModal } from './FeedbackModal';
-import { InstallButton, isStandalone } from './InstallButton';
+import { InstallButton, useStandalone } from './InstallButton';
 
 const GUIDE_KEY = 'tj_seen_guide';
 
@@ -47,8 +47,8 @@ export function Header({ title, subtitle, showHome, showSettings, autoHelp, chil
   const setHelpOpen = useAppStore((s) => s.setHelpOpen);
   // 허브 링크는 헤더 줄이 아니라 그 위 한 줄이다 — 솔로 헤더 줄은 390px 에서 12px 남짓, 데스크톱도 📥 가 뜨면 35px 만 남는다.
   // 같은 탭으로 간다(허브도 게임을 같은 탭으로 연다). 설치한 앱(독립 창)에서는 허브(/)가 앱 범위 밖이라 그리지 않는다
-  // — DownloadCards 와 같은 판단이고, 세션 중 바뀌지 않아 판 도중 헤더가 움직이지 않는다.
-  const showHub = !isStandalone();
+  // — DownloadCards 와 같은 판단. 판 도중 설치해 탭이 앱 창으로 옮겨 가면 그 순간(창이 바뀌며 어차피 새로 그릴 때) 사라진다.
+  const showHub = !useStandalone();
 
   // 처음 방문한 사용자에게는 도움말(규칙)을 한 번 자동으로 띄운다 — 규칙을 모르는 게임이라 특히 필요.
   useEffect(() => {
