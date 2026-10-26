@@ -67,8 +67,9 @@ export function useStandalone(): boolean {
  */
 export function InstallButton({ compact = false }: { compact?: boolean }) {
   const prompt = useSyncExternalStore(subscribe, () => deferred, () => null);
-  const done = useSyncExternalStore(subscribe, () => installed || isStandalone(), () => false);
-  if (done || !prompt) return null;
+  const installedHere = useSyncExternalStore(subscribe, () => installed, () => false);
+  const standalone = useStandalone();
+  if (installedHere || standalone || !prompt) return null;
 
   const install = async () => {
     await prompt.prompt();

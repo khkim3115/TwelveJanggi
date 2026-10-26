@@ -41,7 +41,7 @@ export const CHANGELOG: ChangelogEntry[] = [
       },
       {
         type: 'improvement',
-        text: '⌨️ 판에서 방향키로 칸을 옮길 수 있어요. Tab 한 번으로 판에 들어가 방향키로 옮기고 Enter·Space 로 고르거나 둡니다(전에는 열두 칸을 Tab 으로 하나씩 지나야 했어요). 화면 낭독기는 판을 4행 3열 표로 읽어요.',
+        text: '⌨️ 판에서 방향키로 칸을 옮길 수 있어요. Tab 한 번으로 판에 들어가 칸을 옮기고 Enter·Space 로 고르거나 둡니다(전에는 열두 칸을 Tab 으로 하나씩 지나야 했어요). 화면 낭독기는 판을 4행 3열 표로 읽어요.',
       },
       {
         type: 'improvement',
