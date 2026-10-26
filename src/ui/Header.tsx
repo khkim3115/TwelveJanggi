@@ -1,13 +1,15 @@
 // 모든 화면 공통 상단 바: 브랜드 + (홈/화면별 추가요소) + 테마전환·도움말·패치노트·피드백·앱 설치·설정.
+// 브라우저에서는 그 위에 보드게임 모음(허브)으로 가는 링크 한 줄을 둔다.
 import { useEffect, type ReactNode } from 'react';
 import { useAppStore } from '../store/appStore';
 import { useGameStore } from '../store/gameStore';
 import { LATEST_VERSION } from '../data/changelog';
+import { HUB_URL } from '../data/links';
 import { SettingsPanel } from './SettingsPanel';
 import { HelpPanel } from './HelpPanel';
 import { PatchNotesModal } from './PatchNotesModal';
 import { FeedbackModal } from './FeedbackModal';
-import { InstallButton } from './InstallButton';
+import { InstallButton, isStandalone } from './InstallButton';
 
 const GUIDE_KEY = 'tj_seen_guide';
 
@@ -43,6 +45,10 @@ export function Header({ title, subtitle, showHome, showSettings, autoHelp, chil
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
   const helpOpen = useAppStore((s) => s.helpOpen);
   const setHelpOpen = useAppStore((s) => s.setHelpOpen);
+  // 허브 링크는 헤더 줄이 아니라 그 위 한 줄이다 — 솔로 헤더 줄은 390px 에서 12px 남짓, 데스크톱도 📥 가 뜨면 35px 만 남는다.
+  // 같은 탭으로 간다(허브도 게임을 같은 탭으로 연다). 설치한 앱(독립 창)에서는 허브(/)가 앱 범위 밖이라 그리지 않는다
+  // — DownloadCards 와 같은 판단이고, 세션 중 바뀌지 않아 판 도중 헤더가 움직이지 않는다.
+  const showHub = !isStandalone();
 
   // 처음 방문한 사용자에게는 도움말(규칙)을 한 번 자동으로 띄운다 — 규칙을 모르는 게임이라 특히 필요.
   useEffect(() => {
@@ -79,6 +85,11 @@ export function Header({ title, subtitle, showHome, showSettings, autoHelp, chil
 
   return (
     <>
+      {showHub && (
+        <a className="hub-link" href={HUB_URL}>
+          <span aria-hidden="true">← </span>보드게임 모음
+        </a>
+      )}
       <div className="topbar">
         <div className="brand">
           <h1>{title}</h1>

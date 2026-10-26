@@ -146,6 +146,8 @@ describe('글자 대비', () => {
       // 난이도 설명 — 보통 줄은 --surface-2, 고른 줄은 카드(--surface) 위에 반투명 --accent-soft
       ['.diff-desc', ['--surface-2']],
       ['.diff-row.on .diff-desc', [['--accent-soft', '--surface']]],
+      // 헤더 위 '보드게임 모음' 링크 — 페이지 바탕 위 작은 글자. 마우스·초점의 --accent 는 위 토큰 검사가 지킨다.
+      ['.hub-link', ['--bg']],
     ];
     for (const t of [dark, light])
       for (const [sel, bgs] of RULES) {
