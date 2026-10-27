@@ -28,22 +28,7 @@ import {
 } from '../core/gameState';
 import { resolveClick, type Selection } from '../core/view';
 import { CHAT_COLUMNS, CHAT_KEEP, mergeMessages, sanitizeChatText, toChatMessage, type ChatMessage } from '../lib/chat';
-
-/**
- * Supabase 클라이언트를 불러온다. 청크를 못 받으면(오프라인·배포 뒤 남은 옛 탭) 브라우저마다 다른 영문 오류 대신
- * 정해 둔 문구로 바꿀 수 있게 표시를 단다 — 실패한 동적 import 는 브라우저가 기억해서 새로고침해야 풀린다.
- */
-/**
- * Supabase 클라이언트 모듈(동적 import — 첫 화면 번들에서 뺀다). 약속을 하나만 만들어 나눠 쓴다: 동시에 여러 번
- * import 하면 vitest 의 모듈 mock 이 그중 하나에 진짜 모듈을 돌려주어 단위 테스트가 실서버로 나간 일이 있었다(#11).
- * 불러오지 못하면 비워 두어 다음 호출이 다시 시도한다.
- */
-let supabaseModule: Promise<typeof import('../lib/supabase')> | null = null;
-const loadSupabase = () =>
-  (supabaseModule ??= import('../lib/supabase').catch(() => {
-    supabaseModule = null;
-    throw new Error('client load failed');
-  }));
+import { loadSupabase } from '../lib/loadSupabase';
 
 export type MpStatus = 'lobby' | 'playing' | 'finished' | 'abandoned';
 
