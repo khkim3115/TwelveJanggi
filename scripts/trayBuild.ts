@@ -146,7 +146,7 @@ export const WEB_ONLY_MODULES: readonly string[] = Object.freeze([
 ]);
 const WEB_ONLY_LOWER = new Set(WEB_ONLY_MODULES.map((file) => file.toLowerCase()));
 
-/** '\0' 접두와 쿼리(?worker · ?url · ?import …)를 뗀 id. '#' 은 실제 경로에 올 수 있어 남긴다. */
+/** '\0' 접두와 쿼리(?worker · ?url · ?import …)를 뗀 id. '#…' 접미는 toRepoPath 가 저장소 상대 부분에서 뗀다(루트의 '#' 은 그대로). */
 function cleanId(id: string): string {
   const bare = id.startsWith('\0') ? id.slice(1) : id;
   const query = bare.indexOf('?');
@@ -157,13 +157,16 @@ function cleanId(id: string): string {
  * 모듈 id → 저장소 상대 POSIX 경로. 루트 밖이면 null. 문자열만 본다(파일 시스템에 묻지 않는다).
  * '\' 를 '/' 로 바꾸고 루트 끝 '/' 를 뗀 뒤 접두를 대소문자 없이 비교한다 — win32 는 대소문자를 가리지 않고,
  * 같은 판정을 ubuntu CI 에서도 내야 한다. 접두 다음 글자가 '/' 여야 한다('/r2' 는 '/r' 안이 아니다).
+ * 저장소 상대 부분의 '#…' 도 뗀다 — Vite 는 node_modules 밖의 'x.ts#y' 를 '?…' 처럼 x.ts 로 풀고 '#y' 를 id 에 남긴다.
+ * (node_modules 안에서는 '#' 이 파일 이름일 수 있지만 웹 전용 목록 · 트레이 경로는 모두 node_modules 밖이다.)
  */
 export function toRepoPath(id: string, root: string): string | null {
   const file = cleanId(id).replace(/\\/g, '/');
   const base = root.replace(/\\/g, '/').replace(/\/+$/, '');
   if (file.length <= base.length + 1 || file[base.length] !== '/') return null;
   if (file.slice(0, base.length).toLowerCase() !== base.toLowerCase()) return null;
-  return file.slice(base.length + 1);
+  const path = file.slice(base.length + 1).replace(/#.*$/, '');
+  return path === '' ? null : path;
 }
 
 export function isWebOnlyModule(id: string, root: string): boolean {

@@ -199,15 +199,19 @@ describe('toRepoPath', () => {
     expect(toRepoPath('D:/Google Drive/홍 길동/r/src/x.ts', 'D:\\Google Drive\\홍 길동\\r\\')).toBe('src/x.ts');
   });
 
-  it("'\\0' 와 쿼리를 뗀다", () => {
+  it("'\\0' · 쿼리 · '#' 접미를 뗀다 — 루트의 '#' 은 그대로", () => {
     expect(toRepoPath('\0/r/src/x.ts?worker&url', '/r/')).toBe('src/x.ts');
     expect(toRepoPath('D:\\r\\src\\x.ts?import', 'D:\\r\\')).toBe('src/x.ts');
+    expect(toRepoPath('/r/src/x.ts#y', '/r/')).toBe('src/x.ts');
+    expect(toRepoPath('D:\\r\\src\\x.ts#y?worker', 'D:\\r\\')).toBe('src/x.ts');
+    expect(toRepoPath('/a#b/src/x.ts#y', '/a#b/')).toBe('src/x.ts');
   });
 
   it('루트 밖이면 null — 접두 함정 포함', () => {
     expect(toRepoPath('/r2/src/x.ts', '/r')).toBeNull();
     expect(toRepoPath('/other/src/x.ts', '/r/')).toBeNull();
     expect(toRepoPath('/r', '/r/')).toBeNull();
+    expect(toRepoPath('/r/#y', '/r/')).toBeNull();
     expect(toRepoPath('virtual:pwa-register', '/r/')).toBeNull();
   });
 });
@@ -235,7 +239,7 @@ describe('isWebOnlyModule', () => {
     }
   });
 
-  it('PWA 가상 모듈 · 쿼리가 붙은 id · 다른 대소문자도 웹 전용이다', () => {
+  it('PWA 가상 모듈 · 쿼리나 # 접미가 붙은 id · 다른 대소문자도 웹 전용이다', () => {
     for (const id of [
       '\0virtual:pwa-register/react',
       'virtual:pwa-register',
@@ -245,6 +249,10 @@ describe('isWebOnlyModule', () => {
       '/r/src/ui/Header.tsx?url',
       '/r/src/ui/Header.tsx?import',
       '/r/src/store/appStore.ts?raw',
+      // node_modules 밖의 'x.ts#y' 는 Vite 가 x.ts 로 풀고 '#y' 를 id 에 남긴다('?…' 와 같다)
+      '/r/src/store/appStore.ts#x',
+      '/r/src/ui/Header.tsx?worker#x',
+      '/r/src/ui/Header.tsx#x?worker',
     ]) {
       expect(isWebOnlyModule(id, '/r/'), id).toBe(true);
     }
@@ -265,7 +273,12 @@ describe('isWebOnlyModule', () => {
 describe('isTrayModule', () => {
   it('src/tray/** 와 tray.html 은 트레이 모듈이다', () => {
     for (const { root, base } of ROOTS) {
-      for (const id of [`${base}/src/tray/TrayApp.tsx`, `${base}/tray.html`, `${base}/src/tray/x.ts?worker&url`]) {
+      for (const id of [
+        `${base}/src/tray/TrayApp.tsx`,
+        `${base}/tray.html`,
+        `${base}/tray.html#x`,
+        `${base}/src/tray/x.ts?worker&url`,
+      ]) {
         expect(isTrayModule(id, root), id).toBe(true);
       }
     }
