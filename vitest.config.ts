@@ -8,6 +8,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     // scripts/ 는 빌드 도구 시험(트레이 CSP · import 가드 — 실제 Vite 빌드를 돈다)이다.
-    include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
+    // desktop/lib/ 는 트레이 앱의 순수 모듈(.cjs) 시험이다 — electron 없이 돈다(desktop/node_modules 가 없어도 된다).
+    include: ['src/**/*.test.ts', 'scripts/**/*.test.ts', 'desktop/lib/**/*.test.ts'],
   },
 });
