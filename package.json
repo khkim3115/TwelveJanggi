@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:tray": "vite build --config vite.tray.config.ts",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",

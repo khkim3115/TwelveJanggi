@@ -1,6 +1,9 @@
 node_modules
 dist
 dist-ssr
+# 트레이 앱 빌드 산출물 · 스모크 결과(desktop/smoke-out)
+dist-tray
+desktop/smoke-out
 *.local
 .DS_Store
 .vscode/*

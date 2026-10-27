@@ -1,11 +1,11 @@
 // scripts/trayBuild.ts 시험 — CSP 한 원본(설계 §5.3) · tray-build.json · 웹 전용/트레이 import 가드(§5.4).
 // 빌드 시험은 실제 Vite 빌드다. envDir 은 빈 임시 폴더라 .env* 를 읽지 않는다. Vite 는 process.env 의 VITE_* 도
 // 읽으므로, Supabase 값이 결과에 닿는 시험은 vi.stubEnv 로 값을 정해 둔다(셸에 값이 있어도 결과가 같게).
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { build, type Plugin, type Rollup } from 'vite';
+import { build, loadConfigFromFile, type Plugin, type PluginOption, type Rollup } from 'vite';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   WEB_ONLY_MODULES,
@@ -341,6 +341,72 @@ describe('trayGuard 음성 빌드', () => {
   );
 });
 
+describe('webGuard 음성 빌드', () => {
+  it(
+    'src/tray 를 들면 거부한다 — 같은 진입이 가드 없이는 빌드된다',
+    async () => {
+      // 대조: 가드가 없으면 통과해야 한다 — 거부가 가드 때문이지 진입이 깨져서가 아님을 보인다.
+      await expect(buildFixture('guard-tray.ts', [])).resolves.toBeDefined();
+      const error = await buildError(buildFixture('guard-tray.ts', [webGuard(ROOT)]));
+      expect(error.plugin).toBe('tj-web-guard');
+      expect(error.hook).toBe('load');
+      expect(error.message).toContain('웹 빌드에 트레이 모듈이 들어왔다: src/tray/desktop.ts');
+    },
+    BUILD_TIMEOUT,
+  );
+});
+
+// 가드가 워커 하위 빌드에서도 도는지 실제 빌드로 본다 — plugins 의 훅은 워커 하위 빌드를 보지 못해 worker.plugins 에 따로 넣는다.
+// 임시 루트(진입 → 워커 → import)에서 가드를 worker.plugins 에만 두므로, 거부는 워커 하위 빌드에서만 나올 수 있다.
+// 워커 하위 빌드의 오류는 Rollup 이 plugin 'vite:worker-import-meta-url' 로 다시 붙이므로 plugin 필드가 아니라 문구로 판정한다.
+function workerGuardRoot(imported: string): string {
+  // Vite 의 id 는 실제 경로다 — 가드 루트도 같은 형태여야 한다(macOS 의 /var → /private/var, Windows 8.3 이름 같은 별칭을 푼다).
+  const dir = realpathSync.native(tempDir('tj-workerguard-'));
+  for (const file of ['src/ui/Board.tsx', 'src/ui/Header.tsx', 'src/tray/x.ts']) {
+    mkdirSync(dirname(join(dir, file)), { recursive: true });
+    writeFileSync(join(dir, file), 'export const x = 1;\n');
+  }
+  writeFileSync(join(dir, 'main.ts'), "new Worker(new URL('./w.ts', import.meta.url), { type: 'module' });\n");
+  writeFileSync(join(dir, 'w.ts'), `import './${imported}';\n`);
+  return dir;
+}
+
+function buildWithWorkerGuard(dir: string, guard: (root: string) => Plugin) {
+  return build({
+    root: dir,
+    configFile: false,
+    envDir,
+    logLevel: 'silent',
+    publicDir: false,
+    build: { write: false, rollupOptions: { input: join(dir, 'main.ts') } },
+    worker: { format: 'es', plugins: () => [guard(dir)] },
+  });
+}
+
+describe('워커 하위 빌드의 가드', () => {
+  it(
+    'trayGuard — 워커가 웹 전용 모듈을 들면 거부한다',
+    async () => {
+      await expect(buildWithWorkerGuard(workerGuardRoot('src/ui/Board.tsx'), trayGuard)).resolves.toBeDefined();
+      const error = await buildError(buildWithWorkerGuard(workerGuardRoot('src/ui/Header.tsx'), trayGuard));
+      expect(error.message).toContain('[plugin tj-tray-guard]');
+      expect(error.message).toContain('트레이 빌드에 웹 전용 모듈이 들어왔다: src/ui/Header.tsx');
+    },
+    BUILD_TIMEOUT,
+  );
+
+  it(
+    'webGuard — 워커가 트레이 모듈을 들면 거부한다',
+    async () => {
+      await expect(buildWithWorkerGuard(workerGuardRoot('src/ui/Board.tsx'), webGuard)).resolves.toBeDefined();
+      const error = await buildError(buildWithWorkerGuard(workerGuardRoot('src/tray/x.ts'), webGuard));
+      expect(error.message).toContain('[plugin tj-web-guard]');
+      expect(error.message).toContain('웹 빌드에 트레이 모듈이 들어왔다: src/tray/x.ts');
+    },
+    BUILD_TIMEOUT,
+  );
+});
+
 // trayCsp 는 임시 루트(트레이 HTML · 진입 · AI 워커)로 디스크에 빌드한다 — writeBundle 은 쓰기 빌드에서만 돈다.
 function trayCspRoot(trayHtml = TRAY_HTML): string {
   const dir = tempDir('tj-traycsp-');
@@ -467,4 +533,61 @@ describe('buildTrayBuildInfo', () => {
       commit: null,
     });
   });
+});
+
+// 배선 시험 — 설정 파일을 읽어(빌드 없이) 가드 · CSP 플러그인이 있어야 할 자리에 있는지 본다.
+// 가드가 실제로 거부하는지는 위의 빌드 시험이 본다. 여기서는 두 설정이 그 가드를 정말 쓰는지만 본다.
+
+/** 플러그인 옵션에서 이름을 펼친다 — 중첩 배열(react() · VitePWA() 는 배열) · false · Promise 가 올 수 있다. */
+async function pluginNames(option: PluginOption): Promise<string[]> {
+  const value = await option;
+  if (!value) return [];
+  if (Array.isArray(value)) return (await Promise.all(value.map(pluginNames))).flat();
+  return [value.name];
+}
+
+/** 설정 파일을 build 모드로 읽는다(저장소 루트 기준 상대 경로). 파일이 없거나 읽지 못하면 던진다. */
+async function loadUserConfig(file: string) {
+  const loaded = await loadConfigFromFile({ command: 'build', mode: 'production' }, join(ROOT, file), ROOT);
+  if (!loaded) throw new Error(`${file} 을 읽지 못했다`);
+  return loaded.config;
+}
+
+describe('Vite 설정 배선', () => {
+  it(
+    '트레이 설정 — 가드 · CSP 는 plugins 에, 가드만 worker.plugins 에 있다',
+    async () => {
+      const config = await loadUserConfig('vite.tray.config.ts');
+      const names = await pluginNames(config.plugins ?? []);
+      expect(names).toEqual(expect.arrayContaining(['tj-tray-guard', 'tj-tray-csp']));
+      // 트레이 출력에 PWA 도, 웹 가드도 없다
+      expect(names.filter((name) => name.startsWith('vite-plugin-pwa') || name === 'tj-web-guard')).toEqual([]);
+      // CSP · 출력 검사는 워커 번들마다 돌게 되므로 워커에는 가드만 넣는다
+      expect(await pluginNames(config.worker?.plugins?.() ?? [])).toEqual(['tj-tray-guard']);
+      // 가드 루트 = 빌드 루트(저장소 루트)이고 진입도 거기서 푼다(상대 경로는 cwd 기준이라 다른 폴더에서 못 찾는다).
+      // publicDir false 는 public/ 의 웹 자원이 트레이 출력에 복사되는 것을 막는다.
+      expect(config).toMatchObject({
+        root: ROOT,
+        base: './',
+        publicDir: false,
+        worker: { format: 'es' },
+        build: { outDir: 'dist-tray', emptyOutDir: true, rollupOptions: { input: resolve(ROOT, 'tray.html') } },
+      });
+    },
+    BUILD_TIMEOUT,
+  );
+
+  it(
+    '웹 설정 — 웹 가드가 plugins 와 worker.plugins 에 있고 트레이 플러그인은 없다',
+    async () => {
+      const config = await loadUserConfig('vite.config.ts');
+      const names = await pluginNames(config.plugins ?? []);
+      expect(names).toContain('tj-web-guard');
+      expect(names.filter((name) => name.startsWith('tj-tray'))).toEqual([]);
+      expect(await pluginNames(config.worker?.plugins?.() ?? [])).toEqual(['tj-web-guard']);
+      // 나머지 옵션은 그대로다
+      expect(config).toMatchObject({ base: './', worker: { format: 'es' } });
+    },
+    BUILD_TIMEOUT,
+  );
 });
