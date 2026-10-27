@@ -5,7 +5,15 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { build, loadConfigFromFile, type Plugin, type PluginOption, type Rollup } from 'vite';
+import {
+  build,
+  loadConfigFromFile,
+  normalizePath,
+  type Plugin,
+  type PluginOption,
+  type Rollup,
+  type UserConfig,
+} from 'vite';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   WEB_ONLY_MODULES,
@@ -535,15 +543,21 @@ describe('buildTrayBuildInfo', () => {
   });
 });
 
-// 배선 시험 — 설정 파일을 읽어(빌드 없이) 가드 · CSP 플러그인이 있어야 할 자리에 있는지 본다.
-// 가드가 실제로 거부하는지는 위의 빌드 시험이 본다. 여기서는 두 설정이 그 가드를 정말 쓰는지만 본다.
+// 배선 시험 — 설정 파일을 읽어(빌드 없이) 가드 · CSP 플러그인이 있어야 할 자리에 있는지, 그 자리의 가드가 일하는지 본다.
+// 어떤 import 를 어떻게 막는지는 위의 빌드 시험이 본다 — 거기서는 시험이 가드를 직접 만든다. 여기서는 두 설정이 만든
+// 가드 객체의 load 훅을 부른다. 가드의 루트는 설정 파일 안의 클로저라 이름만 봐서는 맞는지 알 수 없고, 루트가 틀린
+// 가드(예: 엉뚱한 폴더 · 옮긴 설정 파일)는 이름이 같아도 아무것도 거부하지 않는다 — 시험은 초록인 채 빌드만 열린다.
 
-/** 플러그인 옵션에서 이름을 펼친다 — 중첩 배열(react() · VitePWA() 는 배열) · false · Promise 가 올 수 있다. */
-async function pluginNames(option: PluginOption): Promise<string[]> {
+/** 플러그인 옵션을 펼친다 — 중첩 배열(react() · VitePWA() 는 배열) · false · Promise 가 올 수 있다. */
+async function flattenPlugins(option: PluginOption): Promise<Plugin[]> {
   const value = await option;
   if (!value) return [];
-  if (Array.isArray(value)) return (await Promise.all(value.map(pluginNames))).flat();
-  return [value.name];
+  if (Array.isArray(value)) return (await Promise.all(value.map(flattenPlugins))).flat();
+  return [value];
+}
+
+async function pluginNames(option: PluginOption): Promise<string[]> {
+  return (await flattenPlugins(option)).map((plugin) => plugin.name);
 }
 
 /** 설정 파일을 build 모드로 읽는다(저장소 루트 기준 상대 경로). 파일이 없거나 읽지 못하면 던진다. */
@@ -553,9 +567,49 @@ async function loadUserConfig(file: string) {
   return loaded.config;
 }
 
+/**
+ * 플러그인의 load 훅을 저장소 안 파일(저장소 루트 기준 상대 경로)로 직접 불러 결과를 값으로 돌려준다. this.error 는
+ * 던지는 가짜 문맥이라 거부하면 { rejected: 가드의 문구 }, 통과시키면 { passed: 훅의 반환값 }(가드는 null)이다.
+ */
+async function probeLoad(plugin: Plugin, file: string): Promise<{ rejected: string } | { passed: unknown }> {
+  const hook = typeof plugin.load === 'function' ? plugin.load : plugin.load?.handler;
+  if (!hook) throw new Error(`${plugin.name} 에 load 훅이 없다`);
+  const context = {
+    error(message: Rollup.RollupError | string): never {
+      throw new Error(typeof message === 'string' ? message : message.message);
+    },
+  };
+  try {
+    // 모듈 id 는 Vite 가 쓰는 모양('/' 구분자의 실제 경로)으로 준다
+    return { passed: await hook.call(context as Rollup.PluginContext, normalizePath(join(ROOT, file))) };
+  } catch (error) {
+    return { rejected: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * 설정이 만든 가드를 직접 부른다. plugins 의 가드와 worker.plugins() 의 가드는 따로 만들어지는 객체라 둘 다 본다.
+ * 금지 모듈은 가드 자신의 문구로 거부돼야 하고, 허용 모듈은 null 로 통과해야 한다(로딩은 Vite 에 맡긴다).
+ */
+async function expectGuardsEnforce(config: UserConfig, name: string, forbidden: string, message: string) {
+  // 두 가드 모두 통과시키는 모듈 — 거부가 아무거나 막는 가드 때문이 아님을 보인다
+  const allowed = 'src/core/board.ts';
+  const places = { plugins: config.plugins ?? [], 'worker.plugins()': config.worker?.plugins?.() ?? [] };
+  for (const [place, option] of Object.entries(places)) {
+    // 가드가 없는 채로 통과하지 못하게 — 자리마다 정확히 하나여야 한다
+    const guards = (await flattenPlugins(option)).filter((plugin) => plugin.name === name);
+    expect(guards, `${place} 의 ${name} 개수`).toHaveLength(1);
+    const [guard] = guards;
+    expect(await probeLoad(guard, forbidden), `${place} 의 ${name} → ${forbidden}`).toEqual({
+      rejected: expect.stringContaining(message),
+    });
+    expect(await probeLoad(guard, allowed), `${place} 의 ${name} → ${allowed}`).toEqual({ passed: null });
+  }
+}
+
 describe('Vite 설정 배선', () => {
   it(
-    '트레이 설정 — 가드 · CSP 는 plugins 에, 가드만 worker.plugins 에 있다',
+    '트레이 설정 — 가드 · CSP 는 plugins 에, 가드만 worker.plugins 에 있고 두 가드는 웹 전용 모듈을 거부한다',
     async () => {
       const config = await loadUserConfig('vite.tray.config.ts');
       const names = await pluginNames(config.plugins ?? []);
@@ -573,12 +627,19 @@ describe('Vite 설정 배선', () => {
         worker: { format: 'es' },
         build: { outDir: 'dist-tray', emptyOutDir: true, rollupOptions: { input: resolve(ROOT, 'tray.html') } },
       });
+      // 설정이 만든 가드가 일한다 — 가드 루트가 틀리면 위의 이름 검사는 그대로 통과하고 가드만 꺼진다
+      await expectGuardsEnforce(
+        config,
+        'tj-tray-guard',
+        'src/ui/Header.tsx',
+        '트레이 빌드에 웹 전용 모듈이 들어왔다: src/ui/Header.tsx',
+      );
     },
     BUILD_TIMEOUT,
   );
 
   it(
-    '웹 설정 — 웹 가드가 plugins 와 worker.plugins 에 있고 트레이 플러그인은 없다',
+    '웹 설정 — 웹 가드가 plugins 와 worker.plugins 에 있고 둘 다 트레이 모듈을 거부하며 트레이 플러그인은 없다',
     async () => {
       const config = await loadUserConfig('vite.config.ts');
       const names = await pluginNames(config.plugins ?? []);
@@ -587,6 +648,13 @@ describe('Vite 설정 배선', () => {
       expect(await pluginNames(config.worker?.plugins?.() ?? [])).toEqual(['tj-web-guard']);
       // 나머지 옵션은 그대로다
       expect(config).toMatchObject({ base: './', worker: { format: 'es' } });
+      // 설정이 만든 가드가 일한다 — 웹 Vite 루트는 cwd 라 트레이 설정처럼 root 옵션으로는 가드 루트를 볼 수 없다
+      await expectGuardsEnforce(
+        config,
+        'tj-web-guard',
+        'src/tray/desktop.ts',
+        '웹 빌드에 트레이 모듈이 들어왔다: src/tray/desktop.ts',
+      );
     },
     BUILD_TIMEOUT,
   );
