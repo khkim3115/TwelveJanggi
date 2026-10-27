@@ -1,0 +1,457 @@
+// scripts/trayBuild.ts 시험 — CSP 한 원본(설계 §5.3) · tray-build.json · 웹 전용/트레이 import 가드(§5.4).
+// 빌드 시험은 실제 Vite 빌드다. envDir 은 빈 임시 폴더라 .env* 를 읽지 않는다. Vite 는 process.env 의 VITE_* 도
+// 읽으므로, Supabase 값이 결과에 닿는 시험은 vi.stubEnv 로 값을 정해 둔다(셸에 값이 있어도 결과가 같게).
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { build, type Plugin, type Rollup } from 'vite';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import {
+  WEB_ONLY_MODULES,
+  buildTrayBuildInfo,
+  buildTrayCsp,
+  injectCspMeta,
+  isTrayModule,
+  isWebOnlyModule,
+  repoRoot,
+  toRepoPath,
+  trayCsp,
+  trayGuard,
+  webGuard,
+} from './trayBuild';
+
+const ROOT = repoRoot(new URL('..', import.meta.url).href);
+const BUILD_TIMEOUT = 60_000;
+
+// Global Constraints 의 meta 판(Supabase 값 없음) 그대로다.
+const META_NO_SUPABASE =
+  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; " +
+  "worker-src 'self'; manifest-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'";
+const FRAME_ANCESTORS = "; frame-ancestors 'none'";
+const CHARSET = '<meta charset="UTF-8" />';
+const cspTag = (meta: string) => `<meta http-equiv="Content-Security-Policy" content="${meta}" />`;
+// 트레이 HTML 모양(charset 이 head 의 첫 자식) — injectCspMeta 와 trayCsp 빌드 시험이 함께 쓴다.
+const TRAY_HTML = [
+  '<!doctype html>',
+  '<html lang="ko">',
+  '  <head>',
+  `    ${CHARSET}`,
+  '    <title>t</title>',
+  '  </head>',
+  '  <body>',
+  '    <script type="module" src="./main.ts"></script>',
+  '  </body>',
+  '</html>',
+  '',
+].join('\n');
+
+// 시험 임시 폴더 — mkdtemp 로 만들고 끝나면 지운다.
+const temps: string[] = [];
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  temps.push(dir);
+  return dir;
+}
+let envDir = '';
+beforeAll(() => {
+  envDir = tempDir('tj-traybuild-env-');
+});
+afterAll(() => {
+  for (const dir of temps) rmSync(dir, { recursive: true, force: true });
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
+/**
+ * 저장소 루트에서 fixture 하나를 진입으로 메모리 빌드한다(디스크에 쓰지 않는다).
+ * 가드 음성 빌드는 이것을 쓴다 — 웹 가드 음성 빌드도 fixture 와 plugins 만 바꿔 부른다.
+ */
+function buildFixture(fixture: string, plugins: Plugin[]) {
+  const input = fileURLToPath(new URL(`./fixtures/${fixture}`, import.meta.url));
+  return build({
+    root: ROOT,
+    configFile: false,
+    envDir,
+    logLevel: 'silent',
+    build: { write: false, rollupOptions: { input } },
+    plugins,
+  });
+}
+
+/** 빌드가 실패해야 한다 — 그 오류를 돌려준다(통과하면 시험이 실패한다). */
+async function buildError(run: Promise<unknown>): Promise<Rollup.RollupError> {
+  try {
+    await run;
+  } catch (error) {
+    return error as Rollup.RollupError;
+  }
+  throw new Error('빌드가 통과했다 — 실패해야 한다');
+}
+
+/** charset meta 다음에 오는 첫 태그(사이 공백은 건너뛴다). */
+function tagAfterCharset(html: string): string | undefined {
+  const at = html.indexOf(CHARSET);
+  if (at === -1) return undefined;
+  return /^\s*(<[^>]*>)/.exec(html.slice(at + CHARSET.length))?.[1];
+}
+
+describe('buildTrayCsp', () => {
+  it('Supabase 값이 없으면 connect-src 는 self 만, header 판은 frame-ancestors 를 더한다', () => {
+    for (const value of [undefined, '']) {
+      expect(buildTrayCsp(value)).toStrictEqual({
+        meta: META_NO_SUPABASE,
+        header: META_NO_SUPABASE + FRAME_ANCESTORS,
+        supabaseOrigin: null,
+      });
+    }
+  });
+
+  it('https 값은 https · wss 출처를 둘 다 적고 경로는 버린다 — 다른 지시문은 그대로', () => {
+    for (const value of ['https://abc.supabase.co', 'https://abc.supabase.co/rest/v1/']) {
+      const csp = buildTrayCsp(value);
+      const connect = "connect-src 'self' https://abc.supabase.co wss://abc.supabase.co;";
+      expect(csp.meta).toContain(connect);
+      expect(csp.meta).toBe(META_NO_SUPABASE.replace("connect-src 'self';", connect));
+      expect(csp.header).toBe(csp.meta + FRAME_ANCESTORS);
+      expect(csp.supabaseOrigin).toBe('https://abc.supabase.co');
+    }
+  });
+
+  it('localhost · 127.0.0.1 은 http · ws 를 받고 포트를 지킨다', () => {
+    const local = buildTrayCsp('http://127.0.0.1:9');
+    expect(local.meta).toContain("connect-src 'self' http://127.0.0.1:9 ws://127.0.0.1:9;");
+    expect(local.supabaseOrigin).toBe('http://127.0.0.1:9');
+    expect(buildTrayCsp('http://localhost:54321').meta).toContain(
+      "connect-src 'self' http://localhost:54321 ws://localhost:54321;",
+    );
+    expect(buildTrayCsp('https://abc.supabase.co:8443').meta).toContain(
+      "connect-src 'self' https://abc.supabase.co:8443 wss://abc.supabase.co:8443;",
+    );
+  });
+
+  it('https 가 아니거나 정책을 깨는 값은 빌드를 멈춘다', () => {
+    const bad = [
+      'http://example.com', // http 는 localhost · 127.0.0.1 만
+      'nope',
+      'ws://127.0.0.1:9',
+      'wss://abc.supabase.co',
+      'ftp://abc.supabase.co',
+      // Node URL 은 호스트의 ; , ' 를 받는다 — ; 는 지시문을 끼우고 , 는 헤더를 두 정책으로 가른다
+      'https://a.b;c',
+      'https://a.b,c',
+      "https://a.b'c",
+      'https://abc.supabase.co;script-src',
+      'https://user:pw@abc.supabase.co', // 사용자 정보
+      'https://[::1]',
+      'https://abc.supabase.co\n',
+      'https://abc.supabase.co\r\nX: y',
+      'https://abc.supa\nbase.co',
+      'https://abc.supabase.co\0',
+      ' https://abc.supabase.co',
+      'https://abc.supabase.co\t',
+    ];
+    for (const value of bad) expect(() => buildTrayCsp(value), JSON.stringify(value)).toThrow(/VITE_SUPABASE_URL/);
+  });
+
+  it('결과에 CR · LF · NUL 이 없다', () => {
+    for (const value of [undefined, '', 'https://abc.supabase.co/rest/v1/', 'http://127.0.0.1:9', 'http://localhost']) {
+      const csp = buildTrayCsp(value);
+      for (const text of [csp.meta, csp.header, csp.supabaseOrigin ?? '']) expect(text).not.toMatch(/[\r\n\0]/);
+    }
+  });
+});
+
+describe('injectCspMeta', () => {
+  it('<meta charset="UTF-8" /> 바로 다음 요소로 넣는다', () => {
+    const { meta } = buildTrayCsp(undefined);
+    const out = injectCspMeta(TRAY_HTML, meta);
+    expect(tagAfterCharset(out)).toBe(cspTag(meta));
+    expect(out).toBe(TRAY_HTML.replace(CHARSET, `${CHARSET}\n    ${cspTag(meta)}`));
+  });
+
+  it('charset meta 가 없으면 멈춘다', () => {
+    expect(() => injectCspMeta('<html><head><title>t</title></head></html>', 'x')).toThrow();
+    expect(() => injectCspMeta('<html><head><meta charset="utf-8"></head></html>', 'x')).toThrow();
+  });
+
+  it('속성 값을 깨는 글자가 든 정책은 넣지 않는다(escape 하지 않으므로)', () => {
+    for (const meta of ['a"b', 'a<b', 'a>b', 'a&b', 'a\nb']) expect(() => injectCspMeta(TRAY_HTML, meta)).toThrow();
+  });
+});
+
+describe('repoRoot', () => {
+  it('import.meta.url 의 폴더 — 한글 · 공백을 풀고 끝 구분자를 남기며, 그대로 가드 루트가 된다', () => {
+    const dir = join(tmpdir(), '홍 길동', 'r');
+    const root = repoRoot(pathToFileURL(join(dir, 'vite.tray.config.ts')).href);
+    expect(root).toBe(dir + sep);
+    // Vite 의 id 는 '/' 구분자의 실제 경로다
+    expect(toRepoPath(`${dir.replace(/\\/g, '/')}/src/ui/Header.tsx`, root)).toBe('src/ui/Header.tsx');
+  });
+});
+
+describe('toRepoPath', () => {
+  it('실제 루트 형태 — Windows 구분자 · 끝 구분자 · 드라이브 대소문자 · 한글과 공백', () => {
+    expect(toRepoPath('D:/r/src/ui/Header.tsx', 'D:\\r\\')).toBe('src/ui/Header.tsx');
+    expect(toRepoPath('/r/src/x.ts', '/r/')).toBe('src/x.ts');
+    expect(toRepoPath('d:/r/src/x.ts', 'D:\\r')).toBe('src/x.ts');
+    expect(toRepoPath('D:/Google Drive/홍 길동/r/src/x.ts', 'D:\\Google Drive\\홍 길동\\r\\')).toBe('src/x.ts');
+  });
+
+  it("'\\0' 와 쿼리를 뗀다", () => {
+    expect(toRepoPath('\0/r/src/x.ts?worker&url', '/r/')).toBe('src/x.ts');
+    expect(toRepoPath('D:\\r\\src\\x.ts?import', 'D:\\r\\')).toBe('src/x.ts');
+  });
+
+  it('루트 밖이면 null — 접두 함정 포함', () => {
+    expect(toRepoPath('/r2/src/x.ts', '/r')).toBeNull();
+    expect(toRepoPath('/other/src/x.ts', '/r/')).toBeNull();
+    expect(toRepoPath('/r', '/r/')).toBeNull();
+    expect(toRepoPath('virtual:pwa-register', '/r/')).toBeNull();
+  });
+});
+
+const ROOTS = [
+  { root: 'D:\\r\\', base: 'D:/r' },
+  { root: '/r/', base: '/r' },
+];
+
+describe('isWebOnlyModule', () => {
+  it('막을 모듈 목록 7개는 Windows · POSIX 루트 모두에서 웹 전용이다', () => {
+    expect([...WEB_ONLY_MODULES].sort()).toEqual(
+      [
+        'src/main.tsx',
+        'src/ui/PwaStatus.tsx',
+        'src/ui/InstallButton.tsx',
+        'src/ui/DownloadCards.tsx',
+        'src/ui/Header.tsx',
+        'src/ui/Home.tsx',
+        'src/store/appStore.ts',
+      ].sort(),
+    );
+    for (const { root, base } of ROOTS) {
+      for (const file of WEB_ONLY_MODULES) expect(isWebOnlyModule(`${base}/${file}`, root), file).toBe(true);
+    }
+  });
+
+  it('PWA 가상 모듈 · 쿼리가 붙은 id · 다른 대소문자도 웹 전용이다', () => {
+    for (const id of [
+      '\0virtual:pwa-register/react',
+      'virtual:pwa-register',
+      '\0virtual:pwa-info',
+      '/@vite-plugin-pwa/virtual:pwa-register/react', // vite-plugin-pwa 가 푸는 id 형태
+      '/r/src/ui/Header.tsx?worker',
+      '/r/src/ui/Header.tsx?url',
+      '/r/src/ui/Header.tsx?import',
+      '/r/src/store/appStore.ts?raw',
+    ]) {
+      expect(isWebOnlyModule(id, '/r/'), id).toBe(true);
+    }
+    // win32 는 대소문자를 가리지 않는다 — 다르게 쓴 import 도 같은 파일로 풀린다
+    expect(isWebOnlyModule('d:/R/SRC/ui/header.tsx?worker&url', 'D:\\r\\')).toBe(true);
+  });
+
+  it('트레이 진입 · 판 · 혼자 하기 스토어는 웹 전용이 아니다', () => {
+    for (const { root, base } of ROOTS) {
+      for (const file of ['src/tray/main.tsx', 'src/ui/Board.tsx', 'src/store/gameStore.ts']) {
+        expect(isWebOnlyModule(`${base}/${file}`, root), file).toBe(false);
+      }
+    }
+    expect(isWebOnlyModule('/other/src/ui/Header.tsx', '/r/')).toBe(false);
+  });
+});
+
+describe('isTrayModule', () => {
+  it('src/tray/** 와 tray.html 은 트레이 모듈이다', () => {
+    for (const { root, base } of ROOTS) {
+      for (const id of [`${base}/src/tray/TrayApp.tsx`, `${base}/tray.html`, `${base}/src/tray/x.ts?worker&url`]) {
+        expect(isTrayModule(id, root), id).toBe(true);
+      }
+    }
+    expect(isTrayModule('d:/R/Src/Tray/TrayApp.tsx', 'D:\\r\\')).toBe(true);
+  });
+
+  it("손패(HandTray) · 공용 CSS 는 아니다 — 'tray' 부분 문자열 함정", () => {
+    for (const { root, base } of ROOTS) {
+      for (const id of [`${base}/src/ui/HandTray.tsx`, `${base}/src/index.css`, `${base}/src/trayx/a.ts`]) {
+        expect(isTrayModule(id, root), id).toBe(false);
+      }
+    }
+  });
+});
+
+describe('플러그인 모양', () => {
+  it('이름 · 적용 범위 · 순서', () => {
+    const tray = trayGuard(ROOT);
+    const web = webGuard(ROOT);
+    const csp = trayCsp();
+    expect([tray.name, web.name, csp.name]).toEqual(['tj-tray-guard', 'tj-web-guard', 'tj-tray-csp']);
+    expect(web.apply).toBe('build');
+    expect(csp.apply).toBe('build');
+    // 가드의 load 는 Vite 핵심 로더보다 먼저 돌아야 한다 — vite:worker 는 ?worker 를, asset 은 ?url · ?raw 를 먼저 답한다.
+    expect(tray.enforce).toBe('pre');
+    expect(web.enforce).toBe('pre');
+  });
+});
+
+describe('trayGuard 음성 빌드', () => {
+  it(
+    'GameOver 는 appStore 를 들어 거부한다',
+    async () => {
+      const error = await buildError(buildFixture('guard-gameover.ts', [trayGuard(ROOT)]));
+      expect(error.plugin).toBe('tj-tray-guard');
+      expect(error.hook).toBe('load');
+      expect(error.message).toContain('트레이 빌드에 웹 전용 모듈이 들어왔다: src/store/appStore.ts');
+    },
+    BUILD_TIMEOUT,
+  );
+
+  it(
+    'Header 는 그 자체로 거부한다',
+    async () => {
+      // 설계는 InstallButton 을 예로 들었지만, Header 자체가 목록에 있어 먼저 걸린다.
+      const error = await buildError(buildFixture('guard-header.ts', [trayGuard(ROOT)]));
+      expect(error.plugin).toBe('tj-tray-guard');
+      expect(error.hook).toBe('load');
+      expect(error.message).toContain('트레이 빌드에 웹 전용 모듈이 들어왔다: src/ui/Header.tsx');
+    },
+    BUILD_TIMEOUT,
+  );
+
+  it(
+    'Board 는 통과한다 — 같은 빌드 설정이 가드가 걸리지 않으면 성공한다',
+    async () => {
+      await expect(buildFixture('guard-board.ts', [trayGuard(ROOT)])).resolves.toBeDefined();
+    },
+    BUILD_TIMEOUT,
+  );
+});
+
+// trayCsp 는 임시 루트(트레이 HTML · 진입 · AI 워커)로 디스크에 빌드한다 — writeBundle 은 쓰기 빌드에서만 돈다.
+function trayCspRoot(trayHtml = TRAY_HTML): string {
+  const dir = tempDir('tj-traycsp-');
+  writeFileSync(join(dir, 'tray.html'), trayHtml);
+  writeFileSync(join(dir, 'main.ts'), "new Worker(new URL('./ai.worker.ts', import.meta.url), { type: 'module' });\n");
+  writeFileSync(join(dir, 'ai.worker.ts'), "self.postMessage('ok');\n");
+  return dir;
+}
+
+function buildTray(dir: string, options: { base?: string; inputs?: string[]; plugins?: Plugin[] } = {}) {
+  return build({
+    root: dir,
+    base: options.base ?? './',
+    configFile: false,
+    envDir,
+    logLevel: 'silent',
+    publicDir: false,
+    build: {
+      outDir: join(dir, 'out'),
+      emptyOutDir: true,
+      rollupOptions: { input: (options.inputs ?? ['tray.html']).map((file) => join(dir, file)) },
+    },
+    worker: { format: 'es' },
+    plugins: [trayCsp(), ...(options.plugins ?? [])],
+  });
+}
+
+describe('trayCsp 빌드', () => {
+  it(
+    'tray.html 의 charset 바로 뒤에 meta 를 넣고, tray-build.json 에 같은 정책과 AI 워커 경로를 적는다',
+    async () => {
+      vi.stubEnv('VITE_SUPABASE_URL', 'https://abc.supabase.co');
+      const dir = trayCspRoot();
+      await buildTray(dir);
+
+      const csp = buildTrayCsp('https://abc.supabase.co');
+      expect(tagAfterCharset(readFileSync(join(dir, 'out', 'tray.html'), 'utf8'))).toBe(cspTag(csp.meta));
+
+      const { commit, ...info } = JSON.parse(readFileSync(join(dir, 'out', 'tray-build.json'), 'utf8'));
+      expect(info).toStrictEqual({
+        csp: { meta: csp.meta, header: csp.header },
+        supabaseOrigin: 'https://abc.supabase.co',
+        workerScript: expect.stringMatching(/^assets\/ai\.worker-[\w-]+\.js$/),
+        builtAt: expect.any(String),
+      });
+      expect(existsSync(join(dir, 'out', info.workerScript))).toBe(true);
+      expect(new Date(info.builtAt).toISOString()).toBe(info.builtAt);
+      expect(commit === null || /^[0-9a-f]{4,40}$/.test(commit)).toBe(true);
+    },
+    BUILD_TIMEOUT,
+  );
+
+  it(
+    'AI 워커가 없으면 workerScript 는 null 이다',
+    async () => {
+      vi.stubEnv('VITE_SUPABASE_URL', undefined);
+      const dir = trayCspRoot();
+      writeFileSync(join(dir, 'main.ts'), "document.title = 'x';\n");
+      await buildTray(dir);
+      const info = JSON.parse(readFileSync(join(dir, 'out', 'tray-build.json'), 'utf8'));
+      expect(info.workerScript).toBeNull();
+      expect(info.supabaseOrigin).toBeNull();
+      expect(info.csp).toStrictEqual({ meta: META_NO_SUPABASE, header: META_NO_SUPABASE + FRAME_ANCESTORS });
+    },
+    BUILD_TIMEOUT,
+  );
+
+  it(
+    '웹(PWA) 산출물 · manifest 링크 · 절대 /TwelveJanggi/ 가 있으면 쓰기 뒤에 빌드를 실패시킨다',
+    async () => {
+      vi.stubEnv('VITE_SUPABASE_URL', undefined);
+      const dir = trayCspRoot(
+        TRAY_HTML.replace('<title>', '<link rel="manifest" href="data:application/manifest+json,{}" />\n    <title>'),
+      );
+      writeFileSync(join(dir, 'index.html'), TRAY_HTML);
+      const pwaLike: Plugin = {
+        name: 'pwa-like',
+        generateBundle() {
+          for (const fileName of ['sw.js', 'registerSW.js', 'manifest.webmanifest', 'workbox-abc.js']) {
+            this.emitFile({ type: 'asset', fileName, source: '' });
+          }
+        },
+      };
+      const error = await buildError(
+        buildTray(dir, { base: '/TwelveJanggi/', inputs: ['tray.html', 'index.html'], plugins: [pwaLike] }),
+      );
+      expect(error.plugin).toBe('tj-tray-csp');
+      expect(error.hook).toBe('writeBundle');
+      const expected = ['index.html', 'sw.js', 'registerSW.js', 'manifest.webmanifest', 'workbox-abc.js'];
+      for (const part of [...expected, 'manifest 링크', '/TwelveJanggi/']) expect(error.message).toContain(part);
+    },
+    BUILD_TIMEOUT,
+  );
+
+  it(
+    'VITE_SUPABASE_URL 이 잘못됐으면 번들링 전에 멈춘다',
+    async () => {
+      vi.stubEnv('VITE_SUPABASE_URL', 'http://example.com');
+      const dir = trayCspRoot();
+      const error = await buildError(buildTray(dir));
+      expect(error.message).toContain('VITE_SUPABASE_URL');
+      expect(existsSync(join(dir, 'out'))).toBe(false);
+    },
+    BUILD_TIMEOUT,
+  );
+});
+
+describe('buildTrayBuildInfo', () => {
+  it('받은 값을 그대로 담는다', () => {
+    const csp = buildTrayCsp('https://abc.supabase.co');
+    expect(buildTrayBuildInfo(csp, 'assets/ai.worker-abc.js', '2026-10-27T00:00:00.000Z', 'abc1234')).toStrictEqual({
+      csp: { meta: csp.meta, header: csp.header },
+      supabaseOrigin: 'https://abc.supabase.co',
+      workerScript: 'assets/ai.worker-abc.js',
+      builtAt: '2026-10-27T00:00:00.000Z',
+      commit: 'abc1234',
+    });
+    const empty = buildTrayCsp(undefined);
+    expect(buildTrayBuildInfo(empty, null, 't', null)).toStrictEqual({
+      csp: { meta: empty.meta, header: empty.header },
+      supabaseOrigin: null,
+      workerScript: null,
+      builtAt: 't',
+      commit: null,
+    });
+  });
+});

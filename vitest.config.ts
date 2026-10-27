@@ -7,6 +7,7 @@ export default defineConfig({
   envDir: 'node_modules/.vitest-no-env',
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    // scripts/ 는 빌드 도구 시험(트레이 CSP · import 가드 — 실제 Vite 빌드를 돈다)이다.
+    include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
   },
 });
