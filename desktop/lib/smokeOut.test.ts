@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 const require = createRequire(import.meta.url);
 const { RESULT_FILE, failureResult, writeResultAtomic } = require('./smokeOut.cjs') as typeof import('./smokeOut.cjs');
 
-const VERSIONS = { version: '0.1.0', electron: '44.9.3', chrome: '146.0.0.0', platform: 'win32' };
+/** 결과의 versions — SmokeResult.versions 모양({ electron, chrome, node, app }). AppInfo(IPC)의 모양이 아니다. */
+const VERSIONS = { electron: '44.9.3', chrome: '146.0.0.0', node: '24.11.0', app: '0.1.0' };
 
 let dir = '';
 beforeEach(() => {

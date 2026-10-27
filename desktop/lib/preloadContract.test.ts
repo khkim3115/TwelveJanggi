@@ -9,14 +9,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TJ_DESKTOP_KEYS } from '../../src/tray/desktop.ts';
 
 const SOURCE = readFileSync(new URL('../preload.js', import.meta.url), 'utf8');
-const SMOKE_PRELOAD = { sandboxed: true, contextIsolated: true };
+/**
+ * 가짜 process 의 실효 상태 — 두 필드가 서로 다른 두 벌이다. 스모크 보고가 필드마다 process 를 그대로 옮기는지 본다
+ * (값을 박아 두거나 다른 필드를 읽으면 한 벌에서 어긋난다). 가짜 process 에는 다른 값도 있다 — 보고에는 두 필드만 실린다.
+ */
+const PROCESS_STATES = [
+  { sandboxed: true, contextIsolated: false },
+  { sandboxed: false, contextIsolated: true },
+] as const;
+type ProcessState = (typeof PROCESS_STATES)[number];
 
 /** 격리 world 전역(스모크만) — 시험은 진짜 globalThis 위에서 돌므로 시험마다 지운다. */
 type IsolatedGlobals = { __tjIsoProbe?: unknown; __tjCspBuffer?: unknown };
 const isolated = globalThis as IsolatedGlobals;
 
-/** preload 를 한 번 돌린다 — 쓴 가짜 객체를 돌려준다. */
-function runPreload(search: string) {
+/** preload 를 한 번 돌린다(process 의 실효 상태는 state) — 쓴 가짜 객체를 돌려준다. */
+function runPreload(search: string, state: ProcessState = PROCESS_STATES[0]) {
   const exposeInMainWorld = vi.fn();
   const invoke = vi.fn((..._args: unknown[]) => Promise.resolve('invoke 결과'));
   const send = vi.fn();
@@ -31,7 +39,7 @@ function runPreload(search: string) {
   vi.stubGlobal('document', { addEventListener });
   const module = { exports: {} };
   const wrapped = new Function('require', 'process', 'exports', 'module', 'global', SOURCE);
-  wrapped(fakeRequire, { ...SMOKE_PRELOAD }, module.exports, module, globalThis);
+  wrapped(fakeRequire, { ...state, type: 'renderer', platform: 'win32' }, module.exports, module, globalThis);
   return { exposeInMainWorld, invoke, send, addEventListener, required };
 }
 
@@ -95,16 +103,21 @@ describe('비스모크', () => {
 });
 
 describe('스모크', () => {
-  it.each(['?smoke', '?smoke=1', '?a=1&smoke'])("실효 상태를 'tj-smoke-preload' 로 보내고 표식 · 캡처 리스너를 하나씩 둔다: %j", (search) => {
-    const { send, addEventListener } = runPreload(search);
-    expect(send.mock.calls).toStrictEqual([['tj-smoke-preload', SMOKE_PRELOAD]]);
-    expect(isolated.__tjIsoProbe).toBe(1);
-    expect(isolated.__tjCspBuffer).toStrictEqual([]);
-    expect(addEventListener).toHaveBeenCalledTimes(1);
-    const [type, listener, options] = addEventListener.mock.calls[0] ?? [];
-    expect(type).toBe('securitypolicyviolation');
-    expect(typeof listener).toBe('function');
-    expect(options === true || (typeof options === 'object' && options !== null && options.capture === true)).toBe(true);
+  describe.each(PROCESS_STATES)('process.sandboxed $sandboxed · process.contextIsolated $contextIsolated', (state) => {
+    it.each(['?smoke', '?smoke=1', '?a=1&smoke'])(
+      "실효 상태를 필드마다 그대로 'tj-smoke-preload' 로 보내고 표식 · 캡처 리스너를 하나씩 둔다: %j",
+      (search) => {
+        const { send, addEventListener } = runPreload(search, state);
+        expect(send.mock.calls).toStrictEqual([['tj-smoke-preload', { sandboxed: state.sandboxed, contextIsolated: state.contextIsolated }]]);
+        expect(isolated.__tjIsoProbe).toBe(1);
+        expect(isolated.__tjCspBuffer).toStrictEqual([]);
+        expect(addEventListener).toHaveBeenCalledTimes(1);
+        const [type, listener, options] = addEventListener.mock.calls[0] ?? [];
+        expect(type).toBe('securitypolicyviolation');
+        expect(typeof listener).toBe('function');
+        expect(options === true || (typeof options === 'object' && options !== null && options.capture === true)).toBe(true);
+      },
+    );
   });
 
   it("위반 60건 → 'tj-smoke-csp' 50건 · 버퍼 50건, 6필드만 담고 둘의 내용이 같다", () => {

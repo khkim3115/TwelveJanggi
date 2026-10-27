@@ -12,13 +12,22 @@ const path = require('node:path');
 const RESULT_FILE = 'result.json';
 
 /**
+ * 스모크 결과의 versions — 결과 파일마다 이 모양이다(계획 Task 8 의 SmokeResult.versions). 실패 단계의 결과도 같다.
+ * IPC tj-app-info 의 응답(AppInfo { version, electron, chrome, platform })과는 다른 계약이다.
+ * @typedef {object} SmokeVersions
+ * @property {string} electron process.versions.electron
+ * @property {string} chrome process.versions.chrome
+ * @property {string} node process.versions.node
+ * @property {string} app 앱 버전(app.getVersion())
+ */
+/**
  * 실패 단계의 결과 — 검사는 하나도 돌지 않았다(checks 는 빈 목록). 런처의 판정은 exit 1 과 필수 검사 없음으로 실패한다.
  * @typedef {object} FailureResult
  * @property {string} nonce 런처가 준 이번 실행의 표식
  * @property {string} stage 실패한 단계('lock' · 'tray-build')
  * @property {string} error 이유 한 줄
  * @property {unknown[]} checks 빈 목록
- * @property {Readonly<Record<string, string>>} versions 앱 · Electron · Chrome 버전 등(main 의 appInfo)
+ * @property {SmokeVersions} versions 버전
  */
 
 /**
@@ -47,7 +56,7 @@ function writeResultAtomic(outDir, obj) {
 
 /**
  * 실패 단계의 결과 객체.
- * @param {{ nonce: string, stage: string, error: string, versions: Readonly<Record<string, string>> }} input
+ * @param {{ nonce: string, stage: string, error: string, versions: SmokeVersions }} input
  * @returns {FailureResult}
  */
 function failureResult({ nonce, stage, error, versions }) {

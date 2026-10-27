@@ -1,5 +1,7 @@
-// desktop/main.js 소스 시험(설계 §5.5 · §5.7). main 은 Electron 없이 돌릴 수 없어서 소스를 글자로 읽어 배선 규칙을 본다 —
+// desktop/main.js 소스 시험(설계 §5.5 · §5.7). 소스를 글자로 읽어, 실행하지 않는 갈래까지 포함한 파일 전체에 대한 배선 규칙을 본다 —
 // IPC 등록 창구 · 최상위 호출 순서 · 스킴 특권 · webPreferences 공장 · 애플리케이션 메뉴 · DevTools 조건.
+// 글자로는 조건 · 콜백 · 계산된 키를 보지 못한다. 실제 실행 순서 · 조건 · fail-closed 는 mainWiring.test.ts 가 가짜 electron 위에서
+// main.js 를 돌려 본다.
 // 주석을 지운 소스만 본다: 설명 글에 적힌 호출이 규칙에 걸리거나 빠진 호출을 대신 채우지 않게. electron 은 import 하지 않는다.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
@@ -62,9 +64,15 @@ describe('stripComments', () => {
 });
 
 describe('main.js', () => {
-  it('ipcMain 의 등록 함수를 직접 부르지 않는다 — IPC 처리기는 createGuardedIpc 로만 등록한다', () => {
-    expect(SOURCE.match(/\bipcMain\s*\.\s*(?:handle|handleOnce|on|once|addListener|prependListener|prependOnceListener)\s*\(/g)).toBeNull();
+  it("ipcMain 은 require('electron') 의 구조 분해와 createGuardedIpc(ipcMain, …) 에만 나온다 — IPC 처리기는 createGuardedIpc 로만 등록한다", () => {
+    // 등록 함수 이름을 세는 것으로는 ipcMain['handle'](…) · const { on: listen } = ipcMain · 별칭을 못 잡는다 — 이름이 나오는 자리를 본다.
+    const electronImport = /\bconst\s*\{([^}]*)\}\s*=\s*require\(\s*'electron'\s*\)\s*;/.exec(SOURCE);
+    expect(electronImport, "require('electron') 구조 분해").not.toBeNull();
+    const [statement = '', names = ''] = electronImport ?? [];
+    expect(names.split(',').map((name) => name.trim())).toContain('ipcMain'); // 이름을 바꾸지 않는다(ipcMain: 다른 이름 아님)
     expect(SOURCE).toMatch(/\bcreateGuardedIpc\(\s*ipcMain\s*,/);
+    const rest = SOURCE.replace(statement, '').replace(/\bcreateGuardedIpc\(\s*ipcMain\s*,/g, '');
+    expect(rest.match(/\bipcMain\b/g)).toBeNull();
   });
 
   it('additionalArguments 를 쓰지 않는다 — 비어 있지 않으면 spare renderer 를 못 써 스모크만 다른 시작 경로를 탄다', () => {

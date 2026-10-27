@@ -4,7 +4,8 @@
 // - 최상위(ready 전, 동기)는 순서가 의미를 가진다: 스모크 인자 → userData → enableSandbox → 스킴 특권 → 단일 인스턴스 잠금.
 // - tray-build.json 이 없거나 틀리거나 tray.html 이 없으면 fail-closed 다 — 처리기 · 창 · 트레이를 만들지 않고 알린 뒤 끝낸다.
 // - IPC 처리기는 createGuardedIpc 로만 등록한다(ipcMain 의 등록 함수를 직접 부르지 않는다). 처리기는 모두 창을 만들기 전에,
-//   사이에 await 없이 건다. desktop/lib/mainSource.test.ts 가 이 파일의 글을 읽어 이런 배선 규칙을 본다.
+//   사이에 await 없이 건다. 배선은 두 시험이 본다 — desktop/lib/mainSource.test.ts 는 이 파일의 글로, mainWiring.test.ts 는
+//   가짜 electron 위에서 이 파일을 돌려서.
 // - hooks 는 스모크 실행기(설계 §5.10)의 연결점이다. 비스모크에서는 모두 null 이라 없는 것처럼 동작한다.
 
 const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, protocol, session, shell } = require('electron');
@@ -262,12 +263,13 @@ function recordDecision(entry) {
 
 /**
  * 모든 webContents(트레이 창 · DevTools 등)에 탐색 가드를 건다 — app://twelvejanggi 밖으로 가는 탐색 · 새 창 · webview 를 막고,
- * 허용 목록 주소만 시스템 브라우저로 연다(navigation.cjs). 여는 함수의 실패는 받아서 버린다 — 받지 않으면 unhandledRejection 이다.
+ * 허용 목록 주소만 시스템 브라우저로 연다(navigation.cjs). 여는 함수의 실패는 받아서 '[tj] openExternal: …' 한 줄로 남긴다 —
+ * 받지 않으면 unhandledRejection 이고, 버리면 링크가 왜 열리지 않았는지 흔적이 없다.
  * @param {import('electron').WebContents} contents
  */
 function guardWebContents(contents) {
   const guards = createNavigationGuards({
-    open: hooks.open ?? ((href) => shell.openExternal(href).catch(() => {})),
+    open: hooks.open ?? ((href) => shell.openExternal(href).catch((err) => logError(`openExternal: ${errorText(err)}`))),
     record: hooks.record ?? undefined,
   });
   contents.on('will-frame-navigate', guards.willFrameNavigate);
@@ -353,11 +355,19 @@ function showWindow() {
 }
 
 /**
- * 앱 정보 — tj-app-info 의 응답이자 스모크 결과의 versions 다(src/tray/desktop.ts 의 AppInfo).
+ * 앱 정보 — tj-app-info 의 응답이다(src/tray/desktop.ts 의 AppInfo). 스모크 결과의 versions(smokeVersions)와는 다른 계약이다.
  * @returns {{ version: string, electron: string, chrome: string, platform: string }}
  */
 function appInfo() {
   return { version: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome, platform: process.platform };
+}
+
+/**
+ * 스모크 결과의 versions — 결과 파일마다 이 모양이다(smokeOut.cjs 의 SmokeVersions = 계획 Task 8 의 SmokeResult.versions).
+ * @returns {import('./lib/smokeOut.cjs').SmokeVersions}
+ */
+function smokeVersions() {
+  return { electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node, app: app.getVersion() };
 }
 
 /**
@@ -368,7 +378,7 @@ function appInfo() {
  */
 function failSmoke(smoke, stage, error) {
   try {
-    writeResultAtomic(smoke.outDir, failureResult({ nonce: smoke.nonce, stage, error, versions: appInfo() }));
+    writeResultAtomic(smoke.outDir, failureResult({ nonce: smoke.nonce, stage, error, versions: smokeVersions() }));
   } catch (err) {
     logError(`smoke result: ${errorText(err)}`);
   }
