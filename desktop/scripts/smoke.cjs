@@ -2,10 +2,11 @@
 // 스모크 런처(설계 §5.10 '런처') — plain node 로 돈다: npm --prefix desktop run smoke [-- [--net] [--timeout=<10~90>]].
 // 스모크의 바깥 절반이다. 이번 실행만의 프로필로 실제 앱(desktop/main.js 를 고정한 electron 바이너리로)을 스모크 모드로 띄우고,
 // 하드 타임아웃을 지키고, 끝난 뒤 남은 것을 치우고, 앱이 쓴 결과(desktop/smoke-out/result.json)를 판정기(lib/smokeResult.cjs)로
-// 판정한다. 판정 · 정리 · 잠금의 규칙은 lib/ 의 순수 모듈에 있고(시험도 거기서 한다) 이 파일은 순서대로 잇기만 한다:
-//   인자 → os.tmpdir() 스냅샷 → 잠금 → smoke-out 비우기 → 트레이 빌드 · ELECTRON_OVERRIDE_DIST_PATH · electron 확인 →
-//   지난 tj-smoke-* 정리 → 실행 폴더(profile · tmp) · nonce → 앱(시간 제한 · 신호면 트리 종료) → tmpLeft → 실행 폴더 지우기 →
-//   스냅샷 비교 → 판정 → summary.json · 표 → 잠금 풀기 → exit 0(판정 ok) / 1.
+// 판정한다. 판정 · 정리 · 잠금 · 인자 · 앱 env · 고정한 electron 의 규칙은 lib/ 의 순수 모듈에 있고(시험도 거기서 한다 — 인자 · env ·
+// 잠금 주인 · electron 확인은 lib/smokeLaunch.cjs) 이 파일은 순서대로 잇기만 한다:
+//   인자(npm 이 가져간 인자 포함) → os.tmpdir() 스냅샷 → 잠금 → smoke-out 비우기 → 트레이 빌드 · ELECTRON_OVERRIDE_DIST_PATH ·
+//   고정한 electron 확인(내려받지 않는다) → 지난 tj-smoke-* 정리 → 실행 폴더(profile · tmp) · nonce → 앱(시간 제한 · 신호면 트리 종료) →
+//   tmpLeft → 실행 폴더 지우기 → 스냅샷 비교 → 판정 → summary.json · 표 → 잠금 풀기 → exit 0(판정 ok) / 1.
 // - 스냅샷은 fs 동작 중 맨 먼저다 — 잠금 파일 · 실행 폴더 · 앱이 만드는 것이 모두 '실행 뒤 새 항목' 에 잡힌다. 인자 검사는 fs 를
 //   건드리지 않아 그보다 앞에 둔다(틀린 인자는 아무것도 하지 않고 끝난다).
 // - 잠금을 얻은 뒤의 출구는 모두 잠금을 푼다(finally). 얻지 못했으면 풀지 않는다 — 남의 잠금이다.
@@ -24,7 +25,8 @@ const { ENTRY_FILE } = require('../lib/appProtocol.cjs');
 const { isNonEmptyString, isRecord } = require('../lib/guards.cjs');
 const { formatSmokeArgs } = require('../lib/smokeArgs.cjs');
 const { acquireLock, diffEntries, releaseLock, removeWithRetry, sweepStale } = require('../lib/smokeFs.cjs');
-const { RESULT_FILE } = require('../lib/smokeOut.cjs');
+const { USAGE, checkElectron, childEnv, isAlive, parseArgs } = require('../lib/smokeLaunch.cjs');
+const { RESULT_FILE, writeJsonAtomic } = require('../lib/smokeOut.cjs');
 const { judgeSmoke, requiredChecks } = require('../lib/smokeResult.cjs');
 const { parseTrayBuild } = require('../lib/trayBuildInfo.cjs');
 
@@ -42,13 +44,6 @@ const RUN_PREFIX = 'tj-smoke-';
 /** 동시 실행 잠금 — os.tmpdir() 바로 아래 파일. RUN_PREFIX 로 시작하지 않는다(점) — 잔여 정리가 건드리지 않는다. */
 const LOCK_NAME = 'tj-smoke.lock';
 
-const NET_ARG = '--net';
-const TIMEOUT_PREFIX = '--timeout=';
-const MIN_TIMEOUT_SEC = 10;
-const MAX_TIMEOUT_SEC = 90;
-const DEFAULT_TIMEOUT_SEC = 90;
-const USAGE = `사용법: npm --prefix desktop run smoke [-- [${NET_ARG}] [${TIMEOUT_PREFIX}<${MIN_TIMEOUT_SEC}~${MAX_TIMEOUT_SEC} 초, 기본 ${DEFAULT_TIMEOUT_SEC}>]] — 인자마다 한 번만`;
-
 /** 트리를 끝낸 뒤 앱이 끝나기를 기다리는 상한(ms). 넘으면 끝나지 않은 채로 정리 · 판정한다(실패). */
 const KILL_GRACE_MS = 10000;
 /** 앱이 끝난 뒤 남은 출력을 기다리는 상한(ms) — 손자 프로세스가 파이프를 쥐면 출력이 끝나지 않을 수 있다. */
@@ -57,27 +52,7 @@ const OUTPUT_DRAIN_MS = 3000;
 const EXIT_SAFETY_MS = 2000;
 /** 표의 근거(detail) 글자 수 상한 — 전체는 result.json 에 있다. */
 const DETAIL_CHARS = 120;
-/**
- * 앱 env 에서 빼는 이름(대문자로 비교한다). 뒤의 셋(TMP · TEMP · ELECTRON_ENABLE_SECURITY_WARNINGS)은 뺀 뒤 새 값을 넣는다.
- * - ELECTRON_RUN_AS_NODE: 있으면 electron 이 앱이 아니라 node 로 돈다
- * - ELECTRON_DISABLE_SECURITY_WARNINGS: 보안 경고를 숨긴다 — securityWarnings 검사가 '0건' 으로 거짓 통과한다
- * - TJ_DEVTOOLS: main 이 DevTools 를 연다(개발 실행 전용)
- */
-const CHILD_ENV_DROP = new Set([
-  'ELECTRON_RUN_AS_NODE',
-  'ELECTRON_DISABLE_SECURITY_WARNINGS',
-  'TJ_DEVTOOLS',
-  'TMP',
-  'TEMP',
-  'ELECTRON_ENABLE_SECURITY_WARNINGS',
-]);
 
-/**
- * 검사를 지난 인자.
- * @typedef {object} CliArgs
- * @property {boolean} net --net(실제 Supabase 연결 검사)인가
- * @property {number} timeoutSec 하드 타임아웃(초)
- */
 /**
  * <run>/tmp 에 남은 항목 한 건(summary.tmpLeft) — 정보다. 판정에는 쓰지 않는다.
  * @typedef {object} LeftEntry
@@ -125,69 +100,6 @@ function errorCode(err) {
  */
 function errorText(err) {
   return err instanceof Error ? err.message : String(err);
-}
-
-/**
- * 런처 인자 — --net 과 --timeout=<10~90 의 정수>(초) 뿐이고 각각 한 번만 받는다. 그 밖의 인자 · 되풀이 · 틀린 값은 오류다.
- * 시간은 0 으로 시작하지 않는 십진수만 받는다('015' · '1.5' · '-10' 은 틀린 값).
- * @param {readonly string[]} argv process.argv.slice(2)
- * @returns {({ ok: true } & CliArgs) | { ok: false, error: string }}
- */
-function parseArgs(argv) {
-  let net = false;
-  /** @type {number | null} */
-  let timeoutSec = null;
-  for (const arg of argv) {
-    if (arg === NET_ARG) {
-      if (net) return { ok: false, error: `${NET_ARG} 가 두 번 있다` };
-      net = true;
-    } else if (arg.startsWith(TIMEOUT_PREFIX)) {
-      if (timeoutSec !== null) return { ok: false, error: `${TIMEOUT_PREFIX} 가 두 번 있다` };
-      const value = arg.slice(TIMEOUT_PREFIX.length);
-      const seconds = /^[1-9]\d*$/.test(value) ? Number(value) : NaN;
-      if (!(seconds >= MIN_TIMEOUT_SEC && seconds <= MAX_TIMEOUT_SEC)) {
-        return { ok: false, error: `--timeout 은 ${MIN_TIMEOUT_SEC}~${MAX_TIMEOUT_SEC} 의 정수(초)여야 한다: ${JSON.stringify(value)}` };
-      }
-      timeoutSec = seconds;
-    } else {
-      return { ok: false, error: `모르는 인자다: ${JSON.stringify(arg)}` };
-    }
-  }
-  return { ok: true, net, timeoutSec: timeoutSec ?? DEFAULT_TIMEOUT_SEC };
-}
-
-/**
- * 잠금 주인 PID 가 살아 있는가(acquireLock 의 isAlive). process.kill(pid, 0) 은 신호를 보내지 않고 있는지만 본다:
- * 성공 · EPERM(남의 프로세스) → 산 것, ESRCH → 죽은 것. 그 밖의 오류는 알 수 없는 것이라 산 것으로 본다 — 남의 잠금을 빼앗지 않는다.
- * @param {number} pid
- * @returns {boolean}
- */
-function isAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return errorCode(err) !== 'ESRCH';
-  }
-}
-
-/**
- * 앱의 env — process.env 를 옮겨 담되 CHILD_ENV_DROP 의 이름은 대소문자를 가리지 않고 뺀 뒤, TMP · TEMP 를 실행 폴더의 tmp 로,
- * ELECTRON_ENABLE_SECURITY_WARNINGS 를 1 로 넣는다. Windows 의 env 이름은 대소문자를 가리지 않지만 펼친 복사본은 원래 글자를 지녀
- * 'Temp' · 'tmp' 가 새로 넣은 'TEMP' · 'TMP' 와 따로 남는다 — 같은 이름이 둘이면 앱이 어느 값을 읽을지 모른다.
- * @param {string} tmpDir <run>/tmp
- * @returns {NodeJS.ProcessEnv}
- */
-function childEnv(tmpDir) {
-  /** @type {NodeJS.ProcessEnv} */
-  const env = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (!CHILD_ENV_DROP.has(name.toUpperCase())) env[name] = value;
-  }
-  env.TMP = tmpDir;
-  env.TEMP = tmpDir;
-  env.ELECTRON_ENABLE_SECURITY_WARNINGS = '1';
-  return env;
 }
 
 /**
@@ -245,8 +157,8 @@ function loadBuild() {
 
 /**
  * 고정한 electron — 실행 파일 경로와 패키지 버전. plain node 에서 require('electron') 은 electron 패키지가 정한 실행 파일 경로다.
- * 바이너리가 없으면 그 require 가 내려받기를 시도하고 실패하면 던진다 — 그때 설치 명령을 안내한다. ELECTRON_OVERRIDE_DIST_PATH 는
- * 이 함수를 부르기 전에 거부한다(그 변수가 이 경로를 바꾼다).
+ * 그 require 는 바이너리가 없으면 내려받는다 — 그래서 부르기 전에 checkElectron 이 패키지 · 바이너리 · 풀리는 곳을 확인하고,
+ * ELECTRON_OVERRIDE_DIST_PATH(이 경로를 바꾼다)를 거부한다. 그래도 던지면 설치 명령을 안내한다.
  * @returns {{ ok: true, executable: string, version: string } | { ok: false, error: string }}
  */
 function resolveElectron() {
@@ -483,31 +395,6 @@ function readResult(file) {
 }
 
 /**
- * value 를 dir/name 에 원자적으로 쓴다 — 같은 폴더의 임시 파일에 다 쓴 뒤 rename 한다(smokeOut.writeResultAtomic 과 같은 방식).
- * 실패하면 임시 파일을 지우고 던진다.
- * @param {string} dir
- * @param {string} name
- * @param {unknown} value
- * @returns {void}
- */
-function writeJsonAtomic(dir, name, value) {
-  fs.mkdirSync(dir, { recursive: true });
-  const target = path.join(dir, name);
-  const temp = path.join(dir, `.${name}.${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`);
-  try {
-    fs.writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`);
-    fs.renameSync(temp, target);
-  } catch (err) {
-    try {
-      fs.rmSync(temp, { force: true });
-    } catch {
-      // 임시 파일을 못 지워도 원래 오류를 낸다
-    }
-    throw err;
-  }
-}
-
-/**
  * 표에 쓰는 한 줄 — 공백을 하나로 접고 DETAIL_CHARS 에서 자른다.
  * @param {string} text
  * @returns {string}
@@ -551,7 +438,7 @@ function printReport(result, required, verdict, reasons) {
 
 /**
  * 잠금을 쥔 동안의 실행 — smoke-out 비우기부터 summary.json 까지. 조기 출구는 1 을 돌려준다(잠금은 부른 쪽이 푼다).
- * @param {CliArgs} args
+ * @param {import('../lib/smokeLaunch.cjs').CliArgs} args
  * @param {string} tmpRoot os.tmpdir()
  * @param {string[]} before 실행 전 os.tmpdir() 목록
  * @returns {Promise<number>} 종료 코드
@@ -601,6 +488,12 @@ async function runLocked(args, tmpRoot, before) {
       logError('ELECTRON_OVERRIDE_DIST_PATH 가 설정돼 있다 — 스모크는 고정한 바이너리(desktop/node_modules/electron)로만 돈다. 변수를 지우고 다시 실행한다');
       return 1;
     }
+    // 고정한 electron — require('electron') 은 바이너리가 없으면 내려받는다. 런처는 내려받지 않는다: 먼저 확인하고 설치 명령을 안내한다.
+    const pinned = checkElectron(APP_DIR, require.resolve);
+    if (!pinned.ok) {
+      logError(pinned.error);
+      return 1;
+    }
     const electron = resolveElectron();
     if (!electron.ok) {
       logError(electron.error);
@@ -648,7 +541,7 @@ async function runLocked(args, tmpRoot, before) {
       const app = startApp(
         electron.executable,
         [APP_DIR, ...formatSmokeArgs({ outDir: OUT_DIR, profile, net: args.net, nonce })],
-        childEnv(runTmp),
+        childEnv(process.env, runTmp),
       );
       state.running = app;
       // 시간 초과는 이 타이머가 실제로 트리를 끝냈을 때만이다 — 그 직전에 스스로 끝나 출력을 기다리던 앱은 시간 초과가 아니다.
@@ -700,7 +593,8 @@ async function runLocked(args, tmpRoot, before) {
     /** @type {'ok' | 'fail'} */
     const verdict = judged.ok && state.reasons.length === 0 ? 'ok' : 'fail';
 
-    // summary.json(원자적) 을 쓰고 표를 출력한다.
+    // summary.json(원자적) 을 쓰고 표를 출력한다. 이번 실행의 정체(nonce · 끝난 시각 · --net · 시간 제한)도 적는다 — 지난 실행의 요약이나
+    // npm 이 인자를 가져가 기본 스모크로 돈 실행을 파일만 보고 가를 수 있게.
     const summary = {
       verdict,
       reasons,
@@ -708,6 +602,10 @@ async function runLocked(args, tmpRoot, before) {
       tempNew,
       sweep,
       run: { removed: run.removed, attempts: run.attempts, lastError: run.lastError === null ? null : errorText(run.lastError) },
+      nonce,
+      finishedAt: new Date().toISOString(),
+      net: args.net,
+      timeoutSec: args.timeoutSec,
     };
     /** @type {string | null} */
     let writeError = null;
@@ -740,8 +638,8 @@ async function runLocked(args, tmpRoot, before) {
  * @returns {Promise<number>} 종료 코드 — 판정이 ok 이고 요약을 썼을 때만 0
  */
 async function main(argv) {
-  // 인자 — fs 를 건드리지 않는다. 틀리면 사용법을 알리고 끝낸다(잠금 전).
-  const args = parseArgs(argv);
+  // 인자 — fs 를 건드리지 않는다. 틀리면(npm 이 -- 없는 인자를 가져간 경우 포함) 이유 · 사용법을 알리고 끝낸다(잠금 전).
+  const args = parseArgs(argv, process.env);
   if (!args.ok) {
     logError(args.error);
     console.error(USAGE);

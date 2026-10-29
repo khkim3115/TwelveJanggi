@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { RESULT_FILE, failureResult, writeResultAtomic } = require('./smokeOut.cjs') as typeof import('./smokeOut.cjs');
+const { RESULT_FILE, failureResult, writeJsonAtomic, writeResultAtomic } = require('./smokeOut.cjs') as typeof import('./smokeOut.cjs');
 
 /** 결과의 versions — SmokeResult.versions 모양({ electron, chrome, node, app }). AppInfo(IPC)의 모양이 아니다. */
 const VERSIONS = { electron: '44.9.3', chrome: '146.0.0.0', node: '24.11.0', app: '0.1.0' };
@@ -55,6 +55,43 @@ describe('writeResultAtomic', () => {
     writeFileSync(join(dir, RESULT_FILE, 'keep.txt'), '');
     expect(() => writeResultAtomic(dir, { nonce: 'x' })).toThrow();
     expect(readdirSync(dir)).toStrictEqual([RESULT_FILE]);
+  });
+});
+
+describe('writeJsonAtomic — 런처의 summary.json 도 같은 함수로 쓴다', () => {
+  const SUMMARY_FILE = 'summary.json';
+
+  it('다른 이름으로 쓴다 — 그 파일 하나만 남고(임시 파일 없음) JSON 이 같다', () => {
+    const summary = { verdict: 'fail', reasons: ['시간 초과'], net: false, timeoutSec: 15, 메모: '십이장기' };
+    writeJsonAtomic(dir, SUMMARY_FILE, summary);
+    expect(readdirSync(dir)).toStrictEqual([SUMMARY_FILE]);
+    expect(JSON.parse(readFileSync(join(dir, SUMMARY_FILE), 'utf8'))).toStrictEqual(summary);
+  });
+
+  it('같은 폴더의 결과 파일은 건드리지 않는다', () => {
+    writeResultAtomic(dir, { nonce: '이번 실행' });
+    writeJsonAtomic(dir, SUMMARY_FILE, { verdict: 'ok' });
+    expect(readdirSync(dir).sort()).toStrictEqual([RESULT_FILE, SUMMARY_FILE]);
+    expect(readResult(dir)).toStrictEqual({ nonce: '이번 실행' });
+  });
+
+  it('rename 이 실패하면 그 오류를 던지고 임시 파일을 남기지 않는다', () => {
+    // 파일 자리에 (비어 있지 않은) 폴더가 있으면 rename 이 실패한다 — Windows EPERM · POSIX EISDIR.
+    mkdirSync(join(dir, SUMMARY_FILE));
+    writeFileSync(join(dir, SUMMARY_FILE, 'keep.txt'), '');
+    let thrown: unknown = null;
+    try {
+      writeJsonAtomic(dir, SUMMARY_FILE, { verdict: 'ok' });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toMatchObject({ syscall: 'rename' });
+    expect(readdirSync(dir)).toStrictEqual([SUMMARY_FILE]);
+  });
+
+  it('JSON 으로 만들지 못하면(BigInt) 그 오류를 던지고 아무것도 남기지 않는다', () => {
+    expect(() => writeJsonAtomic(dir, SUMMARY_FILE, { big: 1n })).toThrow(/BigInt/);
+    expect(readdirSync(dir)).toStrictEqual([]);
   });
 });
 
