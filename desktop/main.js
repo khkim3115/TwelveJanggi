@@ -6,9 +6,10 @@
 // - IPC 처리기는 createGuardedIpc 로만 등록한다(ipcMain 의 등록 함수를 직접 부르지 않는다). 처리기는 모두 창을 만들기 전에,
 //   사이에 await 없이 건다. 배선은 두 시험이 본다 — desktop/lib/mainSource.test.ts 는 이 파일의 글로, mainWiring.test.ts 는
 //   가짜 electron 위에서 이 파일을 돌려서.
-// - hooks 는 스모크 실행기(설계 §5.10)의 연결점이다. 비스모크에서는 모두 null 이라 없는 것처럼 동작한다.
+// - hooks 는 스모크 실행기(설계 §5.10, smoke/run.cjs)의 연결점이다. 스모크에서만 ready 뒤 처리기보다 먼저 꽂고(plugSmokeRun),
+//   비스모크에서는 모두 null 이라 없는 것처럼 동작한다.
 
-const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, protocol, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, net, protocol, session, shell } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { APP_SCHEME, ENTRY_FILE, ENTRY_URL, SCHEME_PRIVILEGES, buildFileIndex, resolveAppRequest } = require('./lib/appProtocol.cjs');
@@ -127,6 +128,7 @@ function onReady(smoke) {
   }
 
   const { index, cspHeader } = renderer;
+  if (smoke.enabled) plugSmokeRun(smoke, root, renderer); // 아래 처리기 · 창 · 트레이가 hooks 를 읽기 전에
   protocol.handle(APP_SCHEME, (request) => serveApp(request, index, cspHeader));
   guardSession();
   app.on('select-client-certificate', selectNoCertificate);
@@ -140,8 +142,9 @@ function onReady(smoke) {
  * 렌더러 루트에서 처리기가 쓸 값을 만든다 — tray-build.json(검증) · 파일 색인. throw 하지 않는다.
  * 어긋나면 '<무엇>: <왜>' 한 줄이다(stderr · 오류 상자 · 스모크 결과에 같은 글): tray-build.json 을 못 읽음 · 형식이 틀림 ·
  * 루트를 못 훑음 · tray.html 이 없음(유효한 tray-build.json 만 남은 렌더러 루트가 빈 창을 열지 않게).
+ * build 는 검증한 tray-build.json 이다(스모크 실행기가 읽는다).
  * @param {string} root
- * @returns {{ ok: true, index: import('./lib/appProtocol.cjs').FileIndex, cspHeader: string } | { ok: false, reason: string }}
+ * @returns {{ ok: true, index: import('./lib/appProtocol.cjs').FileIndex, cspHeader: string, build: import('./lib/trayBuildInfo.cjs').TrayBuildInfo } | { ok: false, reason: string }}
  */
 function loadRenderer(root) {
   const buildFile = path.join(root, TRAY_BUILD_FILE);
@@ -163,7 +166,38 @@ function loadRenderer(root) {
   }
   if (!index.files.has(ENTRY_FILE)) return { ok: false, reason: `${ENTRY_FILE}: 렌더러 루트에 없다 (${root})` };
   // CSP 헤더는 검증한 header 판 그대로다 — 기본값 · optional chaining 을 쓰지 않는다('undefined' 가 헤더 글이 되지 않게).
-  return { ok: true, index, cspHeader: build.value.csp.header };
+  return { ok: true, index, cspHeader: build.value.csp.header, build: build.value };
+}
+
+/**
+ * 스모크 실행기(smoke/run.cjs)를 hooks 에 꽂는다 — 스모크에서만 부르고, run.cjs 도 여기서만 require 한다. onReady 가 처리기 · IPC ·
+ * 창 · 트레이보다 먼저 부른다(그것들이 hooks 를 읽는다). 무인 실행이라 uncaughtException · unhandledRejection 도 실행기의 fail 로
+ * 보낸다 — 결과를 쓰고 exit 1 한다(Electron 의 오류 상자가 런처의 시간 제한까지 막고 있지 않게).
+ * @param {SmokeOn} smoke
+ * @param {string} root 렌더러 루트
+ * @param {{ index: import('./lib/appProtocol.cjs').FileIndex, build: import('./lib/trayBuildInfo.cjs').TrayBuildInfo }} renderer
+ */
+function plugSmokeRun(smoke, root, renderer) {
+  const { createSmokeRun } = require('./smoke/run.cjs');
+  const run = createSmokeRun({
+    args: smoke,
+    app,
+    session,
+    net,
+    nativeImage,
+    trayBuild: renderer.build,
+    rendererRoot: root,
+    appRoot: __dirname,
+    index: renderer.index,
+  });
+  process.on('uncaughtException', (err) => run.fail('uncaughtException', err));
+  process.on('unhandledRejection', (reason) => run.fail('unhandledRejection', reason));
+  hooks.record = run.record;
+  hooks.open = run.open;
+  hooks.networkGuard = run.networkGuard;
+  hooks.registerIpc = run.registerIpc;
+  hooks.beforeLoad = run.beforeLoad;
+  hooks.setTray = run.setTray;
 }
 
 /**

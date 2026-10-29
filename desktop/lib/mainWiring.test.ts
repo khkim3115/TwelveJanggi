@@ -5,15 +5,18 @@
 //   환경 변수 · process 값은 사례마다 되돌린다 — 다른 시험 파일에 남지 않게.
 // - main.js 는 개발 렌더러 루트(../dist-tray)와 트레이 아이콘을 __dirname 에서 찾는다. 제자리에서 돌리면 저장소의 dist-tray
 //   (build:tray 를 했는지에 따라 있거나 없다)를 읽게 되므로, 사례마다 mkdtemp(한글 · 공백 이름) 안에 같은 모양의 나무
-//   — desktop/(main.js · package.json · lib/*.cjs · assets/ 를 저장소에서 복사) · dist-tray/ · resources/renderer/ — 를 깔고
+//   — desktop/(main.js · package.json · lib/*.cjs · smoke/*.cjs · assets/ 를 저장소에서 복사) · dist-tray/ · resources/renderer/ — 를 깔고
 //   거기서 main.js 를 부른다. 사례마다 새로 복사하므로 main.js 를 고치면 이 시험이 바로 본다.
 // - 사례 하나가 main.js 한 번 실행이다. stderr 의 '[tj] …' 줄(main 은 fs.writeSync(2) 로 쓴다)과 unhandledRejection 은 가로채 모은다.
+// - 스모크 모드는 main 이 스모크 실행기(smoke/run.cjs)를 hooks 에 꽂는다. 실행기의 검사는 첫 did-finish-load 뒤에 돌므로(가짜는 그
+//   사건을 내지 않는다) 여기서는 연결점 · 수집기 · 실패 경로만 본다 — 검사 자체는 실제 바이너리의 스모크가 본다. 실행기가 켜는
+//   60초 감시 타이머는 사례마다 will-quit 으로 끄고, main 이 단 process 처리기(uncaughtException · unhandledRejection)는 사례마다 뗀다.
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildTrayBuildInfo, buildTrayCsp } from '../../scripts/trayBuild.ts';
 
 const require = createRequire(import.meta.url);
@@ -185,7 +188,9 @@ function createFakeElectron({ isPackaged, lock, appData, openExternal }: FakeOpt
       return openExternal === 'resolve' ? Promise.resolve() : Promise.reject(new Error(OPEN_ERROR));
     },
   };
-  return { electron: { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, protocol, session, shell }, calls, windows };
+  /** main 은 스모크 실행기에 넘기기만 한다 — 배선 시험에서는 아무도 부르지 않는다. */
+  const net = {};
+  return { electron: { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, net, protocol, session, shell }, calls, windows };
 }
 type Fake = ReturnType<typeof createFakeElectron>;
 
@@ -194,12 +199,25 @@ type Mode = 'dev' | 'smoke' | 'packaged';
 type Renderer = 'valid' | 'missing' | 'bad-build' | 'no-entry';
 type Tree = { base: string; desktop: string; main: string; devRoot: string; resources: string; appData: string; profile: string; outDir: string };
 
+/** main 이 스모크에서 다는 process 처리기 두 가지. */
+type ProcessEvent = 'uncaughtException' | 'unhandledRejection';
+type ProcessListener = (reason: unknown) => void;
+/** 이번 사례의 main 이 단 process 처리기 — runMain 이 그 전후를 견줘 채우고, afterEach 가 뗀다. */
+type AddedListeners = Record<ProcessEvent, ProcessListener[]>;
+const PROCESS_EVENTS: ProcessEvent[] = ['uncaughtException', 'unhandledRejection'];
+/** process 의 그 사건 처리기 — @types/node 는 사건마다 오버로드가 따로라 갈라 부른다. */
+const processListeners = (event: ProcessEvent): unknown[] =>
+  event === 'uncaughtException' ? process.listeners(event) : process.listeners(event);
+
 let tree: Tree;
 let stderr: string[] = [];
 let rejections: unknown[] = [];
 let electronRequesters: Array<string | null> = [];
 let cacheBefore = new Set<string>();
 let restoreProcess = (): void => {};
+/** 이번 사례의 가짜 electron — afterEach 가 will-quit 을 불러 실행기의 감시 타이머를 끈다. */
+let lastFake: Fake | null = null;
+let added: AddedListeners = { uncaughtException: [], unhandledRejection: [] };
 
 const onRejection = (reason: unknown): void => {
   rejections.push(reason);
@@ -225,10 +243,12 @@ function layTree(): Tree {
   const desktop = join(base, 'desktop');
   const copy = (rel: string) => copyFileSync(join(DESKTOP_SRC, rel), join(desktop, rel));
   mkdirSync(join(desktop, 'lib'), { recursive: true });
+  mkdirSync(join(desktop, 'smoke'));
   mkdirSync(join(desktop, 'assets'));
   copy('main.js');
   copy('package.json'); // type 필드가 없다 — 저장소에서처럼 main.js 가 CommonJS 로 읽힌다
   for (const name of readdirSync(join(DESKTOP_SRC, 'lib'))) if (name.endsWith('.cjs')) copy(join('lib', name));
+  for (const name of readdirSync(join(DESKTOP_SRC, 'smoke'))) if (name.endsWith('.cjs')) copy(join('smoke', name));
   for (const name of readdirSync(join(DESKTOP_SRC, 'assets'))) copy(join('assets', name));
   const appData = join(base, 'AppData Roaming');
   mkdirSync(appData);
@@ -283,6 +303,8 @@ async function runMain(mode: Mode, options: RunOptions = {}): Promise<Fake> {
   if (options.devtools !== undefined) process.env.TJ_DEVTOOLS = options.devtools;
   const argv = process.argv;
   process.argv = [process.execPath, tree.desktop, ...smokeArgv];
+  const before = { uncaughtException: new Set(processListeners('uncaughtException')), unhandledRejection: new Set(processListeners('unhandledRejection')) };
+  lastFake = fake;
   nodeModule._load = function (request, parent, isMain) {
     if (request !== 'electron') return realLoad.call(this, request, parent, isMain);
     electronRequesters.push(parent?.filename ?? null);
@@ -295,6 +317,10 @@ async function runMain(mode: Mode, options: RunOptions = {}): Promise<Fake> {
     process.argv = argv;
   }
   await settle();
+  // main 이 단 process 처리기(스모크는 ready 뒤에 단다) — 사례가 직접 부르고, afterEach 가 뗀다.
+  for (const event of PROCESS_EVENTS) {
+    added[event] = processListeners(event).filter((listener) => !before[event].has(listener)) as ProcessListener[];
+  }
   return fake;
 }
 
@@ -345,6 +371,11 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  // 스모크 실행기 정리 — 감시 타이머(60초)는 will-quit 이 끈다(남으면 지운 나무에 결과를 쓴다). main 이 단 process 처리기는 뗀다.
+  if (lastFake !== null) for (const quit of listenersOf(lastFake.calls, 'app.on', 'will-quit')) quit();
+  for (const event of PROCESS_EVENTS) for (const listener of added[event]) process.off(event, listener);
+  lastFake = null;
+  added = { uncaughtException: [], unhandledRejection: [] };
   await settle();
   process.off('unhandledRejection', onRejection);
   nodeFs.writeSync = realWriteSync;
@@ -700,5 +731,154 @@ describe('허용 목록 주소 — 기본 open 은 shell.openExternal', () => {
   it('열면 아무 줄도 남기지 않는다', async () => {
     await openBoth('resolve');
     expect(stderr).toStrictEqual([]);
+  });
+});
+
+/** 스모크 실행기의 수집기 — 창과 loadURL 사이에 트레이 창의 webContents 에 동기로 붙는다(설계 §5.10 '앱 안 실행기'). */
+const COLLECTORS = ['console-message', 'did-fail-load', 'did-fail-provisional-load', 'render-process-gone', 'preload-error', 'unresponsive', 'did-finish-load'];
+/** 탐색 가드가 webContents.on 으로 거는 사건 — 비스모크에서는 이것뿐이다. */
+const NAVIGATION_EVENTS = ['will-frame-navigate', 'will-navigate', 'will-redirect', 'will-attach-webview'];
+
+describe('스모크 실행기 연결(smoke/run.cjs) — main 은 스모크에서만 꽂는다', () => {
+  it('스모크 — 처리기 · 창 · 트레이보다 먼저 꽂힌다: 네트워크 가드(창 전) · tj-smoke-* 수신(tj-app-info 다음, 창 전) · 수집기(창과 loadURL 사이) · will-quit · process 처리기, 한 동기 구간', async () => {
+    const fake = await runMain('smoke');
+    const after = fake.calls.filter((call) => call.ready);
+    const windowAt = indexOf(after, 'new BrowserWindow');
+    const loadAt = indexOf(after, 'win.loadURL');
+    // guardSession 이 hooks 를 읽을 때 가드가 이미 있었다 — 기본 세션의 onBeforeRequest 하나
+    expect(callsOf(fake, 'session.webRequest.onBeforeRequest')).toHaveLength(1);
+    expect(indexOf(after, 'session.webRequest.onBeforeRequest')).toBeLessThan(windowAt);
+    // preload 의 send 는 듣는 쪽이 없으면 버려진다 — 수신은 창보다 먼저, 발신자 검증(createGuardedIpc)을 거친다
+    const ipc = after.flatMap((call, at) => (call.name.startsWith('ipcMain.') ? [{ call, at }] : []));
+    expect(ipc.map(({ call }) => [call.name, call.args[0]])).toStrictEqual([
+      ['ipcMain.handle', 'tj-app-info'],
+      ['ipcMain.on', 'tj-smoke-preload'],
+      ['ipcMain.on', 'tj-smoke-csp'],
+    ]);
+    for (const { call, at } of ipc) expect(at, String(call.args[0])).toBeLessThan(windowAt);
+    for (const event of COLLECTORS) {
+      const at = indexOf(after, 'webContents.on', event);
+      expect(at, event).toBeGreaterThan(windowAt);
+      expect(at, event).toBeLessThan(loadAt);
+    }
+    expect(listenersOf(fake.calls, 'app.on', 'will-quit')).toHaveLength(1); // 감시 타이머를 끄는 곳
+    expect(after.filter((call) => call.turn !== 1).map((call) => call.name)).toStrictEqual([]);
+    expect(PROCESS_EVENTS.map((event) => added[event].length)).toStrictEqual([1, 1]);
+    // 실행기는 electron 을 require 하지 않는다 — Electron 객체는 main 이 넘긴다
+    expect(Object.keys(require.cache)).toContain(join(tree.desktop, 'smoke', 'run.cjs'));
+    expect(Object.keys(require.cache).filter((key) => /[\\/]node_modules[\\/]electron[\\/]/.test(key))).toStrictEqual([]);
+    expect(stderr).toStrictEqual([]);
+    expect(existsSync(tree.outDir)).toBe(false); // 결과는 검사가 끝나거나 실패할 때만 쓴다
+  });
+
+  it.each(['dev', 'packaged'] as const)('%s — 꽂지 않는다: run.cjs 를 require 하지 않고, 가드 · tj-smoke-* · 수집기 · will-quit · process 처리기가 없다', async (mode) => {
+    const fake = await runMain(mode);
+    expect(Object.keys(require.cache).filter((key) => key.startsWith(join(tree.desktop, 'smoke')))).toStrictEqual([]);
+    expect(callsOf(fake, 'session.webRequest.onBeforeRequest')).toStrictEqual([]);
+    expect(callsOf(fake, 'ipcMain.on')).toStrictEqual([]);
+    expect(callsOf(fake, 'webContents.on').map((call) => call.args[0])).toStrictEqual(NAVIGATION_EVENTS);
+    expect(listenersOf(fake.calls, 'app.on', 'will-quit')).toStrictEqual([]);
+    expect(added).toStrictEqual({ uncaughtException: [], unhandledRejection: [] });
+  });
+
+  it('네트워크 가드 — http · https · ws · wss 는 취소하고, app:// 와 그 밖의 스킴은 그대로 둔다(요청마다 콜백 한 번)', async () => {
+    const fake = await runMain('smoke');
+    type Guard = (details: { url: unknown }, callback: (response: unknown) => void) => void;
+    const guard = only(fake, 'session.webRequest.onBeforeRequest').args[0] as Guard;
+    const answer = (url: unknown): unknown[] => {
+      const responses: unknown[] = [];
+      guard({ url }, (response) => responses.push(response));
+      return responses;
+    };
+    const remote = ['https://example.invalid/tj', 'http://127.0.0.1:5173/tray.html', 'wss://ci.invalid/realtime/v1/websocket', 'ws://localhost:5173/', 'HTTPS://EXAMPLE.INVALID/'];
+    for (const url of remote) expect(answer(url), url).toStrictEqual([{ cancel: true }]);
+    const local = ['app://twelvejanggi/tray.html', 'app://twelvejanggi/assets/ai.worker.js', 'devtools://devtools/bundled/x.html', 'file:///C:/x.txt', 'data:text/plain,x', 'httpx://x/', '', undefined];
+    for (const url of local) expect(answer(url), String(url)).toStrictEqual([{}]);
+    expect(stderr).toStrictEqual([]);
+  });
+
+  it('허용 목록 주소 — 스모크에서는 시스템 브라우저로 열지 않는다(open 은 실행기의 기록기)', async () => {
+    const fake = await runMain('smoke');
+    let prevented = 0;
+    const [willNavigate] = listenersOf(fake.calls, 'webContents.on', 'will-navigate');
+    willNavigate?.({ url: 'https://github.com/khkim3115/TwelveJanggi', preventDefault: () => (prevented += 1) });
+    const windowOpen = only(fake, 'webContents.setWindowOpenHandler').args[0] as (details: { url: string }) => unknown;
+    expect(windowOpen({ url: 'https://khkim3115.github.io/' })).toStrictEqual({ action: 'deny' });
+    await settle();
+    expect(prevented).toBe(1);
+    expect(callsOf(fake, 'shell.openExternal')).toStrictEqual([]);
+    expect(stderr).toStrictEqual([]);
+  });
+
+  it.each([
+    ['uncaughtException', 'unhandledRejection'],
+    ['unhandledRejection', 'uncaughtException'],
+  ] as const)('%s 다음 %s — 실행기의 fail: 결과(stage = 처음 원인) 한 번 · [tj] 한 줄 · exit(1) 한 번', async (first, second) => {
+    const fake = await runMain('smoke');
+    const [firstListener] = added[first];
+    const [secondListener] = added[second];
+    firstListener?.(new Error(`${first} 의 원인`));
+    secondListener?.(new Error(`${second} 의 원인`)); // 처음 실패가 이긴다 — 두 번째 쓰기 · exit 없음
+    expect(readResult()).toStrictEqual({ nonce: NONCE, stage: first, error: `${first} 의 원인`, checks: [], versions: expectedVersions() });
+    expect(callsOf(fake, 'app.exit').map((call) => call.args)).toStrictEqual([[1]]);
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]?.startsWith(`[tj] smoke ${first}: ${first} 의 원인`), stderr[0]).toBe(true);
+  });
+
+  /** [사건, 리스너 인자, 결과 error 에 들 글] — 무인 실행의 비정상 종료 사건은 결과를 쓰고 exit 1 이다. */
+  const GONE: Array<[string, unknown[], string]> = [
+    ['render-process-gone', [{}, { reason: 'crashed', exitCode: 3 }], 'crashed'],
+    ['preload-error', [{}, 'C:\\앱\\preload.js', new Error('preload 가 던졌다')], 'preload 가 던졌다'],
+    ['unresponsive', [], '응답'],
+    ['did-fail-load', [{}, -6, 'ERR_FILE_NOT_FOUND', `${ENTRY_URL}?smoke`, true, 1, 1], 'ERR_FILE_NOT_FOUND'],
+  ];
+  it.each(GONE)('수집기 %s — 결과(stage = 사건 이름) · exit(1)', async (event, args, fragment) => {
+    const fake = await runMain('smoke');
+    const [listener] = listenersOf(fake.calls, 'webContents.on', event);
+    listener?.(...args);
+    expect(readResult()).toStrictEqual({ nonce: NONCE, stage: event, error: expect.stringContaining(fragment), checks: [], versions: expectedVersions() });
+    expect(callsOf(fake, 'app.exit').map((call) => call.args)).toStrictEqual([[1]]);
+  });
+
+  it('서브프레임 did-fail-load · did-fail-provisional-load 는 기록만 한다 — 결과 · exit · [tj] 줄 없음', async () => {
+    const fake = await runMain('smoke');
+    const [failLoad] = listenersOf(fake.calls, 'webContents.on', 'did-fail-load');
+    const [failProvisional] = listenersOf(fake.calls, 'webContents.on', 'did-fail-provisional-load');
+    expect([typeof failLoad, typeof failProvisional]).toStrictEqual(['function', 'function']);
+    failLoad?.({}, -3, 'ERR_ABORTED', 'https://example.invalid/', false, 1, 2);
+    failProvisional?.({}, -3, 'ERR_ABORTED', 'https://example.invalid/', true, 1, 1);
+    await settle();
+    expect(existsSync(tree.outDir)).toBe(false);
+    expect(callsOf(fake, 'app.exit')).toStrictEqual([]);
+    expect(stderr).toStrictEqual([]);
+  });
+
+  it('감시 타이머 — 60초에 결과(stage watchdog) · exit(1), 그 전에는 아무것도 하지 않는다', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const fake = await runMain('smoke');
+      vi.advanceTimersByTime(59_999);
+      expect(existsSync(tree.outDir)).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(readResult()).toStrictEqual({ nonce: NONCE, stage: 'watchdog', error: expect.stringContaining('60'), checks: [], versions: expectedVersions() });
+      expect(callsOf(fake, 'app.exit').map((call) => call.args)).toStrictEqual([[1]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('감시 타이머 — will-quit 이 끈다(그 뒤로는 결과 · exit 없음)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const fake = await runMain('smoke');
+      const quits = listenersOf(fake.calls, 'app.on', 'will-quit');
+      expect(quits).toHaveLength(1);
+      for (const quit of quits) quit();
+      vi.advanceTimersByTime(120_000);
+      expect(existsSync(tree.outDir)).toBe(false);
+      expect(callsOf(fake, 'app.exit')).toStrictEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
