@@ -39,13 +39,21 @@ const POLL_MS = 50;
 const CAPTURE_MS = 5_000;
 const CAPTURE_ATTEMPTS = 2;
 const CAPTURE_RETRY_MS = 500;
-/** 네트워크 가드의 양성 대조 — 메인 쪽에서 창의 세션으로 보내는 요청 하나. 가드가 기록하고 취소해야 한다(.invalid 는 어디에도 없다). */
+/**
+ * 네트워크 가드의 양성 대조 — 메인 쪽에서 창의 세션으로 보내는 요청 하나. 가드가 기록하고 취소해야 한다. 취소는 탐침이
+ * ERR_BLOCKED_BY_CLIENT 로 거부되는 것으로만 확인한다 — .invalid 는 어디에도 없어서 가드가 취소하지 않아도 DNS 에서 거부된다.
+ */
 const GUARD_PROBE_URL = 'https://example.invalid/tj-net-guard-probe';
+/** 가드 탐침의 상한 — 이 안에 응답도 거부도 없으면 실패다(가드가 콜백을 부르지 않으면 요청이 멈춘다). */
 const GUARD_PROBE_MS = 5_000;
+/** 가드가 { cancel: true } 로 답한 요청의 거부에 드는 글(Chromium 의 net 오류 이름). */
+const BLOCKED_BY_CLIENT = 'ERR_BLOCKED_BY_CLIENT';
 /** 가드가 기록 · 취소하는 스킴(대소문자 무시). 그 밖(app:// · devtools: · file: · data: …)은 건드리지 않는다. */
 const REMOTE_SCHEME_RE = /^(?:https?|wss?):/i;
 /** Electron 이 보안 경고 줄에 붙이는 글. */
 const SECURITY_WARNING = 'Electron Security Warning';
+/** Electron 의 보안 경고 검사를 켜는 env 이름 — 런처가 앱 env 에 1 로 넣는다(smokeLaunch.childEnv). */
+const ENABLE_WARNINGS_ENV = 'ELECTRON_ENABLE_SECURITY_WARNINGS';
 /** 트레이 메뉴 — main 이 붙이는 항목(순서 그대로). */
 const TRAY_LABELS = Object.freeze(['열기', '종료']);
 /** 트레이 아이콘 — main 이 쓰는 파일(앱 폴더 기준). Tray 는 붙인 아이콘을 돌려주지 않아 같은 파일을 같은 nativeImage 로 다시 읽어 본다. */
@@ -123,6 +131,28 @@ function errorText(err) {
 }
 
 /**
+ * 거부의 글 — 오류의 글에, cause 가 있으면 그 글을 붙인다(fetch 는 원인을 cause 에 단다). 던지지 않는다.
+ * @param {unknown} err
+ * @returns {string}
+ */
+function rejectionText(err) {
+  const cause = err instanceof Error && err.cause !== undefined ? ` (cause: ${errorText(err.cause)})` : '';
+  return `${errorText(err)}${cause}`;
+}
+
+/**
+ * 가드의 취소로 끝난 거부인가 — Error 의 message 나 그 cause(Error 면 message, 글이면 그대로)에 ERR_BLOCKED_BY_CLIENT 가 든다.
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isBlockedByClient(err) {
+  if (!(err instanceof Error)) return false;
+  const { cause } = err;
+  const causeText = cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : '';
+  return err.message.includes(BLOCKED_BY_CLIENT) || causeText.includes(BLOCKED_BY_CLIENT);
+}
+
+/**
  * stderr 에 '[tj] …' 를 동기로 쓴다(main.js 의 logError 와 같은 줄 모양 — 런처가 [app:err] 로 보여 준다). 쓸 곳이 없으면 버린다.
  * @param {string} message
  */
@@ -182,6 +212,38 @@ function within(work, ms, what) {
 }
 
 /**
+ * 약속이 끝난 모양 — 값(resolved) · 거부(rejected) · 상한 안에 끝나지 않음(timeout).
+ * @template T
+ * @typedef {{ kind: 'resolved', value: T } | { kind: 'rejected', error: unknown } | { kind: 'timeout' }} Settled
+ */
+
+/**
+ * start() 의 약속이 ms 안에 어떻게 끝났는지 본다 — within 과 달리 거부하지 않고 세 갈래로 돌려준다(start 가 동기로 던져도 거부다).
+ * 어느 쪽이든 타이머는 남기지 않는다.
+ * @template T
+ * @param {() => Promise<T>} start
+ * @param {number} ms
+ * @returns {Promise<Settled<T>>}
+ */
+function settleWithin(start, ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ kind: 'timeout' }), ms);
+    Promise.resolve()
+      .then(start)
+      .then(
+        (value) => {
+          clearTimeout(timer);
+          resolve({ kind: 'resolved', value });
+        },
+        (error) => {
+          clearTimeout(timer);
+          resolve({ kind: 'rejected', error });
+        },
+      );
+  });
+}
+
+/**
  * 문제 목록으로 판정한다 — 없으면 통과(passDetail), 있으면 실패(문제를 '; ' 로 이은 것).
  * @param {readonly string[]} problems
  * @param {string} passDetail
@@ -232,6 +294,32 @@ function packageVersion(file) {
   const version = JSON.parse(fs.readFileSync(file, 'utf8')).version;
   if (!isNonEmptyString(version)) throw new Error(`${file} 에 version 이 없다`);
   return version;
+}
+
+/**
+ * Electron 의 보안 경고 검사가 켜졌는가 — securityWarnings 의 전제. Electron 44.9.3 의 렌더러는 창을 불러온 뒤 경고 검사를 돌릴지
+ * process 값으로 정한다: execPath 가 개발 바이너리면 켜고(ELECTRON_DISABLE_SECURITY_WARNINGS 가 있으면 끈다 — 런처가 앱 env 에서
+ * 뺀다), ELECTRON_ENABLE_SECURITY_WARNINGS 가 있으면 늘 켠다. 여기서는 켜는 두 근거를 본다 — 비어 있지 않은 ENABLE, 또는 execPath 가
+ * 파일 이름 electron.exe(win32 — 대소문자 무시) · electron(그 밖)으로 끝난다. 꺼진 검사는 경고를 내지 않아 '0건' 이 아무것도 증명하지
+ * 못한다. 켜짐은 main 프로세스의 값으로 추론한 것이다 — 렌더러에서 본 것이 아니다(패키지 실행에서 그 env 가 sandbox 렌더러에 닿는지는
+ * #22 가 본다). detail 은 켰으면 근거, 아니면 이유다. 시험이 플랫폼마다 바로 부른다.
+ * @param {{ platform: string, execPath: string, env: Record<string, string | undefined> }} proc main 의 process 값
+ * @returns {{ armed: boolean, detail: string }}
+ */
+function securityWarningsArming({ platform, execPath, env }) {
+  const binary = platform === 'win32' ? 'electron.exe' : 'electron';
+  const devBinary = platform === 'win32' ? /[\\/]electron\.exe$/i.test(execPath) : /\/electron$/.test(execPath);
+  const enable = env[ENABLE_WARNINGS_ENV];
+  const inferred = 'main 프로세스의 값으로 추론했다 — 렌더러에서 본 것이 아니다';
+  /** @type {string[]} */
+  const reasons = [];
+  if (isNonEmptyString(enable)) reasons.push(`${ENABLE_WARNINGS_ENV}=${show(enable)}`);
+  if (devBinary) reasons.push(`execPath ${show(execPath)} 가 ${binary} 로 끝난다`);
+  if (reasons.length > 0) return { armed: true, detail: `경고 검사 켜짐: ${reasons.join(' · ')}(${inferred})` };
+  return {
+    armed: false,
+    detail: `경고 검사가 켜져 있지 않다 — ${ENABLE_WARNINGS_ENV} 가 ${show(enable)} 고 execPath ${show(execPath)} 가 ${binary} 로 끝나지 않는다(${inferred}). 꺼진 검사는 경고를 내지 않아 0건이 아무것도 증명하지 못한다`,
+  };
 }
 
 /**
@@ -687,16 +775,23 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
   }
 
   /**
-   * securityWarnings — 장벽 표식을 받은 뒤 'Electron Security Warning' 줄이 0건이고, 페이지가 경고를 스스로 끄지 않았다.
+   * securityWarnings — Electron 의 경고 검사가 켜져 있고(securityWarningsArming — main 의 값으로 추론), 장벽 표식을 받은 뒤
+   * 'Electron Security Warning' 줄이 0건이고, 페이지가 경고를 스스로 끄지 않았다. 켜졌다는 근거가 없으면 0건이어도 실패다.
    * @returns {Promise<CheckVerdict>}
    */
   async function checkSecurityWarnings() {
     const disabled = await page(DISABLE_WARNINGS_SCRIPT, 'ELECTRON_DISABLE_SECURITY_WARNINGS');
+    const arming = securityWarningsArming({ platform: process.platform, execPath: process.execPath, env: process.env });
     const warnings = facts.console.filter((entry) => entry.message.includes(SECURITY_WARNING)).map((entry) => entry.message);
     const quiet = evaluateQuiet({ positiveSeen: state.markerSeen, negatives: warnings });
-    const problems = quiet.ok ? [] : [quiet.detail];
+    const problems = [];
+    if (!arming.armed) problems.push(arming.detail);
+    if (!quiet.ok) problems.push(quiet.detail);
     if (disabled !== false) problems.push(`main world 의 ELECTRON_DISABLE_SECURITY_WARNINGS 가 ${show(disabled)} 다(기대 false)`);
-    return verdictOf(problems, `'${SECURITY_WARNING}' 0건(장벽 표식을 받은 뒤 · 콘솔 ${facts.console.length}줄) · main world 의 ELECTRON_DISABLE_SECURITY_WARNINGS 거짓`);
+    return verdictOf(
+      problems,
+      `${arming.detail} · '${SECURITY_WARNING}' 0건(장벽 표식을 받은 뒤 · 콘솔 ${facts.console.length}줄) · main world 의 ELECTRON_DISABLE_SECURITY_WARNINGS 거짓`,
+    );
   }
 
   /**
@@ -793,26 +888,31 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
 
   /**
    * noNetwork — 가드가 기록한 원격 요청이 기대 목록과 같다. 기대 목록에는 늘 가드 탐침이 있다: 메인 쪽에서 창의 세션으로 보낸 요청을
-   * 가드가 기록 · 취소해야 '아무것도 못 봤다' 와 '가드가 없다' 가 갈린다. 탐침이 응답을 받으면 실패다. 창의 세션이 main 이 가드를 단
-   * 기본 세션이어야 한다(아니면 창의 요청은 가드를 지나지 않는다).
+   * 가드가 기록하고 취소해야 '아무것도 못 봤다' 와 '가드가 없다' 가 갈린다. 탐침은 둘 다일 때만 센다 — 가드의 기록에 있고, 거부의
+   * message(또는 cause)에 ERR_BLOCKED_BY_CLIENT 가 든다. 응답 · 다른 거부(.invalid 의 DNS 실패 같은) · 상한 안에 끝나지 않음은 실패고,
+   * detail 은 본 그대로 적는다. 창의 세션이 main 이 가드를 단 기본 세션이어야 한다(아니면 창의 요청은 가드를 지나지 않는다).
    * @returns {Promise<CheckVerdict>}
    */
   async function checkNoNetwork() {
     const contents = trayWindow().webContents;
     const problems = [];
     if (contents.session !== session.defaultSession) problems.push('창의 세션이 main 이 가드를 단 기본 세션이 아니다');
-    /** @type {string} */
+    const outcome = await settleWithin(() => contents.session.fetch(GUARD_PROBE_URL), GUARD_PROBE_MS);
+    /** @type {string} 탐침이 끝난 모양 — 본 그대로 */
     let probe;
-    try {
-      const response = await within(contents.session.fetch(GUARD_PROBE_URL), GUARD_PROBE_MS, '가드 탐침');
-      probe = `응답 ${response.status}`;
-      problems.push(`가드 탐침이 응답(${response.status})을 받았다 — 가드가 취소하지 않았다`);
-    } catch (err) {
-      probe = `거부(${errorText(err)})`;
+    if (outcome.kind === 'resolved') {
+      probe = `응답(${outcome.value.status})을 받았다`;
+      problems.push(`가드 탐침이 ${probe} — 가드가 취소하지 않았다`);
+    } else if (outcome.kind === 'timeout') {
+      probe = `${GUARD_PROBE_MS}ms 안에 끝나지 않았다(응답 · 거부 없음)`;
+      problems.push(`가드 탐침이 ${probe}`);
+    } else {
+      probe = `거부 ${show(rejectionText(outcome.error))} 로 끝났다`;
+      if (!isBlockedByClient(outcome.error)) problems.push(`가드 탐침이 ${probe} — ${BLOCKED_BY_CLIENT}(가드의 취소)가 아니다`);
     }
     const recorded = evaluateNoNetwork(facts.requests, [GUARD_PROBE_URL]);
     if (!recorded.ok) problems.push(recorded.detail);
-    return verdictOf(problems, `${recorded.detail} — 가드 탐침 ${GUARD_PROBE_URL} 를 기록 · 취소했다(${probe})`);
+    return verdictOf(problems, `가드 탐침 ${GUARD_PROBE_URL} 를 가드가 기록했고 탐침은 ${probe}(취소) · ${recorded.detail}`);
   }
 
   /**
@@ -852,4 +952,4 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
   return { record, open, networkGuard, registerIpc, beforeLoad, setTray, fail };
 }
 
-module.exports = { createSmokeRun };
+module.exports = { createSmokeRun, securityWarningsArming };
