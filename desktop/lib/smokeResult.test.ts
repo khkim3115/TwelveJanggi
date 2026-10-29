@@ -459,6 +459,15 @@ describe('judgeSmoke — 실패 이유 하나씩', () => {
     expect(exact).not.toContain('…');
   });
 
+  it('받은 값을 이유에 쓸 때의 상한은 이 모듈 몫의 200자다 — JSON 글 200자(따옴표 1자 + x 199자)에서 자르고 … 를 붙인다', () => {
+    // 공용 가드(guards.repr)는 상한을 부르는 쪽이 정한다 — 이 모듈이 200 을 넘기는지 여기서 못 박는다. 검사 detail 의 300자와는 다른 상한이다.
+    const verdict = judgeSmoke(input({ exitCode: 'x'.repeat(500) }));
+    expect(verdict.ok).toBe(false);
+    expectOnly(verdict.reasons, EXIT);
+    expect(verdict.reasons[0]).toContain(`"${'x'.repeat(199)}…`);
+    expect(verdict.reasons[0]).not.toContain('x'.repeat(200));
+  });
+
   it('필수가 아닌 검사가 ok:false 여도 실패다 — 보고된 검사는 모두 통과해야 한다', () => {
     const checks = [...NAMES.map((name) => check(name)), check('정보용 검사', { ok: false, detail: '실패했다' })];
     const verdict = judgeSmoke(input({ result: goodResult({ checks }) }));

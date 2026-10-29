@@ -6,6 +6,11 @@
 // - 입력이 비었거나 모양이 틀리면 ok:false 다. 증거가 없다는 사실이 '통과' 가 되지 않는다.
 // - detail 은 실패한 이유만 풀어 쓴다. 긴 목록은 앞 몇 건만 싣는다(요약 파일이 커지지 않게).
 
+// 값 가드(객체 · 비어 있지 않은 문자열 · 값 표현)는 판정기(smokeResult)와 같은 것을 쓴다 — 복사본이 어긋나지 않게 guards.cjs 한 곳에 둔다.
+const guards = require('./guards.cjs');
+
+const { isNonEmptyString, isRecord } = guards;
+
 /**
  * 검사 평가 결과 — 실행기가 { name, ok, detail } 로 checks 에 옮긴다.
  * @typedef {{ ok: boolean, detail: string }} CheckVerdict
@@ -25,16 +30,32 @@ const CANARY_DIRECTIVE = 'connect-src';
 const CANARY_DISPOSITION = 'enforce';
 
 /**
- * 보안 기본선 — 설계 §5.10 표 `webPreferences`. 값은 정확히 같아야 한다(=== 비교).
- * @type {readonly { key: string, value: boolean | string }[]}
+ * 보안 기본선 중 필수 — 설계 §5.10 표 `webPreferences`. 앱이 창을 만들 때 직접 넘기는 값이라 반드시 있고 정확히 같아야 한다(=== 비교).
+ * 키가 없어도 실패다.
+ * @type {readonly { key: string, value: boolean }[]}
  */
-const WEB_PREFERENCE_EXPECTATIONS = Object.freeze([
+const REQUIRED_WEB_PREFERENCES = Object.freeze([
   { key: 'contextIsolation', value: true },
   { key: 'sandbox', value: true },
   { key: 'nodeIntegration', value: false },
+]);
+
+/**
+ * 보안 기본선 중 기본값이 안전한 키. 앱은 이 값들을 넘기지 않아 getLastWebPreferences() 에 없을 수 있다 — 없으면 Electron 기본값이라
+ * 통과이고, 키가 있으면 value 와 정확히 같아야 한다(=== 비교). value 는 Electron 의 기본값이다(electron.d.ts 44.9.3 의 WebPreferences
+ * 문서: webSecurity 는 true, allowRunningInsecureContent · experimentalFeatures · nodeIntegrationInWorker · webviewTag 는 false.
+ * nodeIntegrationInSubFrames 는 켜야만 동작하는 실험 옵션이고, enableBlinkFeatures 는 켤 기능의 목록이라 빈 문자열이 '켠 것 없음' 이다).
+ * 순서는 통과 detail 의 목록 순서다.
+ * @type {readonly { key: string, value: boolean | string }[]}
+ */
+const DEFAULT_SAFE_WEB_PREFERENCES = Object.freeze([
   { key: 'allowRunningInsecureContent', value: false },
   { key: 'experimentalFeatures', value: false },
   { key: 'enableBlinkFeatures', value: '' },
+  { key: 'nodeIntegrationInWorker', value: false },
+  { key: 'nodeIntegrationInSubFrames', value: false },
+  { key: 'webSecurity', value: true },
+  { key: 'webviewTag', value: false },
 ]);
 
 /**
@@ -54,41 +75,12 @@ function fail(detail) {
 }
 
 /**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isRecord(value) {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/**
- * @param {unknown} value
- * @returns {value is string}
- */
-function isNonEmptyString(value) {
-  return typeof value === 'string' && value !== '';
-}
-
-/**
- * detail 에 쓰는 값 표현 — 문자열은 따옴표로 감싸고, 길면 줄인다. 어떤 값이든 던지지 않는다.
+ * detail 에 쓰는 값 표현 — 문자열은 따옴표로 감싸고, 길면 MAX_ITEM_CHARS 에서 줄인다. 어떤 값이든 던지지 않는다.
  * @param {unknown} value
  * @returns {string}
  */
 function repr(value) {
-  let text;
-  try {
-    text = JSON.stringify(value);
-  } catch {
-    text = undefined;
-  }
-  if (text === undefined) {
-    try {
-      text = String(value);
-    } catch {
-      text = '(표시할 수 없는 값)';
-    }
-  }
-  return text.length > MAX_ITEM_CHARS ? `${text.slice(0, MAX_ITEM_CHARS)}…` : text;
+  return guards.repr(value, MAX_ITEM_CHARS);
 }
 
 /**
@@ -122,21 +114,49 @@ function normalizePolicy(s) {
 // ── 검사 평가 ─────────────────────────────────────────────────────────────
 
 /**
- * `webPreferences` — 창을 만들 때 쓴 설정(getLastWebPreferences)이 보안 기본선인가. contextIsolation · sandbox 는 true,
- * nodeIntegration · allowRunningInsecureContent · experimentalFeatures 는 false, enableBlinkFeatures 는 ''(빈 문자열)이어야 한다.
- * 값이 정확히 같아야 한다 — 빠진 키(undefined)도 기대와 다르다. 그 밖의 키는 보지 않는다.
+ * 값이 기대와 다른 키 하나를 detail 에 쓸 글로 — 키가 있으면 `키=값(기대 …)`, 없으면 `키 없음(기대 …)`.
+ * 값이 undefined 로 있는 키와 키 자체가 없는 것을 가른다.
+ * @param {Record<string, unknown>} prefs
+ * @param {string} key
+ * @param {boolean | string} expected
+ * @returns {string}
+ */
+function describeWrongPreference(prefs, key, expected) {
+  const actual = key in prefs ? `=${repr(prefs[key])}` : ' 없음';
+  return `${key}${actual}(기대 ${repr(expected)})`;
+}
+
+/**
+ * `webPreferences` — 창을 만들 때 쓴 설정(getLastWebPreferences)이 보안 기본선인가. 키를 두 갈래로 본다(값은 모두 === 로 비교한다):
+ * - 필수(REQUIRED_WEB_PREFERENCES): contextIsolation · sandbox 는 true, nodeIntegration 은 false 여야 한다. 키가 없어도 실패다.
+ * - 기본값이 안전한 키(DEFAULT_SAFE_WEB_PREFERENCES): 앱이 넘기지 않으므로 없으면 Electron 기본값이라 통과다. 키가 있으면
+ *   값이 undefined 여도 안전한 값과 정확히 같아야 한다 — 없는 키만 기본값으로 본다.
+ * 표에 없는 키는 보지 않는다. 실패하면 detail 에 틀린 키를 값과 함께 모두 싣는다. 통과하면 기본값 키 중 있는 것과 없는 것을 싣는다 —
+ * getLastWebPreferences() 의 실제 모양(Electron 이 기본값을 채워 주는지)을 요약 파일에서 읽는 근거다.
  * @param {unknown} prefs getLastWebPreferences() 의 결과
  * @returns {CheckVerdict}
  */
 function evaluateWebPreferences(prefs) {
   if (!isRecord(prefs)) return fail(`webPreferences 가 비었거나 객체가 아니다: ${repr(prefs)}`);
-  const wrong = WEB_PREFERENCE_EXPECTATIONS.filter(({ key, value }) => prefs[key] !== value).map(
-    ({ key, value }) => `${key}=${repr(prefs[key])}(기대 ${repr(value)})`,
-  );
+
+  /** @type {string[]} */
+  const wrong = [];
+  for (const { key, value } of REQUIRED_WEB_PREFERENCES) {
+    if (prefs[key] !== value) wrong.push(describeWrongPreference(prefs, key, value));
+  }
+  /** @type {string[]} 있고 안전한 기본값 키 — `키=값` */
+  const present = [];
+  /** @type {string[]} 없는 기본값 키 */
+  const missing = [];
+  for (const { key, value } of DEFAULT_SAFE_WEB_PREFERENCES) {
+    if (!(key in prefs)) missing.push(key);
+    else if (prefs[key] === value) present.push(`${key}=${repr(value)}`);
+    else wrong.push(describeWrongPreference(prefs, key, value));
+  }
   if (wrong.length > 0) return fail(`webPreferences 가 기대와 다르다: ${wrong.join(', ')}`);
-  return pass(
-    "contextIsolation · sandbox true, nodeIntegration · allowRunningInsecureContent · experimentalFeatures false, enableBlinkFeatures ''",
-  );
+
+  const required = REQUIRED_WEB_PREFERENCES.map(({ key, value }) => `${key}=${repr(value)}`).join(' · ');
+  return pass(`${required}; 기본값 키 — 있는 것: ${present.join(', ') || '없음'}; 없는 것(Electron 기본값): ${missing.join(', ') || '없음'}`);
 }
 
 /**

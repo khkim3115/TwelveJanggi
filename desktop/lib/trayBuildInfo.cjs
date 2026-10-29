@@ -15,27 +15,14 @@
  */
 /** @typedef {{ ok: true, value: TrayBuildInfo } | { ok: false, error: string }} TrayBuildParse */
 
+// 값 가드(객체 · 비어 있지 않은 문자열)는 스모크 판정기 · 평가기와 같은 것을 쓴다 — guards.cjs 한 곳에 둔다.
+const { isNonEmptyString, isRecord } = require('./guards.cjs');
+
 const FRAME_ANCESTORS = "; frame-ancestors 'none'";
 const DEFAULT_SRC_NONE = "default-src 'none'";
 /** 응답 헤더에 그대로 실릴 값이라 출력 가능한 ASCII(공백 ~ '~')만 받는다 — 줄바꿈 · 제어 문자는 헤더를 깬다. */
 const HEADER_SAFE_RE = /^[\x20-\x7e]+$/;
 const WORKER_SCRIPT_RE = /^assets\/[^\/\\]+\.js$/;
-
-/**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isRecord(value) {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/**
- * @param {unknown} value
- * @returns {value is string}
- */
-function isNonEmptyString(value) {
-  return typeof value === 'string' && value !== '';
-}
 
 /**
  * 정책의 첫 default-src 지시문. 같은 지시문이 여럿이면 CSP 는 첫 것만 쓰고 뒤의 것은 무시한다.

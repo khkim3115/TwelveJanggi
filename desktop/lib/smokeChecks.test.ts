@@ -60,59 +60,174 @@ describe('normalizePolicy', () => {
 });
 
 describe('evaluateWebPreferences', () => {
-  const GOOD = {
+  /** 앱이 창을 만들 때 넘기는 값 그대로 — preload 와 필수 셋뿐이다. 나머지는 Electron 기본값이라 getLastWebPreferences() 에 없을 수 있다. */
+  const APP_PASSED = {
     preload: 'C:\\Users\\홍 길동\\app\\preload.js',
     contextIsolation: true,
     sandbox: true,
     nodeIntegration: false,
-    allowRunningInsecureContent: false,
-    experimentalFeatures: false,
-    enableBlinkFeatures: '',
-    webSecurity: true,
   };
+  /** 필수 셋 — [키, 기대 값]. 값이 정확히 같아야 하고, 키가 없어도 실패다. */
+  const REQUIRED: Array<[string, boolean]> = [
+    ['contextIsolation', true],
+    ['sandbox', true],
+    ['nodeIntegration', false],
+  ];
+  /** 기본값이 안전한 키 — [키, 안전한 값(= Electron 기본값), 위험한 값]. 키가 없으면 기본값이라 통과, 있으면 안전한 값과 정확히 같아야 한다. */
+  const DEFAULT_SAFE: Array<[string, boolean | string, boolean | string]> = [
+    ['allowRunningInsecureContent', false, true],
+    ['experimentalFeatures', false, true],
+    ['enableBlinkFeatures', '', 'CSSContainerQueries'],
+    ['nodeIntegrationInWorker', false, true],
+    ['nodeIntegrationInSubFrames', false, true],
+    ['webSecurity', true, false],
+    ['webviewTag', false, true],
+  ];
+  /** Electron 이 기본값 키를 모두 채워 준 모양 — 앱이 넘긴 값에 기본값 키 일곱 개가 안전한 값으로 더해졌다. */
+  const FILLED: Record<string, unknown> = { ...APP_PASSED, ...Object.fromEntries(DEFAULT_SAFE.map(([key, safe]) => [key, safe])) };
+  /** 참처럼 · 거짓처럼 보이는 값 — 기대한 값과 === 로 다르면 실패여야 한다(기대한 값과 같은 것은 표에서 뺀다). */
+  const LOOKALIKES: Array<[string, unknown]> = [
+    ['null', null],
+    ['0', 0],
+    ['1', 1],
+    ['false', false],
+    ['true', true],
+    ["''", ''],
+    ["' '", ' '],
+    ["'true'", 'true'],
+    ["'false'", 'false'],
+    ['[]', []],
+    ['{}', {}],
+  ];
+  const lookalikesOf = (expected: unknown): Array<[string, unknown]> => LOOKALIKES.filter(([, value]) => value !== expected);
+  /** 키 하나를 뺀 복사본 — 값이 undefined 인 키가 아니라 키 자체가 없다. */
+  function without(prefs: Record<string, unknown>, key: string): Record<string, unknown> {
+    const copy = { ...prefs };
+    delete copy[key];
+    return copy;
+  }
 
-  it('여섯 값이 정확히 기대와 같으면 통과다 — 그 밖의 키는 상관없다', () => {
-    const verdict = evaluateWebPreferences(GOOD);
+  it('앱이 넘기는 값만 있어도 통과다 — 필수 셋이 정확하면 기본값 키는 없어도 된다(없으면 Electron 기본값)', () => {
+    for (const prefs of [APP_PASSED, { contextIsolation: true, sandbox: true, nodeIntegration: false }]) {
+      const verdict = evaluateWebPreferences(prefs);
+      expect(verdict.ok).toBe(true);
+      expect(typeof verdict.detail).toBe('string');
+      expect(verdict.detail).not.toBe('');
+    }
+  });
+
+  it('Electron 이 기본값 키를 모두 채워 줘도 통과다 — 일곱 개가 모두 안전한 값이다', () => {
+    expect(evaluateWebPreferences(FILLED).ok).toBe(true);
+  });
+
+  it('표에 없는 키는 보지 않는다', () => {
+    expect(evaluateWebPreferences({ ...APP_PASSED, zoomFactor: 3, backgroundThrottling: false, spellcheck: true }).ok).toBe(true);
+  });
+
+  describe.each(REQUIRED)('필수 키 %s (기대 %j)', (key, expected) => {
+    it('키가 없으면 실패다 — 기본값 키와 달리 필수는 있어야 한다', () => {
+      const verdict = evaluateWebPreferences(without(FILLED, key));
+      expect(verdict.ok).toBe(false);
+      expect(verdict.detail).toContain(`${key} 없음(기대 ${expected})`);
+    });
+
+    it('값이 undefined 여도 실패다 — 키가 있어도 기대한 값이 아니다', () => {
+      const verdict = evaluateWebPreferences({ ...FILLED, [key]: undefined });
+      expect(verdict.ok).toBe(false);
+      expect(verdict.detail).toContain(`${key}=undefined(기대 ${expected})`);
+    });
+
+    it.each(lookalikesOf(expected))('%s 이면 실패하고 키와 값을 detail 에 싣는다', (_label, value) => {
+      const verdict = evaluateWebPreferences({ ...FILLED, [key]: value });
+      expect(verdict.ok).toBe(false);
+      expect(verdict.detail).toContain(`${key}=${JSON.stringify(value)}(기대 ${expected})`);
+    });
+  });
+
+  describe.each(DEFAULT_SAFE)('기본값 키 %s (안전한 값 %j)', (key, safe, dangerous) => {
+    it('키가 없으면 통과다 — 다른 기본값 키가 모두 있어도 이 키만 빠지면 Electron 기본값이다', () => {
+      expect(evaluateWebPreferences(without(FILLED, key)).ok).toBe(true);
+    });
+
+    it('안전한 값으로 있으면 통과다', () => {
+      expect(evaluateWebPreferences({ ...APP_PASSED, [key]: safe }).ok).toBe(true);
+    });
+
+    it('위험한 값이면 실패하고 키와 값을 detail 에 싣는다', () => {
+      const verdict = evaluateWebPreferences({ ...FILLED, [key]: dangerous });
+      expect(verdict.ok).toBe(false);
+      expect(verdict.detail).toContain(`${key}=${JSON.stringify(dangerous)}(기대 ${JSON.stringify(safe)})`);
+    });
+
+    it('키가 있으면 값이 undefined 여도 있는 것이다 — 안전한 값이 아니라서 실패한다(키를 아예 뺀 것과 다르다)', () => {
+      const verdict = evaluateWebPreferences({ ...FILLED, [key]: undefined });
+      expect(verdict.ok).toBe(false);
+      expect(verdict.detail).toContain(`${key}=undefined`);
+    });
+
+    it.each(lookalikesOf(safe))('%s 이면 안전한 값이 아니라 실패다', (_label, value) => {
+      const verdict = evaluateWebPreferences({ ...FILLED, [key]: value });
+      expect(verdict.ok).toBe(false);
+      expect(verdict.detail).toContain(`${key}=${JSON.stringify(value)}`);
+    });
+  });
+
+  it('여러 값이 틀리면 모두 detail 에 싣는다 — 값과 함께, 맞는 키는 싣지 않는다', () => {
+    const verdict = evaluateWebPreferences({
+      ...FILLED,
+      sandbox: false,
+      nodeIntegration: true,
+      enableBlinkFeatures: 'X',
+      webSecurity: false,
+    });
+    expect(verdict.ok).toBe(false);
+    for (const wrong of [
+      'sandbox=false(기대 true)',
+      'nodeIntegration=true(기대 false)',
+      'enableBlinkFeatures="X"(기대 "")',
+      'webSecurity=false(기대 true)',
+    ]) {
+      expect(verdict.detail).toContain(wrong);
+    }
+    for (const fine of [
+      'contextIsolation',
+      'allowRunningInsecureContent',
+      'experimentalFeatures',
+      'nodeIntegrationInWorker',
+      'nodeIntegrationInSubFrames',
+      'webviewTag',
+    ]) {
+      expect(verdict.detail).not.toContain(fine);
+    }
+  });
+
+  it('필수 키가 없고 기본값 키가 위험하면 둘 다 싣는다', () => {
+    const verdict = evaluateWebPreferences({ sandbox: true, nodeIntegration: false, webviewTag: true });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.detail).toContain('contextIsolation 없음(기대 true)');
+    expect(verdict.detail).toContain('webviewTag=true(기대 false)');
+  });
+
+  it('통과하면 detail 에 기본값 키 중 있는 것과 없는 것을 싣는다 — 라이브 객체의 실제 모양을 요약 파일에서 읽는 근거다', () => {
+    // 일부러 표의 순서와 다르게 준다 — 목록은 표의 순서다.
+    const verdict = evaluateWebPreferences({ ...APP_PASSED, webSecurity: true, allowRunningInsecureContent: false });
     expect(verdict.ok).toBe(true);
-    expect(typeof verdict.detail).toBe('string');
-    expect(verdict.detail).not.toBe('');
+    expect(verdict.detail).toContain('contextIsolation=true · sandbox=true · nodeIntegration=false');
+    expect(verdict.detail).toContain('있는 것: allowRunningInsecureContent=false, webSecurity=true');
+    expect(verdict.detail).toContain(
+      '없는 것(Electron 기본값): experimentalFeatures, enableBlinkFeatures, nodeIntegrationInWorker, nodeIntegrationInSubFrames, webviewTag',
+    );
   });
 
-  it.each<[string, unknown]>([
-    ['contextIsolation', false],
-    ['contextIsolation', undefined],
-    ['contextIsolation', 'true'],
-    ['contextIsolation', 1],
-    ['sandbox', false],
-    ['sandbox', undefined],
-    ['sandbox', 'true'],
-    ['sandbox', 1],
-    ['nodeIntegration', true],
-    ['nodeIntegration', undefined],
-    ['nodeIntegration', 0],
-    ['nodeIntegration', 'false'],
-    ['nodeIntegration', null],
-    ['allowRunningInsecureContent', true],
-    ['allowRunningInsecureContent', undefined],
-    ['allowRunningInsecureContent', 0],
-    ['experimentalFeatures', true],
-    ['experimentalFeatures', undefined],
-    ['experimentalFeatures', null],
-    ['enableBlinkFeatures', 'CSSContainerQueries'],
-    ['enableBlinkFeatures', undefined],
-    ['enableBlinkFeatures', null],
-    ['enableBlinkFeatures', ' '],
-  ])('%s 가 %j 이면 실패하고 그 이름을 detail 에 싣는다', (key, value) => {
-    const verdict = evaluateWebPreferences({ ...GOOD, [key]: value });
-    expect(verdict.ok).toBe(false);
-    expect(verdict.detail).toContain(key);
-  });
-
-  it('여러 값이 틀리면 모두 detail 에 싣는다', () => {
-    const verdict = evaluateWebPreferences({ ...GOOD, sandbox: false, nodeIntegration: true, enableBlinkFeatures: 'X' });
-    expect(verdict.ok).toBe(false);
-    for (const key of ['sandbox', 'nodeIntegration', 'enableBlinkFeatures']) expect(verdict.detail).toContain(key);
-    expect(verdict.detail).not.toContain('contextIsolation');
+  it('기본값 키가 모두 없으면 있는 것은 없음이고, 모두 있으면 없는 것이 없음이다', () => {
+    const none = evaluateWebPreferences(APP_PASSED);
+    expect(none.detail).toContain('있는 것: 없음');
+    // 일곱 키 모두 — 표의 순서 그대로.
+    expect(none.detail).toContain(`없는 것(Electron 기본값): ${DEFAULT_SAFE.map(([key]) => key).join(', ')}`);
+    const all = evaluateWebPreferences(FILLED);
+    expect(all.detail).toContain('없는 것(Electron 기본값): 없음');
+    expect(all.detail).toContain('enableBlinkFeatures=""');
+    expect(all.detail).toContain('webSecurity=true');
   });
 
   it.each<[string, unknown]>([
@@ -127,6 +242,18 @@ describe('evaluateWebPreferences', () => {
     const verdict = evaluateWebPreferences(prefs);
     expect(verdict.ok).toBe(false);
     expect(verdict.detail).not.toBe('');
+  });
+
+  it('빈 객체는 필수 셋이 없어 실패다 — 세 이름을 모두 싣는다', () => {
+    const verdict = evaluateWebPreferences({});
+    expect(verdict.ok).toBe(false);
+    for (const [key, expected] of REQUIRED) expect(verdict.detail).toContain(`${key} 없음(기대 ${expected})`);
+  });
+
+  it('배열은 필수 키를 달아도 실패다 — 객체가 아니다', () => {
+    const verdict = evaluateWebPreferences(Object.assign([], APP_PASSED));
+    expect(verdict.ok).toBe(false);
+    expect(verdict.detail).toContain('객체가 아니다');
   });
 });
 
@@ -486,6 +613,13 @@ describe('evaluateQuiet', () => {
     const verdict = evaluateQuiet({ positiveSeen: true, negatives: [{ text: 'y'.repeat(1000) }] });
     expect(verdict.ok).toBe(false);
     expect(verdict.detail.length).toBeLessThan(400);
+  });
+
+  it('값 표현의 상한은 이 모듈 몫의 120자다 — JSON 글 120자(`{"text":"` 9자 + y 111자)에서 자르고 … 를 붙인다', () => {
+    // 공용 가드(guards.repr)는 상한을 부르는 쪽이 정한다 — 이 모듈이 120 을 넘기는지 여기서 못 박는다.
+    const verdict = evaluateQuiet({ positiveSeen: true, negatives: [{ text: 'y'.repeat(1000) }] });
+    expect(verdict.detail).toContain(`{"text":"${'y'.repeat(111)}…`);
+    expect(verdict.detail).not.toContain('y'.repeat(112));
   });
 });
 

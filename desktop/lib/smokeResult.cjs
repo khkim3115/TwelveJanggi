@@ -8,6 +8,11 @@
 //   앱이 실패 단계에서 쓴 결과(smokeOut.failureResult — stage · error, checks 빈 목록)도 이유로 풀어 낸다.
 // electron 을 require 하지 않는다.
 
+// 값 가드(객체 · 비어 있지 않은 문자열 · 값 표현)는 검사 평가기(smokeChecks)와 같은 것을 쓴다 — 복사본이 어긋나지 않게 guards.cjs 한 곳에 둔다.
+const guards = require('./guards.cjs');
+
+const { isNonEmptyString, isRecord } = guards;
+
 /**
  * 검사 한 건 — 앱 안 실행기가 검사마다 하나씩 checks 에 적는다.
  * @typedef {object} SmokeCheck
@@ -75,22 +80,6 @@ const MAX_REPR_CHARS = 200;
 const MAX_DETAIL_CHARS = 300;
 
 /**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isRecord(value) {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/**
- * @param {unknown} value
- * @returns {value is string}
- */
-function isNonEmptyString(value) {
-  return typeof value === 'string' && value !== '';
-}
-
-/**
  * 값이 있는가 — undefined · null 이 아니다. 빈 문자열은 있는 것이다.
  * @param {unknown} value
  * @returns {boolean}
@@ -109,25 +98,12 @@ function isOriginValue(value) {
 }
 
 /**
- * 이유에 쓰는 값 표현 — JSON 으로 쓰고 길면 줄인다. 문자열은 따옴표가 붙어 '0' 과 0 이 구별된다. 어떤 값이든 던지지 않는다.
+ * 이유에 쓰는 값 표현 — JSON 으로 쓰고 MAX_REPR_CHARS 에서 줄인다. 문자열은 따옴표가 붙어 '0' 과 0 이 구별된다. 어떤 값이든 던지지 않는다.
  * @param {unknown} value
  * @returns {string}
  */
 function repr(value) {
-  let text;
-  try {
-    text = JSON.stringify(value);
-  } catch {
-    text = undefined;
-  }
-  if (text === undefined) {
-    try {
-      text = String(value);
-    } catch {
-      text = '(표시할 수 없는 값)';
-    }
-  }
-  return text.length > MAX_REPR_CHARS ? `${text.slice(0, MAX_REPR_CHARS)}…` : text;
+  return guards.repr(value, MAX_REPR_CHARS);
 }
 
 /**
