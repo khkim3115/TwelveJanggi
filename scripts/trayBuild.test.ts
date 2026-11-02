@@ -701,8 +701,11 @@ describe('Vite 설정 배선', () => {
         base: './',
         publicDir: false,
         worker: { format: 'es' },
-        build: { outDir: 'dist-tray', emptyOutDir: true, rollupOptions: { input: resolve(ROOT, 'tray.html') } },
+        build: { outDir: 'dist-tray', rollupOptions: { input: resolve(ROOT, 'tray.html') } },
       });
+      // emptyOutDir 은 적지 않는다 — 값을 적으면 Vite 의 '루트 밖 outDir 은 비우지 않는다' 보호가 꺼져 `--outDir <다른 폴더>` 를
+      // 경고 없이 비운다. 기본 dist-tray 는 루트 안이라 Vite 기본값이 빌드마다 비운다.
+      expect(config.build?.emptyOutDir, 'build.emptyOutDir').toBeUndefined();
       // 설정이 만든 가드가 일한다 — 가드 루트가 틀리면 위의 이름 검사는 그대로 통과하고 가드만 꺼진다
       await expectGuardsEnforce(
         config,

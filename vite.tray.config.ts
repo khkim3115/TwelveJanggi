@@ -12,6 +12,8 @@ import { repoRoot, trayCsp, trayGuard } from './scripts/trayBuild';
 // - trayCsp: CSP meta · tray-build.json · 출력 검사. 워커 번들마다 돌면 안 되므로 worker.plugins 에는 넣지 않는다
 // root 는 이 파일이 있는 저장소 루트다 — 가드 루트와 같은 값이라 실행 위치(cwd)와 무관하게 같은 판정을 한다.
 // 진입도 root 에서 절대 경로로 푼다: 상대 'tray.html' 은 Rollup 이 cwd 기준으로 풀어 다른 폴더에서 돌리면 진입을 못 찾는다.
+// emptyOutDir 은 적지 않는다 — 기본값이 루트 안의 dist-tray 는 빌드마다 비우고, 루트 밖 --outDir 은 경고만 하고 비우지 않는다.
+// 값을 적으면 그 보호가 꺼져 다른 폴더를 가리킨 --outDir 이 경고 없이 비워진다.
 const root = repoRoot(import.meta.url);
 
 export default defineConfig({
@@ -21,5 +23,5 @@ export default defineConfig({
   plugins: [react(), trayGuard(root), trayCsp()],
   // es 워커 — AI 모듈 워커의 형식이다(웹 설정과 같다)
   worker: { format: 'es', plugins: () => [trayGuard(root)] },
-  build: { outDir: 'dist-tray', emptyOutDir: true, rollupOptions: { input: resolve(root, 'tray.html') } },
+  build: { outDir: 'dist-tray', rollupOptions: { input: resolve(root, 'tray.html') } },
 });
