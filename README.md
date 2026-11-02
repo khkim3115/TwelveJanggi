@@ -147,9 +147,13 @@ src/
   ui/          React — Board · HandTray · TurnBanner · Home · App · Lobby · MultiplayerGame · 모달들
   lib/         Supabase 클라이언트(지연 로드) · 채팅 · 피드백
   data/        패치노트 · 커뮤니티 링크
+  tray/        트레이 앱 화면(tray.html 진입) · 스모크 훅(?smoke 때만) — 웹 전용 모듈은 import 하지 않는다
+desktop/       Electron 트레이 앱 — dist-tray/ 를 app://twelvejanggi/tray.html 로 연다 · 앱 안 스모크(desktop/README.md)
 supabase/      schema.sql(진실원본) · migrations/(적용본)
 scripts/       sql-parity.ts(로컬 규칙 일치 — PGlite) · mp-e2e.ts(실서버 규칙 일치) · bench-seats.ts(선후공 실측)
+               · trayBuild.ts(트레이 빌드 도구 — CSP 한 원본 · 웹/트레이 빌드 가드)
 public/        icon.svg + 생성된 PWA 아이콘
+tray.html      트레이 빌드의 진입 — vite.tray.config.ts(웹 설정과 따로 · PWA 없음)로 dist-tray/ 에 빌드한다
 ```
 
 ## 검증

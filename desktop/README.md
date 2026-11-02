@@ -89,7 +89,8 @@ npm --prefix desktop start   # = electron . → 트레이 아이콘 + 창(app://
 - 한 판은 약 2초(이 PC 기준)이고 그동안 창이 실제로 뜹니다(`screenshot` 이 보이는 창을 찍습니다). 시간 상한은 둘 — 앱 안 감시 타이머 60초,
   런처의 하드 타임아웃 90초(`-- --timeout=<10~90>` 으로 줄일 수 있습니다).
 - **격리** — `%TEMP%/tj-smoke-*` 아래에 이번 실행 전용 프로필이 생기고(앱의 `TMP`/`TEMP` 도 그 안), 동시 실행 잠금은 `%TEMP%/tj-smoke.lock` 입니다.
-  끝나면 지우고, 못 지운 것은 다음 실행의 첫 단계가 정리합니다. 스모크는 자기 프로필이라 이미 떠 있는 트레이와 따로 돕니다. 동시 실행은 지원하지 않습니다.
+  끝나면 지우고, 못 지운 것은 다음 실행이 앱을 띄우기 직전에 정리합니다 — 인자 · 잠금 · `smoke-out` 비우기 · 빌드 확인 · electron 확인을 지난 뒤라,
+  그 전에 멈춘 실행(빌드나 바이너리가 없는 등)은 정리하지 않습니다. 스모크는 자기 프로필이라 이미 떠 있는 트레이와 따로 돕니다. 동시 실행은 지원하지 않습니다.
 - 런처는 앱 env 에서 `ELECTRON_RUN_AS_NODE` · `ELECTRON_DISABLE_SECURITY_WARNINGS` · `TJ_DEVTOOLS` · `NODE_OPTIONS` · `ELECTRON_FORCE_IS_PACKAGED` 를 빼고,
   `ELECTRON_OVERRIDE_DIST_PATH` 가 있으면 실행을 거부합니다(고정한 바이너리로만 돕니다). Electron 을 내려받지도 않습니다(아래 '문제 해결').
 
@@ -134,7 +135,9 @@ npm run build:tray                    # 기본 빌드로 되돌린다 — 저장
 
 ### 결과 위치
 
-`desktop/smoke-out/` — git 무시, 실행마다 처음에 비웁니다. CI 의 `tray-smoke` 잡(windows-latest)은 `.invalid` 빌드로 스모크를 돌리고 이 폴더를 아티팩트(`tray-smoke`)로 올립니다.
+`desktop/smoke-out/` — git 무시. 잠금을 얻은 실행은 맨 먼저 이 폴더를 비웁니다. 그 전에 거부된 실행(틀린 인자 · npm 이 가져간 인자 · 다른 스모크의 잠금)은
+건드리지 않아 지난 실행의 결과가 남으므로, `summary.json` 의 `nonce` · `finishedAt` 으로 이번 실행의 것인지 확인합니다.
+CI 의 `tray-smoke` 잡(windows-latest)은 `.invalid` 빌드로 스모크를 돌리고 이 폴더를 아티팩트(`tray-smoke`)로 올립니다.
 
 | 파일 | 쓰는 쪽 | 내용 |
 |---|---|---|
@@ -163,15 +166,18 @@ npm --prefix desktop run smoke -- --net    # '--' 뒤에 쓴다
 
 ## 보안 기본선
 
-| 기본선 | 어디서 걸리는가 | 확인하는 검사 |
+'확인하는 곳' 의 `boot` 같은 이름은 스모크 검사이고, `*.test.ts` 는 `desktop/lib` 의 단위 · 배선 시험(`npm test`)입니다 — 스모크가 돌리지 않는
+조항은 그 시험이 지킵니다.
+
+| 기본선 | 어디서 걸리는가 | 확인하는 곳 |
 |---|---|---|
-| 출처 동결 | `app://twelvejanggi` — localStorage · 익명 세션이 여기에 묶인다. 스킴 특권은 `{ standard, secure, supportFetchAPI }` 뿐(`supportFetchAPI` 는 스모크의 페이지 안 fetch 검사용) | `boot` · `protocol` |
-| 렌더러 격리 | webPreferences 는 정확히 `{ preload, contextIsolation: true, sandbox: true, nodeIntegration: false }` — `lib/windowPrefs.cjs` 한 곳에서만 만든다. `app.enableSandbox()` 를 단일 인스턴스 잠금보다 먼저 부른다. `additionalArguments` 는 쓰지 않는다(비어 있지 않으면 spare renderer 를 못 써서 스모크만 다른 시작 경로를 탄다) | `webPreferences` · `sandboxEffective` |
-| 노출 면 | preload 는 `require('electron')` 만 쓰고 `window.tjDesktop = { getAppInfo }` 만 노출한다(raw `ipcRenderer` 없음). 채널은 `tj-*`. IPC 는 트레이 창의 메인 프레임에서 온 것만 받는다 | `bridge` · `ipc` |
+| 출처 동결 | `app://twelvejanggi` — localStorage · 익명 세션이 여기에 묶인다. 스킴 특권은 `{ standard, secure, supportFetchAPI }` 뿐(`supportFetchAPI` 는 스모크의 페이지 안 fetch 검사용) | `boot`(진입 URL) · `protocol`(다른 호스트는 404). 특권 셋은 `appProtocol.test.ts` · `mainWiring.test.ts` |
+| 렌더러 격리 | webPreferences 는 정확히 `{ preload, contextIsolation: true, sandbox: true, nodeIntegration: false }` — `lib/windowPrefs.cjs` 한 곳에서만 만든다. `app.enableSandbox()` 를 단일 인스턴스 잠금보다 먼저 부른다. `additionalArguments` 는 쓰지 않는다(비어 있지 않으면 spare renderer 를 못 써서 스모크만 다른 시작 경로를 탄다) | `webPreferences` · `sandboxEffective`(실제 창의 값 · 실효 sandbox). 정확히 네 키 · 한 공장 · `additionalArguments` 없음은 `windowPrefs.test.ts` · `mainSource.test.ts`, `enableSandbox` 를 잠금보다 먼저는 `mainSource.test.ts` · `mainWiring.test.ts` |
+| 노출 면 | preload 는 `require('electron')` 만 쓰고 `window.tjDesktop = { getAppInfo }` 만 노출한다(raw `ipcRenderer` 없음). 채널은 `tj-*`. IPC 는 트레이 창의 메인 프레임에서 온 것만 받는다 | `bridge`(노출 키) · `ipc`(왕복). preload 의 `require` · 채널 이름은 `preloadContract.test.ts` · `mainWiring.test.ts`, 메인 프레임만 받는 것은 `ipcGuard.test.ts` · `mainSource.test.ts` · `mainWiring.test.ts` |
 | CSP | 문서 meta 와 응답 헤더 두 경로에 같은 정책(헤더 판 = meta 판 + `frame-ancestors 'none'`). 전용 워커는 문서 meta 를 물려받지 않고 자기 응답 헤더를 따르므로 헤더가 필요하다. 인라인 스크립트 · 스타일이 없다(`style-src 'self'`) | `cspMeta` · `cspHeader` · `cspViolations` · `cspCanary` |
-| 요청 처리기 | 파일 색인에서만 내준다 · 호스트 정확 일치 · GET/HEAD 만(그 밖의 메서드는 405) · 없거나 거부하면 404 · 표 밖 확장자 없음 · `nosniff` | `protocol` · `mime` |
-| 탐색 · 새 창 · webview | 앱 밖은 막고 허용 목록(`khkim3115.github.io` · 이 저장소의 `github.com`)만 시스템 브라우저로 연다 | `navigation` |
-| 권한 · 다운로드 · 인증서 | 권한은 알림 · `clipboard-sanitized-write` 만(장치 권한은 거부), 다운로드는 막고, 클라이언트 인증서는 고르지 않는다 | `permissions` |
+| 요청 처리기 | 파일 색인에서만 내준다 · 호스트 정확 일치 · GET/HEAD 만(그 밖의 메서드는 405) · 없거나 거부하면 404 · 표 밖 확장자 없음 · `nosniff` | `protocol` · `mime` · `cspHeader`(`nosniff`). 호스트 정확 일치의 변형(대소문자 · 접두 · 포트 · 사용자 정보)은 `appProtocol.test.ts` |
+| 탐색 · 새 창 · webview | 앱 밖은 막고 허용 목록(`khkim3115.github.io` · 이 저장소의 `github.com`)만 시스템 브라우저로 연다 | `navigation`. webview 는 `webPreferences`(`webviewTag=false`) · `navigation.test.ts` |
+| 권한 · 다운로드 · 인증서 | 권한은 알림 · `clipboard-sanitized-write` 만(장치 권한은 거부), 다운로드는 막고, 클라이언트 인증서는 고르지 않는다 | `permissions`(알림 · 클립보드 쓰기 허락, 위치 거부). 장치 권한 · 다운로드 · 클라이언트 인증서는 `mainWiring.test.ts` · `permissions.test.ts` |
 | 보안 경고 | Electron 의 보안 경고 검사가 켜진 채 0건 | `securityWarnings` |
 | 원격 요청 | 기본 스모크 · CI 에서는 나가지 않는다 | `noNetwork` · `connectAllowed` |
 | 내 PC 불변 | 로그인 항목을 바꾸지 않고 `%TEMP%` 에 잔여를 남기지 않는다 | `loginItem` · 런처의 실행 뒤 비교 |
@@ -236,7 +242,8 @@ taskkill /PID <pid> /T /F
 ### 스모크가 '다른 스모크가 실행 중' 이라고 한다 / `tj-smoke-*` 가 남았다
 
 - 동시 실행 잠금(`%TEMP%/tj-smoke.lock`)입니다. 죽은 PID 의 잠금(강제 종료가 남긴 것)은 다음 실행이 넘겨받습니다. 적힌 PID 가 스모크가 아니면 잠금 파일을 지웁니다.
-- 지난 실행의 `tj-smoke-*` 는 다음 실행의 첫 단계가 지웁니다. 어떤 프로세스가 폴더를 쥐고 있으면 경고만 하고 계속합니다. 이번 실행이 새 `tj-smoke-*` 를 남기면 그 실행은 실패입니다.
+- 지난 실행의 `tj-smoke-*` 는 다음 실행이 앱을 띄우기 직전에 지웁니다 — 인자 · 잠금 · 빌드 · electron 확인을 지난 뒤라, 빌드나 바이너리가 없어
+  그 전에 멈춘 실행은 지우지 않습니다. 어떤 프로세스가 폴더를 쥐고 있으면 경고만 하고 계속합니다. 이번 실행이 새 `tj-smoke-*` 를 남기면 그 실행은 실패입니다.
 
 ### 클라이언트 인증서
 

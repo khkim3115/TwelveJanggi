@@ -162,8 +162,8 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
 - 처리기: app:// 는 시작할 때 만든 파일 색인에서만 내주고(요청 문자열은 경로 계산에 넣지 않는다 · 호스트 정확 일치 · GET/HEAD 만, 그 밖은 405 ·
   없거나 거부하면 404, throw 없음), IPC 는 `createGuardedIpc` 로만 등록하고, 앱 밖 탐색 · 새 창은 막은 뒤 허용 목록(`links.cjs`)만 시스템 브라우저로 연다.
 - **CSP 는 한 원본이다** — `buildTrayCsp` 한 문자열이 `tray.html` 의 meta 와 `tray-build.json` → app:// 응답 헤더(+`frame-ancestors 'none'`)에
-  그대로 간다(전용 워커는 문서 meta 를 물려받지 않는다). **fail-closed**: `tray-build.json` 이나 `tray.html` 이 없거나 틀리면 main 은
-  처리기 · 창 · 트레이를 만들지 않고 알린 뒤 끝낸다.
+  그대로 간다(전용 워커는 문서 meta 를 물려받지 않는다). **fail-closed**: `tray-build.json` 이 없거나 틀리거나 `tray.html` 이 없으면
+  main 은 처리기 · 창 · 트레이를 만들지 않고 알린 뒤 끝낸다(`tray.html` 의 내용은 `build:tray` 의 출력 검사와 스모크 `cspMeta` 가 본다).
 - **빌드 가드는 양방향이다** — `trayGuard`(트레이 빌드에 PWA 가상 모듈 · `src/main.tsx` · `Header` · `Home` · `appStore` 등)와 `webGuard`(웹 빌드에
   `src/tray/**` — `apply: 'build'` 라 dev 의 `/tray.html` 은 막지 않는다)가 `load` 훅과 `worker.plugins` 에서 빌드를 실패시킨다.
   쓸 부분이 웹 전용 모듈에 있으면 순수 모듈로 옮긴다. `build:tray` 는 cwd 와 무관하다(루트 · 진입 · 가드 루트가 `repoRoot(import.meta.url)` 한 값).
