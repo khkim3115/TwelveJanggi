@@ -417,7 +417,7 @@ describe('워커 하위 빌드의 가드', () => {
 
 // trayCsp 는 임시 루트(트레이 HTML · 진입 · AI 워커)로 디스크에 빌드한다 — writeBundle 은 쓰기 빌드에서만 돈다.
 function trayCspRoot(trayHtml = TRAY_HTML): string {
-  const dir = tempDir('tj-traycsp-');
+  const dir = realpathSync.native(tempDir('tj-traycsp-'));
   writeFileSync(join(dir, 'tray.html'), trayHtml);
   writeFileSync(join(dir, 'main.ts'), "new Worker(new URL('./ai.worker.ts', import.meta.url), { type: 'module' });\n");
   writeFileSync(join(dir, 'ai.worker.ts'), "self.postMessage('ok');\n");

@@ -1,6 +1,6 @@
 name: CI
 
-# PR(대상 main)마다 타입체크 · 테스트 · SQL 규칙 대조 · 빌드. 배포는 main push 때 deploy.yml 이 따로 한다.
+# PR(대상 main)마다 타입체크 · 테스트 · SQL 규칙 대조 · 빌드 · build:tray · typecheck:desktop · Windows 트레이 스모크. 배포는 main push 때 deploy.yml 이 따로 한다.
 on:
   pull_request:
     branches: [main]
