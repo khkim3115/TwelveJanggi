@@ -24,9 +24,9 @@ npm run e2e:mp               # 실서버 규칙 일치 검증(.env.local 필요 
 # 트레이 앱(Electron) — 아래 '트레이 앱' 절. Windows 에서만 검증했다
 npm run build:tray           # vite build --config vite.tray.config.ts → dist-tray/ (PWA 없음, CSP meta · tray-build.json 포함)
 npm run typecheck:desktop    # desktop/ 의 JS(main · preload · lib · smoke · scripts)를 checkJs 로 — 먼저 npm --prefix desktop ci
-npm --prefix desktop ci      # Electron 설치 — 42+ 는 바이너리를 받지 않는다(처음 start 때 받는다). `install` 은 쓰지 않는다
+npm --prefix desktop ci      # Electron 설치 — 42+ 는 바이너리를 받지 않는다(처음 start 때 받는다). `--prefix` 와 인자 없는 `install` 의 조합은 쓰지 않는다
 npm --prefix desktop start   # 트레이 앱 실행(= electron .) — 먼저 npm run build:tray
-npm --prefix desktop run smoke           # 실제 앱 스모크(한 판 약 2초) — 결과는 desktop/smoke-out/
+npm --prefix desktop run smoke           # 실제 앱 스모크(한 판 약 2초, 이 PC 기준) — 결과는 desktop/smoke-out/
 npm --prefix desktop run smoke -- --net  # + 실제 Supabase 연결 — 공유 프로젝트라 사용자 확인 뒤에만. `--` 없이는 npm 이 플래그를 가져가 런처가 거부한다
 ```
 
@@ -143,38 +143,40 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
 - 아이콘은 `public/icon.svg` 하나가 원본이다(王 은 글꼴이 아니라 획으로 그린다). 고친 뒤 `npm run generate-pwa-assets`.
 - `main` push 마다 `.github/workflows/deploy.yml` 이 GitHub Pages 로 배포한다(Node 24). repo Variables
   `VITE_SUPABASE_URL`·`VITE_SUPABASE_ANON_KEY` 가 비어 있으면 온라인 대전이 꺼진 채 나가지 않게 빌드가 멈춘다.
-- PR(대상 `main`)마다 `.github/workflows/ci.yml` 이 잡 둘을 돌린다(Node 24). `check`(`ubuntu-latest`)는 `npm ci` → typecheck → test → test:sql →
-  build(Supabase 값 없이) → `build:tray` → `npm --prefix desktop ci` → `typecheck:desktop` 이다 — 루트 단계가 desktop 설치 없이 도는지 매번 보이게 설치를
-  뒤에 둔다. `check` 는 `main` 브랜치 보호의 **필수 검사**다 — 잡 이름을 바꾸거나 경로 필터를 걸면 검사가 보고되지 않는 PR 이 머지 대기로 막힌다
-  (바꿀 때는 보호 설정도 함께). `tray-smoke`(`windows-latest`)는 `desktop/lib` · `scripts` 시험 → `.invalid` Supabase 값으로 `build:tray` → 스모크 →
-  `smoke-out/` 아티팩트이고(Electron 바이너리는 `.electron-cache` 에 캐시), **아직 필수 검사가 아니다** — 필수로 둘지는 첫 PR 의 초록 실행 뒤 브랜치 보호가 정한다.
+- PR(대상 `main`)마다 `.github/workflows/ci.yml` 이 잡 둘을 돌린다(Node 24). `check`(`ubuntu-latest`)는 `npm ci` → typecheck → test →
+  test:sql → build(Supabase 값 없이) → `build:tray` → `npm --prefix desktop ci` → `typecheck:desktop` 이다 — 루트 단계가 desktop 설치 없이
+  도는지 매번 보이게 설치를 뒤에 둔다. `check` 는 `main` 브랜치 보호의 **필수 검사**다 — 잡 이름을 바꾸거나 경로 필터를 걸면 검사가
+  보고되지 않는 PR 이 머지 대기로 막힌다 (바꿀 때는 보호 설정도 함께). `tray-smoke`(`windows-latest`)는 `desktop/lib` · `scripts` 시험 →
+  `.invalid` Supabase 값으로 `build:tray` → 스모크 → `smoke-out/` 아티팩트이고(Electron 바이너리는 `.electron-cache` 에 캐시),
+  **아직 필수 검사가 아니다** — 필수로 둘지는 첫 PR 의 초록 실행 뒤 브랜치 보호가 정한다.
 
 ## 트레이 앱 (Electron)
 
 - 구조: `tray.html` 과 `src/tray/` 를 `vite.tray.config.ts`(웹 설정과 따로 — PWA 없음, 도구 `scripts/trayBuild.ts`)로 `dist-tray/` 에
   빌드하고 `desktop/` 의 Electron 이 `app://twelvejanggi/tray.html` 로 연다(사용법 · 스모크 표 · 문제 해결은 `desktop/README.md`, Windows 만 검증).
   개발은 `npm run dev` → `/tray.html`(CSP 없음 · `window.tjDesktop` 은 스텁), 앱은 `build:tray` → `npm --prefix desktop ci` →
-  `npm --prefix desktop start`. 설치는 `ci` 로만 한다 — Windows 에서 `--prefix` 와 `install` 을 함께 쓰면 저장소 루트가 `desktop/node_modules`
-  에 링크되고, 그 링크를 따라간 재귀 삭제가 진짜 `node_modules` 를 지운 적이 있다.
+  `npm --prefix desktop start`. 설치는 `ci` 로만 한다 — `--prefix` 와 인자 없는 `install` 은 Windows 에서 저장소 루트를 `desktop/node_modules`
+  에 링크하고, node_modules 정션을 따라간 삭제는 진짜 폴더를 지운 적이 있다(다른 정션이었다). lock 은 `desktop/` 안에서 `npm install` 로만 다시 쓴다.
 - 스킴 특권은 `{ standard, secure, supportFetchAPI }` 뿐이다 — `supportFetchAPI` 는 제품 코드가 아니라 스모크의 페이지 안 fetch 검사용이고,
   `corsEnabled`(다른 출처가 app:// 응답을 읽게 된다) · `stream` · `bypassCSP` 는 넣지 않는다.
-- 처리기: app:// 는 시작할 때 만든 파일 색인에서만 내주고(요청 문자열은 경로 계산에 넣지 않는다 · 호스트 정확 일치 · GET/HEAD ·
+- 처리기: app:// 는 시작할 때 만든 파일 색인에서만 내주고(요청 문자열은 경로 계산에 넣지 않는다 · 호스트 정확 일치 · GET/HEAD 만, 그 밖은 405 ·
   없거나 거부하면 404, throw 없음), IPC 는 `createGuardedIpc` 로만 등록하고, 앱 밖 탐색 · 새 창은 막은 뒤 허용 목록(`links.cjs`)만 시스템 브라우저로 연다.
 - **CSP 는 한 원본이다** — `buildTrayCsp` 한 문자열이 `tray.html` 의 meta 와 `tray-build.json` → app:// 응답 헤더(+`frame-ancestors 'none'`)에
   그대로 간다(전용 워커는 문서 meta 를 물려받지 않는다). **fail-closed**: `tray-build.json` 이나 `tray.html` 이 없거나 틀리면 main 은
   처리기 · 창 · 트레이를 만들지 않고 알린 뒤 끝낸다.
 - **빌드 가드는 양방향이다** — `trayGuard`(트레이 빌드에 PWA 가상 모듈 · `src/main.tsx` · `Header` · `Home` · `appStore` 등)와 `webGuard`(웹 빌드에
   `src/tray/**` — `apply: 'build'` 라 dev 의 `/tray.html` 은 막지 않는다)가 `load` 훅과 `worker.plugins` 에서 빌드를 실패시킨다.
-  쓸 부분이 웹 전용 모듈에 있으면 순수 모듈로 옮긴다. Vite `root` · 진입(`resolve(root, 'tray.html')`) · 가드 루트는 `repoRoot(import.meta.url)`
-  한 값이라 `build:tray` 는 cwd 와 무관하다.
+  쓸 부분이 웹 전용 모듈에 있으면 순수 모듈로 옮긴다. `build:tray` 는 cwd 와 무관하다(루트 · 진입 · 가드 루트가 `repoRoot(import.meta.url)` 한 값).
 - `desktop/main.js` 최상위(ready 전 · 동기)는 **순서가 의미를 가진다**: 스모크 인자 → userData → `enableSandbox` →
-  `registerSchemesAsPrivileged` → 단일 인스턴스 잠금. webPreferences 는 `lib/windowPrefs.cjs` 한 공장에서만 만들어 스모크와 같다(`additionalArguments` 금지).
+  `registerSchemesAsPrivileged` → 단일 인스턴스 잠금. webPreferences 는 `lib/windowPrefs.cjs` 한 공장에서만 만들어
+  스모크와 같다(`additionalArguments` 금지).
 - **스모크**(`npm --prefix desktop run smoke [-- --net]`)는 실제 앱을 `tray.html?smoke` · 격리 프로필로 띄워 필수 검사 20개를 하나도
   건너뛰지 않는다(`.invalid` 빌드는 +`connectAllowed`, `--net` 은 +`net`). 기본 스모크 · CI 는 원격으로 나가는 요청이 0 이고,
   `--net` 은 공유 Supabase 에 닿으니 사용자 확인 뒤에만 돌린다.
 - **Windows 앱 실행 규칙**: 에이전트는 앱 · 스모크를 한 번에 하나만 돌린다 — 스모크는 `run smoke` 런처로, 앱은 PID 를 기록하는 `spawn` 도우미로 띄우고
-  `taskkill /PID <pid> /T /F` 로 끝낸다. `/IM electron.exe`(다른 Electron 앱도 꺼진다)와 `npm --prefix desktop start` 의 도구 포그라운드 ·
-  백그라운드 실행은 금지다. 끝나면 `TwelveJanggi` 가 든 `electron.exe` 가 없는지 조회한다.
+  PID 로 끝낸다(Git Bash 는 `taskkill //PID <pid> //T //F` — `/PID` 를 경로로 바꾸므로 슬래시를 겹친다. cmd · PowerShell 은 `/PID <pid> /T /F`).
+  `/IM electron.exe`(다른 Electron 앱도 꺼진다)와 `npm --prefix desktop start` 의 도구 포그라운드 · 백그라운드 실행은 금지다.
+  끝나면 `TwelveJanggi` 가 든 `electron.exe` 가 없는지 조회한다.
 - 버전 규칙: Electron 은 첫 출시 후 2주가 지난 가장 높은 메이저(`^44.9.3`)를 쓰고 패치는 `desktop/package-lock.json` 이 고정한다.
   트레이 앱의 CSS 클래스는 모두 `tapp-` 접두사다(`index.css` 의 `.tray*` 는 손패 것).
 

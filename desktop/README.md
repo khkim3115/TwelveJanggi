@@ -1,9 +1,10 @@
 # desktop — 십이장기 트레이 앱 (Electron)
 
-웹과 같은 코드(`src/core` · `src/engine` · `src/store` · `src/ui`)로 만든 트레이 빌드(`dist-tray/`)를
-`app://twelvejanggi/tray.html` 로 여는 Electron 셸입니다. 지금은 **골격**(#20)이라 창에는 제목과 자리표시 한 문단뿐이고,
-산출물은 화면이 아니라 **증명**입니다 — AI 모듈 워커 · CSP · 보안 기본선이 `app://` 출처에서 실제로 동작하는지를
-PR 마다 스모크가 확인합니다. 화면은 #24 · #25, 창 동작 · 메뉴는 #21, 설치 파일 · 업데이트는 #22, 전용 아이콘은 #23 이 잇습니다.
+웹과 같은 코드 가운데 `src/core` · `src/engine`(AI)과 `src/lib` · `src/index.css` 로 만든 트레이 빌드(`dist-tray/`)를
+`app://twelvejanggi/tray.html` 로 여는 Electron 셸입니다(`src/store` · `src/ui` 는 아직 쓰지 않습니다 — 화면을 만드는 뒤의 이슈에서 들어옵니다).
+지금은 **골격**(#20)이라 창에는 제목과 자리표시 한 문단뿐이고, 산출물은 화면이 아니라 **증명**입니다 — AI 모듈 워커 · CSP · 보안 기본선이
+`app://` 출처에서 실제로 동작하는지를 PR 마다 스모크가 확인합니다. 화면은 #24 · #25, 창 동작 · 메뉴는 #21, 설치 파일 · 업데이트는 #22,
+전용 아이콘은 #23 이 잇습니다.
 
 - **Windows 만 검증했습니다.** macOS · Linux 의 트레이는 확인하지 않았습니다.
 - 필요한 것: Node 22.12 이상(`package.json` 의 `engines` — Electron 44 패키지의 하한과 같습니다), 저장소 루트에서 `npm ci`.
@@ -46,7 +47,8 @@ npm --prefix desktop start   # = electron . → 트레이 아이콘 + 창(app://
 
 - 설치는 `ci` 로 합니다(`desktop/` 안에서 `npm install` 도 됩니다). **`--prefix` 와 인자 없는 `install` 의 조합은 쓰지 않습니다** —
   Windows 에서 npm 이 지금 폴더(저장소 루트)를 `file:..` 의존성으로 더하고 `desktop/node_modules` 에 저장소 루트로 가는 링크를 만듭니다.
-  링크를 따라가는 재귀 삭제가 진짜 `node_modules` 를 지운 적이 있어 쓰지 않는 것입니다(`desktop/lib/packageShape.test.ts` 가 이 모양을 막습니다).
+  node_modules 안의 정션을 따라간 삭제가 진짜 `node_modules` 를 지운 적이 있습니다(다른 정션이었습니다). 같은 위험을 만드는 링크라서
+  쓰지 않는 것입니다(`desktop/lib/packageShape.test.ts` 가 이 모양을 막습니다).
 - 앱은 `dist-tray/` 를 읽습니다. 화면을 고치면 `build:tray` 를 다시 해야 합니다(핫 리로드는 없습니다).
 - `dist-tray/tray-build.json` 이 없거나 형식이 틀리거나 `tray.html` 이 없으면 빈 창 대신 오류 상자('트레이 화면 파일을 읽지 못해 종료해요')와
   `build:tray` 안내를 보이고 끝납니다(stderr 에도 `[tj] …` 한 줄).
@@ -84,7 +86,7 @@ npm --prefix desktop start   # = electron . → 트레이 아이콘 + 창(app://
 - 필수 검사는 런처가 정합니다(`lib/smokeResult.cjs` 의 `BASE_REQUIRED` · `requiredChecks`). 앱이 결과에 적은 `required` 는 참고일 뿐입니다.
 - '없었다' 를 보는 검사(`securityWarnings` · `cspViolations` · `consoleErrors`)는 그 사건의 양성 기록(페이지가 `getAppInfo` 를 왕복한 뒤
   콘솔에 찍는 장벽 표식)을 먼저 받은 뒤에만 판정합니다.
-- 한 판은 약 2초이고 그동안 창이 실제로 뜹니다(`screenshot` 이 보이는 창을 찍습니다). 시간 상한은 둘 — 앱 안 감시 타이머 60초,
+- 한 판은 약 2초(이 PC 기준)이고 그동안 창이 실제로 뜹니다(`screenshot` 이 보이는 창을 찍습니다). 시간 상한은 둘 — 앱 안 감시 타이머 60초,
   런처의 하드 타임아웃 90초(`-- --timeout=<10~90>` 으로 줄일 수 있습니다).
 - **격리** — `%TEMP%/tj-smoke-*` 아래에 이번 실행 전용 프로필이 생기고(앱의 `TMP`/`TEMP` 도 그 안), 동시 실행 잠금은 `%TEMP%/tj-smoke.lock` 입니다.
   끝나면 지우고, 못 지운 것은 다음 실행의 첫 단계가 정리합니다. 스모크는 자기 프로필이라 이미 떠 있는 트레이와 따로 돕니다. 동시 실행은 지원하지 않습니다.
@@ -167,7 +169,7 @@ npm --prefix desktop run smoke -- --net    # '--' 뒤에 쓴다
 | 렌더러 격리 | webPreferences 는 정확히 `{ preload, contextIsolation: true, sandbox: true, nodeIntegration: false }` — `lib/windowPrefs.cjs` 한 곳에서만 만든다. `app.enableSandbox()` 를 단일 인스턴스 잠금보다 먼저 부른다. `additionalArguments` 는 쓰지 않는다(비어 있지 않으면 spare renderer 를 못 써서 스모크만 다른 시작 경로를 탄다) | `webPreferences` · `sandboxEffective` |
 | 노출 면 | preload 는 `require('electron')` 만 쓰고 `window.tjDesktop = { getAppInfo }` 만 노출한다(raw `ipcRenderer` 없음). 채널은 `tj-*`. IPC 는 트레이 창의 메인 프레임에서 온 것만 받는다 | `bridge` · `ipc` |
 | CSP | 문서 meta 와 응답 헤더 두 경로에 같은 정책(헤더 판 = meta 판 + `frame-ancestors 'none'`). 전용 워커는 문서 meta 를 물려받지 않고 자기 응답 헤더를 따르므로 헤더가 필요하다. 인라인 스크립트 · 스타일이 없다(`style-src 'self'`) | `cspMeta` · `cspHeader` · `cspViolations` · `cspCanary` |
-| 요청 처리기 | 파일 색인에서만 내준다 · 호스트 정확 일치 · GET/HEAD · 없거나 거부하면 404 · 표 밖 확장자 없음 · `nosniff` | `protocol` · `mime` |
+| 요청 처리기 | 파일 색인에서만 내준다 · 호스트 정확 일치 · GET/HEAD 만(그 밖의 메서드는 405) · 없거나 거부하면 404 · 표 밖 확장자 없음 · `nosniff` | `protocol` · `mime` |
 | 탐색 · 새 창 · webview | 앱 밖은 막고 허용 목록(`khkim3115.github.io` · 이 저장소의 `github.com`)만 시스템 브라우저로 연다 | `navigation` |
 | 권한 · 다운로드 · 인증서 | 권한은 알림 · `clipboard-sanitized-write` 만(장치 권한은 거부), 다운로드는 막고, 클라이언트 인증서는 고르지 않는다 | `permissions` |
 | 보안 경고 | Electron 의 보안 경고 검사가 켜진 채 0건 | `securityWarnings` |
@@ -181,7 +183,7 @@ default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; f
 ```
 
 정책 문자열은 `scripts/trayBuild.ts` 의 `buildTrayCsp` 하나가 만들고, `tray.html` 의 meta 와 `dist-tray/tray-build.json` 에 그대로 갑니다. main 은 `tray-build.json` 을
-검증해(없거나 틀리면 fail-closed) 그 `header` 를 모든 응답에 실어 보냅니다.
+검증해(없거나 틀리면 fail-closed) 그 `header` 를 200 응답에만 실어 보냅니다 — 404 · 405 는 글 한 줄짜리 `text/plain` 이라 싣지 않습니다.
 
 ## 문제 해결
 
@@ -212,7 +214,15 @@ default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; f
 
 ### 앱 끝내기는 PID 로
 
+Git Bash 는 슬래시로 시작하는 인자를 경로로 바꿔 버립니다(`/PID` 가 `C:/Program Files/Git/PID` 처럼 됩니다). 그래서 슬래시를 겹쳐 씁니다:
+
 ```bash
+taskkill //PID <pid> //T //F
+```
+
+cmd · PowerShell 에서는 그대로 씁니다:
+
+```powershell
 taskkill /PID <pid> /T /F
 ```
 
