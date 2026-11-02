@@ -154,7 +154,9 @@ public/        icon.svg + 생성된 PWA 아이콘
 
 ## 검증
 
-PR 마다 GitHub Actions(`.github/workflows/ci.yml`)가 타입체크 · 테스트 · SQL 규칙 대조(`test:sql` 빠른 모드) · 빌드를 돌립니다.
+PR 마다 GitHub Actions(`.github/workflows/ci.yml`)가 타입체크 · 테스트 · SQL 규칙 대조(`test:sql` 빠른 모드) · 빌드 · 트레이 앱 빌드(`build:tray`) ·
+데스크톱 JS 타입체크(`typecheck:desktop`)를 돌리고, 별도 잡(`tray-smoke`, Windows)이 실제 Electron 으로 트레이 앱 스모크를 돌립니다
+([`desktop/README.md`](desktop/README.md)).
 
 - **규칙 계약**(`src/core/*.test.ts`) — 말별 이동, 잡기·손패·놓기 금지 줄, 승격(놓기는 승격 없음), 판정 순서와 겹침
   (王 잡기 > 입성 > 반복 > 둘 수 없음), 시작 국면을 포함한 3회 반복, 국면 키의 진법 계약, undo 완전 복원, 증분 해시 = 전체 재계산.
