@@ -7,48 +7,64 @@
 // - 연결점(main.js 의 MainHooks): networkGuard(기본 세션 onBeforeRequest — 원격 요청 기록 · 취소) · registerIpc(창 전 — tj-smoke-preload ·
 //   tj-smoke-csp 수신. Electron 은 듣는 쪽이 없는 send 를 버린다) · beforeLoad(창과 loadURL 사이, 동기 — 수집기) · setTray(붙은 메뉴) ·
 //   record(권한 · 탐색 결정) · open(허용 목록 주소 — 열지 않고 기록).
-// - 검사는 첫 did-finish-load 뒤에 돈다: 장벽(페이지가 getAppInfo 왕복 뒤 표식을 콘솔에 찍고, 수집기가 그 표식을 받는다) → 수동 검사 →
-//   결과 쓰기 → '종료' 클릭. 이 파일의 검사는 boot · webPreferences · sandboxEffective · bridge · ipc · mime · securityWarnings · tray ·
-//   screenshot · noNetwork · loginItem 이다. 능동 검사(cspMeta · cspHeader · protocol · ai · navigation · permissions · cspViolations ·
-//   consoleErrors · cspCanary)와 그 검사가 쓰는 수집 사실(결정 · 열기 · did-fail-provisional-load · CSP 위반)의 판정은 Task 11 이 더한다.
+// - 단계(첫 did-finish-load 뒤): 장벽(페이지가 getAppInfo 왕복 뒤 표식을 콘솔에 찍고, 수집기가 그 표식을 받는다) → 수동 검사(boot ·
+//   webPreferences · sandboxEffective · bridge · ipc · mime · securityWarnings · tray · screenshot) → 능동 검사(active.cjs — cspMeta ·
+//   cspHeader · protocol · ai · navigation · permissions · .invalid 빌드의 connectAllowed · --net 의 net) → 장벽 → cspViolations ·
+//   consoleErrors → canary 단계(cspCanary) → 마감(noNetwork · loginItem — 모든 페이지 활동 뒤) → 결과 쓰기 → '종료' 클릭.
+//   connectAllowed · net 은 이번 실행의 필수 검사(requiredChecks)가 요구할 때만 돈다.
+// - 원격 요청은 계획(remote.cjs) 하나를 따른다: 가드는 --net 의 두 요청만 통과시키고 나머지는 기록하고 취소하며, noNetwork 는 계획의 기대
+//   목록과 기록을 견준다.
 // - 실패(60초 감시 타이머 · 수집기의 render-process-gone · preload-error · unresponsive · 메인 프레임 did-fail-load · 던진 단계 · main 이
 //   단 uncaughtException · unhandledRejection)는 fail 하나로 끝난다: 원인을 stage 로 적은 실패 결과(smokeOut.failureResult + 모은 검사)를
 //   한 번 쓰고 app.exit(1). 처음 실패가 이기고(두 번째 쓰기는 없다), fail 은 던지지 않는다.
 // - electron 을 require 하지 않는다 — Electron 객체는 main 이 넘긴다(main.js 의 배선 시험 mainWiring.test.ts 가 가짜 electron 위에서 이
-//   파일까지 돌린다). 페이지 쪽 사실은 executeJavaScript(main world)로 읽는다: 그 코드는 글이라 타입 검사 밖이다 — 작게 둔다.
+//   파일까지 돌린다). 페이지 쪽 사실은 executeJavaScript(main world)와 preload 의 격리 world 로 읽는다 — 그 코드는 pageScripts.cjs 에 있다.
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { ENTRY_URL } = require('../lib/appProtocol.cjs');
-const { isNonEmptyString, isRecord, repr } = require('../lib/guards.cjs');
+const { isNonEmptyString, isRecord } = require('../lib/guards.cjs');
 const { MIN_SCREENSHOT_COLORS, countDistinctColors, evaluateNoNetwork, evaluateQuiet, evaluateWebPreferences } = require('../lib/smokeChecks.cjs');
 const { failureResult, writeResultAtomic } = require('../lib/smokeOut.cjs');
 const { requiredChecks } = require('../lib/smokeResult.cjs');
+const { createActiveChecks } = require('./active.cjs');
+const {
+  BRIDGE_SCRIPT,
+  DISABLE_WARNINGS_SCRIPT,
+  FRAMES_SCRIPT,
+  ISOLATED_WORLD_ID,
+  MAIN_WORLD_SCRIPT,
+  barrierScript,
+  bootScript,
+} = require('./pageScripts.cjs');
+const { GUARD_PROBE_URL, passesGuard, planRemote } = require('./remote.cjs');
+const {
+  PAGE_MS,
+  SMOKE_URL,
+  WAIT_MS,
+  delay,
+  errorText,
+  isStringList,
+  logError,
+  rejectionText,
+  sameList,
+  settleWithin,
+  show,
+  until,
+  verdictOf,
+  within,
+} = require('./support.cjs');
 
-/** 스모크의 진입 URL — main 이 스모크에서 여는 곳(tray.html?smoke). */
-const SMOKE_URL = `${ENTRY_URL}?smoke`;
 /** 감시 타이머 — 이 안에 검사를 마치고 종료가 will-quit 까지 가야 한다. 런처의 하드 타임아웃(기본 90초)보다 짧다. */
 const WATCHDOG_MS = 60_000;
-/** 페이지 호출(executeJavaScript) 한 번의 상한. */
-const PAGE_MS = 10_000;
-/** 사건(preload 보고 · 장벽 표식 · 창 보임 · 포커스 · 제목 줄의 버전)을 기다리는 상한. */
-const WAIT_MS = 5_000;
-/** 기다릴 때 다시 보는 간격. */
-const POLL_MS = 50;
 /** capturePage 한 번의 상한과 시도 횟수(설계: 5초 · 재시도 1회), 재시도 전 쉼. */
 const CAPTURE_MS = 5_000;
 const CAPTURE_ATTEMPTS = 2;
 const CAPTURE_RETRY_MS = 500;
-/**
- * 네트워크 가드의 양성 대조 — 메인 쪽에서 창의 세션으로 보내는 요청 하나. 가드가 기록하고 취소해야 한다. 취소는 탐침이
- * ERR_BLOCKED_BY_CLIENT 로 거부되는 것으로만 확인한다 — .invalid 는 어디에도 없어서 가드가 취소하지 않아도 DNS 에서 거부된다.
- */
-const GUARD_PROBE_URL = 'https://example.invalid/tj-net-guard-probe';
 /** 가드 탐침의 상한 — 이 안에 응답도 거부도 없으면 실패다(가드가 콜백을 부르지 않으면 요청이 멈춘다). */
 const GUARD_PROBE_MS = 5_000;
 /** 가드가 { cancel: true } 로 답한 요청의 거부에 드는 글(Chromium 의 net 오류 이름). */
 const BLOCKED_BY_CLIENT = 'ERR_BLOCKED_BY_CLIENT';
-/** 가드가 기록 · 취소하는 스킴(대소문자 무시). 그 밖(app:// · devtools: · file: · data: …)은 건드리지 않는다. */
+/** 가드가 기록하는 스킴(대소문자 무시) — 계획이 통과시키는 것 말고는 취소한다. 그 밖(app:// · devtools: · file: · data: …)은 건드리지 않는다. */
 const REMOTE_SCHEME_RE = /^(?:https?|wss?):/i;
 /** Electron 이 보안 경고 줄에 붙이는 글. */
 const SECURITY_WARNING = 'Electron Security Warning';
@@ -60,8 +76,6 @@ const TRAY_LABELS = Object.freeze(['열기', '종료']);
 const TRAY_ICON = path.join('assets', 'tray.png');
 /** 스크린샷 파일 — 결과 폴더(outDir)에 쓴다(CI 아티팩트). */
 const SCREENSHOT_FILE = 'screenshot.png';
-/** detail 에 싣는 값 표현의 글자 수 상한. */
-const MAX_REPR_CHARS = 160;
 
 /**
  * main 이 넘기는 것 — Electron 객체와, main 이 검증해 처리기에 쓰는 렌더러 값.
@@ -69,7 +83,7 @@ const MAX_REPR_CHARS = 160;
  * @property {import('../lib/smokeArgs.cjs').SmokeOn} args 스모크 인자 — outDir(결과 폴더) · nonce · net
  * @property {import('electron').App} app
  * @property {typeof import('electron').session} session 세션 모듈 — 창의 세션이 main 이 가드를 단 기본 세션인지 본다
- * @property {import('electron').Net} net 메인 쪽 요청 — Task 11 의 protocol 검사(net.fetch('app://other/…'))가 쓴다
+ * @property {import('electron').Net} net 메인 쪽 요청 — protocol 검사가 net.fetch('app://other/…') 로 다른 호스트를 본다
  * @property {typeof import('electron').nativeImage} nativeImage 트레이 아이콘 파일을 다시 읽는다
  * @property {import('../lib/trayBuildInfo.cjs').TrayBuildInfo} trayBuild 검증한 tray-build.json
  * @property {string} rendererRoot 렌더러 루트(개발 <repo>/dist-tray)
@@ -81,64 +95,19 @@ const MAX_REPR_CHARS = 160;
  * @typedef {object} SmokeRun
  * @property {(entry: DecisionRecord) => void} record 권한 · 탐색 결정 기록(main 의 hooks.record)
  * @property {(href: string) => void} open 허용 목록 주소를 열지 않고 기록한다(main 의 hooks.open)
- * @property {(details: { url: unknown }, callback: (response: { cancel?: boolean }) => void) => void} networkGuard
- *   기본 세션의 onBeforeRequest — http · https · ws · wss 는 기록하고 취소한다
+ * @property {(details: { url: unknown, method?: unknown }, callback: (response: { cancel?: boolean }) => void) => void} networkGuard
+ *   기본 세션의 onBeforeRequest — http · https · ws · wss 는 기록하고, 원격 요청 계획이 통과시키는 것(--net 의 두 요청) 말고는 취소한다
  * @property {(ipc: import('../lib/ipcGuard.cjs').GuardedIpc) => void} registerIpc preload 의 스모크 send 를 받는다(창 전)
  * @property {(win: import('electron').BrowserWindow) => void} beforeLoad 수집기를 붙인다(창과 loadURL 사이, 동기)
  * @property {(tray: import('electron').Tray, menu: import('electron').Menu) => void} setTray 붙은 트레이 메뉴를 받는다
  * @property {(stage: string, error: unknown) => void} fail 실패 결과를 한 번 쓰고 app.exit(1) — 처음 실패가 이긴다. 던지지 않는다
  */
-/**
- * 결정 기록 한 건 — 탐색 결정(navigation.cjs)이거나 권한 결정(main.js)이다(Task 11 의 탐색 · 권한 검사가 읽는다).
- * @typedef {import('../lib/navigation.cjs').NavigationRecord | import('../main.js').PermissionRecord} DecisionRecord
- */
-/**
- * console-message 한 건(details 형).
- * @typedef {object} ConsoleEntry
- * @property {string} level 'info' · 'warning' · 'error' · 'debug'
- * @property {string} message
- * @property {string} sourceId
- * @property {number} lineNumber
- */
-/**
- * 실패로 치지 않는 불러오기 실패(did-fail-provisional-load · 서브프레임 did-fail-load)의 기록.
- * @typedef {object} LoadFailure
- * @property {'did-fail-load' | 'did-fail-provisional-load'} kind
- * @property {number} errorCode
- * @property {string} errorDescription
- * @property {string} url
- * @property {boolean} isMainFrame
- */
+/** @typedef {import('./support.cjs').DecisionRecord} DecisionRecord */
+/** @typedef {import('./support.cjs').ConsoleEntry} ConsoleEntry */
+/** @typedef {import('./support.cjs').LoadFailure} LoadFailure */
+/** @typedef {import('./support.cjs').SmokeFacts} SmokeFacts */
 /** @typedef {import('../lib/smokeChecks.cjs').CheckVerdict} CheckVerdict */
 /** @typedef {import('../lib/smokeResult.cjs').SmokeCheck} SmokeCheck */
-
-/**
- * @param {unknown} value
- * @returns {string}
- */
-function show(value) {
-  return repr(value, MAX_REPR_CHARS);
-}
-
-/**
- * 오류의 글 — Error 는 message, 문자열은 그대로, 그 밖은 값 표현. 던지지 않는다.
- * @param {unknown} err
- * @returns {string}
- */
-function errorText(err) {
-  if (err instanceof Error) return err.message;
-  return typeof err === 'string' ? err : show(err);
-}
-
-/**
- * 거부의 글 — 오류의 글에, cause 가 있으면 그 글을 붙인다(fetch 는 원인을 cause 에 단다). 던지지 않는다.
- * @param {unknown} err
- * @returns {string}
- */
-function rejectionText(err) {
-  const cause = err instanceof Error && err.cause !== undefined ? ` (cause: ${errorText(err.cause)})` : '';
-  return `${errorText(err)}${cause}`;
-}
 
 /**
  * 가드의 취소로 끝난 거부인가 — Error 의 message 나 그 cause(Error 면 message, 글이면 그대로)에 ERR_BLOCKED_BY_CLIENT 가 든다.
@@ -150,126 +119,6 @@ function isBlockedByClient(err) {
   const { cause } = err;
   const causeText = cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : '';
   return err.message.includes(BLOCKED_BY_CLIENT) || causeText.includes(BLOCKED_BY_CLIENT);
-}
-
-/**
- * stderr 에 '[tj] …' 를 동기로 쓴다(main.js 의 logError 와 같은 줄 모양 — 런처가 [app:err] 로 보여 준다). 쓸 곳이 없으면 버린다.
- * @param {string} message
- */
-function logError(message) {
-  try {
-    fs.writeSync(2, `[tj] ${message}\n`);
-  } catch {
-    // 쓸 곳이 없다
-  }
-}
-
-/**
- * @param {number} ms
- * @returns {Promise<void>}
- */
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * predicate 가 참이 될 때까지 ms 까지 기다린다 — 참이 됐으면 true, 시간이 다 됐으면 false.
- * @param {() => boolean} predicate
- * @param {number} ms
- * @returns {Promise<boolean>}
- */
-async function until(predicate, ms) {
-  const deadline = Date.now() + ms;
-  while (!predicate()) {
-    if (Date.now() >= deadline) return false;
-    await delay(POLL_MS);
-  }
-  return true;
-}
-
-/**
- * work 를 ms 까지만 기다린다. 넘으면 '<what>: <ms>ms 안에 끝나지 않았다' 로 거부한다. 어느 쪽이든 타이머는 남기지 않는다.
- * @template T
- * @param {Promise<T>} work
- * @param {number} ms
- * @param {string} what
- * @returns {Promise<T>}
- */
-function within(work, ms, what) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${what}: ${ms}ms 안에 끝나지 않았다`)), ms);
-    work.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      },
-    );
-  });
-}
-
-/**
- * 약속이 끝난 모양 — 값(resolved) · 거부(rejected) · 상한 안에 끝나지 않음(timeout).
- * @template T
- * @typedef {{ kind: 'resolved', value: T } | { kind: 'rejected', error: unknown } | { kind: 'timeout' }} Settled
- */
-
-/**
- * start() 의 약속이 ms 안에 어떻게 끝났는지 본다 — within 과 달리 거부하지 않고 세 갈래로 돌려준다(start 가 동기로 던져도 거부다).
- * 어느 쪽이든 타이머는 남기지 않는다.
- * @template T
- * @param {() => Promise<T>} start
- * @param {number} ms
- * @returns {Promise<Settled<T>>}
- */
-function settleWithin(start, ms) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve({ kind: 'timeout' }), ms);
-    Promise.resolve()
-      .then(start)
-      .then(
-        (value) => {
-          clearTimeout(timer);
-          resolve({ kind: 'resolved', value });
-        },
-        (error) => {
-          clearTimeout(timer);
-          resolve({ kind: 'rejected', error });
-        },
-      );
-  });
-}
-
-/**
- * 문제 목록으로 판정한다 — 없으면 통과(passDetail), 있으면 실패(문제를 '; ' 로 이은 것).
- * @param {readonly string[]} problems
- * @param {string} passDetail
- * @returns {CheckVerdict}
- */
-function verdictOf(problems, passDetail) {
-  return problems.length === 0 ? { ok: true, detail: passDetail } : { ok: false, detail: problems.join('; ') };
-}
-
-/**
- * 문자열 목록인가.
- * @param {unknown} value
- * @returns {value is string[]}
- */
-function isStringList(value) {
-  return Array.isArray(value) && value.every((item) => typeof item === 'string');
-}
-
-/**
- * 두 목록이 같은 순서로 같은가.
- * @param {readonly unknown[]} a
- * @param {readonly unknown[]} b
- * @returns {boolean}
- */
-function sameList(a, b) {
-  return a.length === b.length && a.every((item, i) => item === b[i]);
 }
 
 /**
@@ -323,80 +172,16 @@ function securityWarningsArming({ platform, execPath, env }) {
 }
 
 /**
- * 장벽의 페이지 쪽 — 브리지로 getAppInfo 를 왕복한 뒤 표식을 콘솔에 찍고 AppInfo 를 돌려준다.
- * @param {string} marker
- * @returns {string}
- */
-function barrierScript(marker) {
-  return `window.tjDesktop.getAppInfo().then((info) => { console.info(${JSON.stringify(marker)}); return info; })`;
-}
-
-/**
- * boot 의 페이지 쪽 사실 — 제목 줄의 버전은 getAppInfo 가 풀린 뒤 React 가 그리므로, 기대한 버전이 보일 때까지 WAIT_MS 까지 기다린 뒤 읽는다.
- * @param {string | null} version getAppInfo().version
- * @returns {string}
- */
-function bootScript(version) {
-  return `(async () => {
-    const expected = ${JSON.stringify(version)};
-    const shown = () => document.querySelector('.tapp-version')?.textContent ?? null;
-    const deadline = Date.now() + ${WAIT_MS};
-    while (shown() !== expected && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, ${POLL_MS}));
-    const root = document.getElementById('root');
-    const rootStyle = getComputedStyle(document.documentElement);
-    return {
-      rootChildren: root === null ? -1 : root.childElementCount,
-      title: document.querySelector('.tapp-title')?.textContent ?? null,
-      version: shown(),
-      bodyBackground: getComputedStyle(document.body).backgroundColor,
-      bgToken: rootStyle.getPropertyValue('--bg').trim(),
-      colorScheme: rootStyle.colorScheme,
-    };
-  })()`;
-}
-
-/** main world 에서 보이면 안 되는 것 — preload 의 격리 world 전역 둘과 Node 의 require · process. */
-const MAIN_WORLD_SCRIPT = `({
-  isoProbe: typeof globalThis.__tjIsoProbe,
-  cspBuffer: typeof globalThis.__tjCspBuffer,
-  require: typeof globalThis.require,
-  process: typeof globalThis.process,
-})`;
-/** 페이지가 보안 경고를 스스로 끄지 않았는가(main world). */
-const DISABLE_WARNINGS_SCRIPT = 'Boolean(window.ELECTRON_DISABLE_SECURITY_WARNINGS)';
-/** 브리지의 키와 계약 상수(src/tray/smoke.ts 의 bridge()). */
-const BRIDGE_SCRIPT = 'window.__tjTraySmoke.bridge()';
-/** 화면이 두 프레임을 그릴 때까지(최대 1초) 기다린다 — 창을 보인 직후의 capturePage 가 빈 화면을 받지 않게. 그렸으면 true. */
-const FRAMES_SCRIPT = `new Promise((resolve) => {
-  setTimeout(() => resolve(false), 1000);
-  requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
-})`;
-
-/**
- * 스모크 실행기를 만든다 — 만들 때 감시 타이머를 켜고(will-quit 까지), 로그인 항목의 시작 값을 읽는다. 나머지는 main 이 hooks 로 부른다.
+ * 스모크 실행기를 만든다 — 만들 때 감시 타이머를 켜고(will-quit 까지), 로그인 항목의 시작 값을 읽고, 이번 실행의 필수 검사와 원격 요청
+ * 계획을 정한다. 나머지는 main 이 hooks 로 부른다.
  * @param {SmokeRunInput} input
  * @returns {SmokeRun}
  */
-function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRoot, appRoot, index }) {
+function createSmokeRun({ args, app, session, net, nativeImage, trayBuild, rendererRoot, appRoot, index }) {
   /** @type {SmokeCheck[]} */
   const checks = [];
-  // 수집한 사실 — 수집기 · IPC · 가드 · 연결점이 채우고, 검사가 읽는다.
-  const facts = {
-    /** @type {ConsoleEntry[]} */
-    console: [],
-    /** @type {unknown[]} preload 의 tj-smoke-preload 보고 */
-    preloadReports: [],
-    /** @type {unknown[]} preload 의 tj-smoke-csp 위반 이벤트 */
-    cspEvents: [],
-    /** @type {string[]} 네트워크 가드가 취소한 요청 URL */
-    requests: [],
-    /** @type {DecisionRecord[]} 권한 · 탐색 결정 */
-    decisions: [],
-    /** @type {string[]} 허용 목록 주소(열지 않았다) */
-    opened: [],
-    /** @type {LoadFailure[]} */
-    loadFailures: [],
-  };
+  /** @type {SmokeFacts} 수집한 사실 — 수집기 · IPC · 가드 · 연결점이 채우고, 검사가 읽는다 */
+  const facts = { console: [], preloadReports: [], cspEvents: [], requests: [], passed: [], decisions: [], opened: [], loadFailures: [], navigation: [] };
   // 콜백이 바꾸는 상태 — 한 객체에 둔다(지역 변수는 TS 흐름 분석이 콜백의 변경을 놓친다).
   const state = {
     /** @type {'running' | 'succeeded' | 'failed'} 성공 결과를 썼거나(succeeded) 실패 결과를 썼다(failed) */
@@ -405,7 +190,7 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
     step: '창을 기다린다',
     /** 첫 did-finish-load 를 받았다 */
     started: false,
-    /** 장벽 표식을 콘솔 수집기가 받았다 — 콘솔로 '없었다' 를 보는 검사의 양성 기록 */
+    /** 첫 장벽의 표식을 콘솔 수집기가 받았다 — securityWarnings 의 양성 기록(뒤 장벽의 표식은 그 단계의 검사가 받는다) */
     markerSeen: false,
     barriers: 0,
     /** @type {import('electron').BrowserWindow | null} */
@@ -416,6 +201,20 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
     menu: null,
   };
   const loginItemAtStart = readLoginItem();
+  // 이번 실행의 필수 검사(런처와 같은 규칙) — connectAllowed · net 은 여기 있을 때만 돈다. 원격 요청 계획은 가드 · noNetwork · 능동 검사가 같이 읽는다.
+  const required = requiredChecks({ net: args.net, supabaseOrigin: trayBuild.supabaseOrigin });
+  const plan = planRemote({ net: args.net, supabaseOrigin: trayBuild.supabaseOrigin });
+  const active = createActiveChecks({
+    facts,
+    trayBuild,
+    rendererRoot,
+    net,
+    plan,
+    contents: () => trayWindow().webContents,
+    page,
+    isolated,
+    barrier,
+  });
 
   const watchdog = setTimeout(() => fail('watchdog', `${WATCHDOG_MS / 1000}초 안에 끝나지 않았다 — 진행 중: ${state.step}`), WATCHDOG_MS);
   app.on('will-quit', () => clearTimeout(watchdog));
@@ -479,13 +278,24 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
   }
 
   /**
-   * 페이지(main world)에서 code 를 돌린 값. PAGE_MS 를 넘으면 거부한다.
+   * 페이지(main world)에서 code 를 돌린 값. 상한(기본 PAGE_MS)을 넘으면 거부한다. userGesture 면 사용자 제스처로 돌린다.
+   * @param {string} code
+   * @param {string} what
+   * @param {import('./active.cjs').PageOptions} [options]
+   * @returns {Promise<unknown>}
+   */
+  function page(code, what, { ms = PAGE_MS, userGesture = false } = {}) {
+    return within(trayWindow().webContents.executeJavaScript(code, userGesture), ms, `페이지 ${what}`);
+  }
+
+  /**
+   * preload 의 격리 world 에서 code 를 돌린 값. PAGE_MS 를 넘으면 거부한다.
    * @param {string} code
    * @param {string} what
    * @returns {Promise<unknown>}
    */
-  function page(code, what) {
-    return within(trayWindow().webContents.executeJavaScript(code), PAGE_MS, `페이지 ${what}`);
+  function isolated(code, what) {
+    return within(trayWindow().webContents.executeJavaScriptInIsolatedWorld(ISOLATED_WORLD_ID, [{ code }]), PAGE_MS, `격리 world ${what}`);
   }
 
   // ── 연결점(main 의 hooks) ──────────────────────────────────────────────
@@ -501,9 +311,10 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
   }
 
   /**
-   * 기본 세션의 onBeforeRequest — http · https · ws · wss 는 기록하고 취소한다. app:// 와 그 밖의 스킴은 그대로 두고 기록하지 않는다.
+   * 기본 세션의 onBeforeRequest — http · https · ws · wss 는 기록하고, 원격 요청 계획이 통과시키는 것(--net 의 두 요청 — passed 에도
+   * 적는다) 말고는 취소한다. app:// 와 그 밖의 스킴은 그대로 두고 기록하지 않는다. 취소를 먼저 정한다 — 기록이나 판정이 던져도 취소다.
    * 콜백은 무슨 일이 있어도 한 번 부른다(부르지 않으면 요청이 멈춘다).
-   * @param {{ url: unknown }} details
+   * @param {{ url: unknown, method?: unknown }} details
    * @param {(response: { cancel?: boolean }) => void} callback
    */
   function networkGuard(details, callback) {
@@ -513,6 +324,10 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
       if (typeof url === 'string' && REMOTE_SCHEME_RE.test(url)) {
         cancel = true;
         facts.requests.push(url);
+        if (passesGuard(plan, url, details.method)) {
+          facts.passed.push(url);
+          cancel = false;
+        }
       }
     } finally {
       callback(cancel ? { cancel: true } : {});
@@ -546,6 +361,13 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
     });
     contents.on('did-fail-provisional-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       facts.loadFailures.push({ kind: 'did-fail-provisional-load', errorCode, errorDescription, url: validatedURL, isMainFrame });
+    });
+    // 탐색의 시작 · 끝 — 막힌 탐색이 끝났다는 양성 기록(details 형 — 위치 인자는 deprecated 다)
+    contents.on('did-start-navigation', (details) => {
+      facts.navigation.push({ kind: 'did-start-navigation', url: details.url, isMainFrame: details.isMainFrame });
+    });
+    contents.on('did-stop-loading', () => {
+      facts.navigation.push({ kind: 'did-stop-loading' });
     });
     contents.on('render-process-gone', (_event, details) => {
       collectorFailure('render-process-gone', `렌더러가 사라졌다: ${details.reason} (exitCode ${details.exitCode})`);
@@ -605,13 +427,17 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
     return outcome.done;
   }
 
-  /** 첫 did-finish-load 뒤 — 장벽 → 수동 검사 → 결과 쓰기 → 트레이 메뉴 '종료'. */
+  /**
+   * 첫 did-finish-load 뒤 — 장벽 → 수동 검사 → 능동 검사 → 장벽 → cspViolations · consoleErrors → canary → 마감(noNetwork · loginItem) →
+   * 결과 쓰기 → 트레이 메뉴 '종료'. 검사 하나가 던지면 거기서 끝난다(그 검사의 실패 단계).
+   */
   async function runChecks() {
-    const barrierOutcome = await step('barrier', barrier);
-    if (!barrierOutcome.done) return;
-    const info = barrierOutcome.value;
+    const opening = await step('barrier', barrier);
+    if (!opening.done) return;
+    const { info } = opening.value;
+    state.markerSeen = opening.value.markerSeen;
     /** @type {Array<[string, () => CheckVerdict | Promise<CheckVerdict>]>} */
-    const passive = [
+    const before = [
       ['boot', () => checkBoot(info)],
       ['webPreferences', checkWebPreferences],
       ['sandboxEffective', checkSandboxEffective],
@@ -621,10 +447,31 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
       ['securityWarnings', checkSecurityWarnings],
       ['tray', checkTray],
       ['screenshot', checkScreenshot],
-      ['noNetwork', checkNoNetwork],
+      ['cspMeta', active.cspMeta],
+      ['cspHeader', active.cspHeader],
+      ['protocol', active.protocol],
+      ['ai', active.ai],
+      ['navigation', active.navigation],
+      ['permissions', active.permissions],
+    ];
+    if (required.includes('connectAllowed')) before.push(['connectAllowed', active.connectAllowed]);
+    if (required.includes('net')) before.push(['net', active.net]);
+    for (const [name, judge] of before) {
+      if (!(await check(name, judge))) return;
+    }
+    // 능동 검사 뒤 장벽 — 그 사이의 위반 · 콘솔 줄을 받은 뒤 '없었다' 를 판정한다
+    const quiet = await step('barrier:quiet', barrier);
+    if (!quiet.done) return;
+    const { markerSeen } = quiet.value;
+    /** @type {Array<[string, () => CheckVerdict | Promise<CheckVerdict>]>} */
+    const after = [
+      ['cspViolations', () => active.cspViolations(markerSeen)],
+      ['consoleErrors', () => active.consoleErrors(markerSeen)],
+      ['cspCanary', active.cspCanary], // 마지막 단계 — 그 단계의 위반만 본다
+      ['noNetwork', checkNoNetwork], // 모든 페이지 활동 뒤
       ['loginItem', checkLoginItem], // 끝 값은 결과를 쓰기 직전에 읽는다
     ];
-    for (const [name, judge] of passive) {
+    for (const [name, judge] of after) {
       if (!(await check(name, judge))) return;
     }
     const written = await step('result', writeSuccess);
@@ -641,15 +488,15 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
   /**
    * 장벽 — 페이지가 getAppInfo 를 왕복한 뒤(invoke → main 의 tj-app-info) 표식을 콘솔에 찍는다. 수집기가 그 표식을 받아야 콘솔로
    * '없었다' 를 보는 검사를 판정한다(Electron 은 불러온 뒤 자기 IPC 를 한 번 더 돌고 보안 경고를 찍는다). 받지 못하면 양성 기록 없음으로
-   * 남긴다 — 그 검사가 실패한다. 돌려주는 값은 AppInfo(boot · ipc 가 쓴다).
-   * @returns {Promise<unknown>}
+   * 돌려준다 — 그 단계의 검사가 실패한다. 표식은 장벽마다 다르다(번호). info 는 AppInfo(첫 장벽의 것을 boot · ipc 가 쓴다).
+   * @returns {Promise<import('./active.cjs').BarrierResult>}
    */
   async function barrier() {
     state.barriers += 1;
     const marker = `tj-smoke-barrier ${args.nonce} ${state.barriers}`;
     const info = await page(barrierScript(marker), '장벽(getAppInfo)');
-    state.markerSeen = await until(() => facts.console.some((entry) => entry.message === marker), WAIT_MS);
-    return info;
+    const markerSeen = await until(() => facts.console.some((entry) => entry.message === marker), WAIT_MS);
+    return { info, markerSeen };
   }
 
   /**
@@ -887,10 +734,11 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
   }
 
   /**
-   * noNetwork — 가드가 기록한 원격 요청이 기대 목록과 같다. 기대 목록에는 늘 가드 탐침이 있다: 메인 쪽에서 창의 세션으로 보낸 요청을
-   * 가드가 기록하고 취소해야 '아무것도 못 봤다' 와 '가드가 없다' 가 갈린다. 탐침은 둘 다일 때만 센다 — 가드의 기록에 있고, 거부의
-   * message(또는 cause)에 ERR_BLOCKED_BY_CLIENT 가 든다. 응답 · 다른 거부(.invalid 의 DNS 실패 같은) · 상한 안에 끝나지 않음은 실패고,
-   * detail 은 본 그대로 적는다. 창의 세션이 main 이 가드를 단 기본 세션이어야 한다(아니면 창의 요청은 가드를 지나지 않는다).
+   * noNetwork — 가드가 기록한 원격 요청이 원격 요청 계획의 기대 목록과 같다(모든 능동 검사 · canary 뒤에 본다). 기대 목록에는 늘 가드
+   * 탐침이 있고, .invalid 빌드면 connectProbe 의 두 주소, --net 이면 인증 설정 · Realtime 소켓이 더 있다. 탐침은 메인 쪽에서 창의 세션으로
+   * 보낸 요청이다 — 가드가 기록하고 취소해야 '아무것도 못 봤다' 와 '가드가 없다' 가 갈린다. 탐침은 둘 다일 때만 센다 — 가드의 기록에
+   * 있고, 거부의 message(또는 cause)에 ERR_BLOCKED_BY_CLIENT 가 든다. 응답 · 다른 거부(.invalid 의 DNS 실패 같은) · 상한 안에 끝나지
+   * 않음은 실패고, detail 은 본 그대로 적는다. 창의 세션이 main 이 가드를 단 기본 세션이어야 한다(아니면 창의 요청은 가드를 지나지 않는다).
    * @returns {Promise<CheckVerdict>}
    */
   async function checkNoNetwork() {
@@ -910,7 +758,7 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
       probe = `거부 ${show(rejectionText(outcome.error))} 로 끝났다`;
       if (!isBlockedByClient(outcome.error)) problems.push(`가드 탐침이 ${probe} — ${BLOCKED_BY_CLIENT}(가드의 취소)가 아니다`);
     }
-    const recorded = evaluateNoNetwork(facts.requests, [GUARD_PROBE_URL]);
+    const recorded = evaluateNoNetwork(facts.requests, plan.expected);
     if (!recorded.ok) problems.push(recorded.detail);
     return verdictOf(problems, `가드 탐침 ${GUARD_PROBE_URL} 를 가드가 기록했고 탐침은 ${probe}(취소) · ${recorded.detail}`);
   }
@@ -928,22 +776,23 @@ function createSmokeRun({ args, app, session, nativeImage, trayBuild, rendererRo
   }
 
   /**
-   * 성공 결과를 쓴다 — stage · error 없음(판정기는 그 둘이 있으면 실패로 본다). 메모 필드 중 aiWorker · aiAnswered · ms 는 ai 검사
-   * (Task 11) 전에는 재지 않는다: 'unused' · false · 0 은 'AI 를 부르지 않았다' 는 뜻이다. cspViolations 는 preload 가 보낸 위반 수다.
+   * 성공 결과를 쓴다 — stage · error 없음(판정기는 그 둘이 있으면 실패로 본다). 메모 필드: boot 는 boot 검사의 ok, aiWorker · aiAnswered ·
+   * ms 는 ai 검사가 받은 ai() 의 값, cspViolations 는 canary 단계 전에 preload 가 보낸 위반 수다(canary 의 두 건은 세지 않는다).
    */
   function writeSuccess() {
+    const memo = active.memo();
     /** @type {import('../lib/smokeResult.cjs').SmokeResult} */
     const result = {
       nonce: args.nonce,
-      required: requiredChecks({ net: args.net, supabaseOrigin: trayBuild.supabaseOrigin }),
+      required: [...required],
       checks: [...checks],
       versions: versions(),
       build: { supabaseOrigin: trayBuild.supabaseOrigin, workerScript: trayBuild.workerScript, builtAt: trayBuild.builtAt, commit: trayBuild.commit },
       boot: checks.some((entry) => entry.name === 'boot' && entry.ok),
-      cspViolations: facts.cspEvents.length,
-      aiWorker: 'unused',
-      aiAnswered: false,
-      ms: 0,
+      cspViolations: memo.cspViolations,
+      aiWorker: memo.aiWorker,
+      aiAnswered: memo.aiAnswered,
+      ms: memo.ms,
     };
     writeResultAtomic(args.outDir, result);
     state.phase = 'succeeded';
