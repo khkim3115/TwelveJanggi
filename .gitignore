@@ -4,6 +4,8 @@ dist-ssr
 # 트레이 앱 빌드 산출물 · 스모크 결과(desktop/smoke-out)
 dist-tray
 desktop/smoke-out
+# CI 트레이 스모크의 Electron 바이너리 캐시(작업 폴더 루트)
+.electron-cache
 *.local
 .DS_Store
 .vscode/*

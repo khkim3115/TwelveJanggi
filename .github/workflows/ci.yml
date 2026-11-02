@@ -35,3 +35,45 @@ jobs:
       - run: npm run test:sql
       # Supabase Variables 없이 빌드한다(온라인 대전이 꺼진 번들). 배포용 값 확인은 deploy.yml 몫이다.
       - run: npm run build
+      # 트레이 앱 화면 빌드(dist-tray) — 웹 전용 모듈이 들어오면 빌드가 실패한다(#20).
+      - run: npm run build:tray
+      # 데스크톱 JS 타입 검사 — Electron 42+ 는 설치 때 바이너리를 받지 않아 몇 초다. 루트 단계보다 뒤에 둔다(루트가 desktop 설치 없이 도는지 확인).
+      - run: npm --prefix desktop ci
+      - run: npm run typecheck:desktop
+
+  # 트레이 앱 스모크 — 실제 Electron 으로 app:// · CSP · AI 워커 · 보안 기본선을 확인한다(#20). 필수 검사 여부는 브랜치 보호 설정이 정한다.
+  tray-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      electron_config_cache: ${{ github.workspace }}\.electron-cache
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+      - run: npm ci
+      - run: npm --prefix desktop ci
+      # Windows 에서도 데스크톱 순수 모듈 시험(정션 · 한글/공백 루트)을 돈다.
+      - run: npx vitest run desktop/lib scripts
+      - uses: actions/cache@v6
+        with:
+          path: .electron-cache
+          key: ${{ runner.os }}-${{ runner.arch }}-electron-${{ hashFiles('desktop/package-lock.json') }}
+      - run: node desktop/node_modules/electron/install.js
+      # 가짜 .invalid 값 — 설정된 CSP 분기(https · wss)를 브라우저로 확인한다. 실제 요청은 스모크의 noNetwork 가드가 막는다.
+      - run: npm run build:tray
+        env:
+          VITE_SUPABASE_URL: https://ci.invalid
+          VITE_SUPABASE_ANON_KEY: ci-dummy-anon-key
+      - run: npm --prefix desktop run smoke
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: tray-smoke
+          path: desktop/smoke-out/
+          if-no-files-found: warn
