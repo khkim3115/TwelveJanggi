@@ -9,7 +9,8 @@
  * @typedef {object} TrayBuildInfo
  * @property {{ meta: string, header: string }} csp 문서 meta 판 · 응답 헤더 판(= meta + frame-ancestors)
  * @property {string | null} supabaseOrigin connect-src 의 Supabase 출처. 값 없는 빌드는 null
- * @property {string | null} workerScript AI 워커 스크립트 출력 경로(assets/<이름>.js). 트레이가 AI 를 아직 import 하지 않으면 null
+ * @property {string | null} workerScript AI 워커 스크립트 출력 경로(assets/<이름>.js). 워커 청크가 없는 빌드는 null — 여기서는
+ *   받지만 스모크의 cspHeader 가 실패시킨다(smoke/active.cjs). build:tray 는 경로를 적는다
  * @property {string} builtAt 빌드 시각(ISO)
  * @property {string | null} commit 빌드한 커밋(짧은 해시). git 이 없으면 null
  */

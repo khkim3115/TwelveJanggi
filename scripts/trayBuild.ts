@@ -3,7 +3,8 @@
 //   헤더)에 그대로 쓴다. 스모크가 두 전달 경로의 originalPolicy 를 이 문자열과 대조한다.
 // - 빌드 분리 가드는 양방향이다: 트레이 빌드에 웹 전용 모듈(앱 셸 · PWA)이, 웹 빌드에 트레이 모듈이 들어오면
 //   빌드가 스스로 실패한다. 판정은 문자열만 보는 순수 함수라 Windows 모양의 경로도 ubuntu CI 에서 같은 답을 낸다.
-// 최상위 부작용이 없다 — desktop/lib 시험이 plain node 에서 import 한다(Vite 는 타입만 가져온다).
+// 최상위 부작용이 없다 — 두 Vite 설정 말고도 desktop/lib 의 vitest 시험(mainWiring · smokeChecks · smokeRun · trayBuildInfo)이
+// buildTrayCsp · buildTrayBuildInfo 를 쓰려고 import 한다(Vite 는 타입만 가져온다).
 
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -93,7 +94,11 @@ export function buildTrayCsp(supabaseUrl: string | undefined): TrayCsp {
 export interface TrayBuildInfo {
   csp: { meta: string; header: string };
   supabaseOrigin: string | null;
-  /** AI 워커 스크립트의 출력 경로(assets/ai.worker-*.js). 트레이가 AI 를 아직 import 하지 않으면 null. */
+  /**
+   * AI 워커 스크립트의 출력 경로(assets/ai.worker-*.js). 워커 청크가 없는 빌드는 null — tray-build.json 검증(parseTrayBuild)은
+   * 받지만 스모크의 cspHeader 가 실패시킨다(워커 응답 헤더를 볼 수 없다). 트레이 진입이 스모크 훅(src/tray/smoke.ts → aiClient)으로
+   * AI 워커를 들이므로 build:tray 는 경로를 적는다.
+   */
   workerScript: string | null;
   builtAt: string;
   commit: string | null;
@@ -186,7 +191,8 @@ function shownId(id: string, root: string): string {
   return toRepoPath(id, root) ?? cleanId(id);
 }
 
-// 두 가드는 load 훅에서 본다. resolveId 는 Vite 리졸버가 먼저 답해 아무것도 못 본다. enforce 'pre' 로 Vite 핵심
+// 두 가드는 load 훅에서 본다 — load 는 리졸브가 끝난 최종 id(쿼리 포함)를 받아, import 를 어떻게 적었든(별칭 · 상대 경로 ·
+// ?worker · ?url) 실제 파일로 판정한다('pre' 의 resolveId 도 불리지만 아직 풀지 않은 지정자를 받는다). enforce 'pre' 로 Vite 핵심
 // 로더보다 먼저 돈다 — vite:worker 는 ?worker 를(빌드에서 ''), asset 은 ?url · ?raw 를 먼저 답해 load 'first' 사슬을
 // 끝내므로, 'pre' 가 아니면 그런 import 는 가드에 오지 않는다. 검사 뒤에는 null 을 돌려 로딩을 Vite 에 맡긴다.
 // 가져온 파일은 Rollup 이 오류 앞에 '(imported by …)' 로 적어 준다.

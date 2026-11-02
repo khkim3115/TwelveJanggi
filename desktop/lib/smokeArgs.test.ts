@@ -1,6 +1,6 @@
 // desktop/lib/smokeArgs.cjs 시험 — 스모크 인자(설계 §5.5 · §5.10). 런처가 formatSmokeArgs 로 만든 인자를 main 이 parseSmokeArgs 로 읽는다.
 // 경로(out · profile)는 절대 경로만 받는다. path.win32 · path.posix 를 넣어 두 플랫폼 규칙을 함께 보고, 한글 · 공백 경로로
-// 왕복한다(사용자 폴더 'C:\Users\홍 길동\' 대비 — Review Focus 1). electron 은 import 하지 않는다.
+// 왕복한다(사용자 폴더가 'C:\Users\홍 길동\' 처럼 한글 · 공백이어도 깨지지 않게). electron 은 import 하지 않는다.
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, posix, win32 } from 'node:path';

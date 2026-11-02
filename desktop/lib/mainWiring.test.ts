@@ -344,7 +344,7 @@ function readResult(): Record<string, unknown> {
   expect(readdirSync(tree.outDir)).toStrictEqual([RESULT_FILE]);
   return JSON.parse(readFileSync(join(tree.outDir, RESULT_FILE), 'utf8')) as Record<string, unknown>;
 }
-/** 결과의 versions(계획 Task 8 SmokeResult.versions) — 결과 파일마다 이 모양이다. IPC 의 AppInfo 와는 다른 계약이다. */
+/** 결과의 versions(smokeOut.cjs 의 SmokeVersions) — 결과 파일마다 이 모양이다. IPC 의 AppInfo 와는 다른 계약이다. */
 const expectedVersions = () => ({ electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node, app: APP_VERSION });
 
 beforeEach(() => {

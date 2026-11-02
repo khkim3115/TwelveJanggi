@@ -1,7 +1,7 @@
 // desktop/lib/smokeLaunch.cjs 시험 — 스모크 런처의 순수 판단(설계 §5.10 '런처'): 인자 · 앱의 env · 잠금 주인이 살아 있는가 · 고정한 electron.
 // 런처(desktop/scripts/smoke.cjs)를 돌리지 않고 함수를 바로 부른다. 앱을 띄우고 끄는 일(시간 제한 · 트리 종료)은 런처에 있다.
-// - 인자 · env 사례는 Task 9 의 스크래치 CLI 시험(런처를 가짜 앱으로 32번 돌린 것)에서 옮겼고, 개정 판결(npm 이 가져간 인자 ·
-//   NODE_OPTIONS · ELECTRON_FORCE_IS_PACKAGED · TMPDIR · 내 PID · 내려받지 않는 electron 확인)의 사례를 더했다.
+// - 인자 · env 사례는 런처를 가짜 앱으로 돌려 본 CLI 사례에서 옮겼고, npm 이 가져간 인자 · NODE_OPTIONS · ELECTRON_FORCE_IS_PACKAGED ·
+//   TMPDIR · 내 PID · 내려받지 않는 electron 확인의 사례를 더했다.
 // - env 는 Windows 의 펼친 process.env 처럼 이름의 글자꼴만 다른 것(Temp · tmp …)을 넣어 대소문자를 가리지 않는지 본다.
 // - 고정한 electron 은 mkdtemp(한글 · 공백 이름) 안에 가짜 패키지(package.json · path.txt · dist/<실행 파일>)를 깔고 본다.
 //   require.resolve 는 가짜를 넣는다 — 진짜 electron 은 import · require · resolve 하지 않는다(루트 검사는 desktop/node_modules 없이 돈다).
@@ -16,7 +16,7 @@ const { USAGE, checkElectron, childEnv, isAlive, parseArgs } = require('./smokeL
 
 /** npm 이 가져간 인자가 없는 env — npm 이 스크립트에 늘 넣는 값(npm_lifecycle_event 등)은 있다. */
 const CLEAN_ENV = { Path: 'C:\\Windows\\system32', npm_lifecycle_event: 'smoke', npm_config_user_agent: 'npm/10.9.2 node/v22.13.0 win32 x64' };
-/** npm 이 인자를 가져갔을 때의 안내(판결 F3) — 사용법 줄과 함께 찍힌다. */
+/** npm 이 인자를 가져갔을 때의 안내 — 사용법 줄과 함께 찍힌다. */
 const NPM_HINT = 'npm 인자는 -- 뒤에 쓴다: npm --prefix desktop run smoke -- --net';
 const CI_HINT = 'npm --prefix desktop ci';
 const INSTALL_HINT = 'node desktop/node_modules/electron/install.js';

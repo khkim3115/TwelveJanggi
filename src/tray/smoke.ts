@@ -173,13 +173,15 @@ async function runNet(deps: SmokeDeps): Promise<SmokeNetResult> {
       JOIN_WAIT_MS,
     );
     result.joinStatus = joined === TIMED_OUT ? null : joined;
-    // 지우기 전에 본다 — 마지막 채널을 지우면 소켓도 닫힌다.
+    // 정리 전에 본다 — 아래의 disconnect() 가 소켓을 닫는다.
     result.realtimeConnected = supabase.realtime.isConnected();
   } catch (err) {
     errors.push(`realtime: ${errorText(err)}`);
   }
 
   // 정리 — 단계마다 따로 시도한다. 채널 제거가 실패해도 소켓은 끊는다.
+  // 소켓을 닫는 것은 disconnect() 다 — realtime-js 2.118 은 마지막 채널을 지워도 바로 끊지 않고 미룬다(기본 50초 =
+  // 하트비트 간격 25초 × 2, lib/supabase 는 realtime 설정을 주지 않는다). removeChannel 과 겹치는 호출이 아니니 지우지 않는다.
   if (supabase) {
     if (channel) {
       try {

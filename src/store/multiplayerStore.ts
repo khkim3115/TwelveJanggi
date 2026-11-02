@@ -10,7 +10,8 @@
 //    구독이 끊겨 있는 동안에는 몇 초마다 다시 읽는다.
 //  · Realtime DELETE 에는 필터가 걸리지 않아 다른 방이 정리될 때도 온다 — payload.old.id 가 내 방일 때만 처리한다.
 //
-// Supabase 클라이언트(수백 kB)는 첫 화면 번들에 넣지 않는다 — 서버를 실제로 쓰는 순간 lib/supabase 를 동적 import 한다.
+// Supabase 클라이언트(수백 kB)는 첫 화면 번들에 넣지 않는다 — 서버를 실제로 쓰는 순간 lib/loadSupabase 의 loadSupabase() 가
+// lib/supabase 를 동적 import 한다(그 약속 하나를 트레이 스모크와 나눠 쓴다 — 이 스토어는 lib/supabase 를 직접 import() 하지 않는다).
 
 import { create } from 'zustand';
 import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';

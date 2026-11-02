@@ -1,6 +1,6 @@
 'use strict';
 // 스모크 런처의 순수 판단(설계 §5.10 '런처') — 런처(desktop/scripts/smoke.cjs)가 부르는 인자 · 앱의 env · 잠금 주인 생존 · 고정한
-// electron 확인. 값과 파일만 보고 정한다: 앱을 띄우고 끄는 일(시간 제한 · 트리 종료 · 신호)은 런처에 있다(Task 12 가 실제 바이너리로 본다).
+// electron 확인. 값과 파일만 보고 정한다: 앱을 띄우고 끄는 일(시간 제한 · 트리 종료 · 신호)은 런처에 있고 여기서 시험하지 않는다.
 // electron 을 require 하지 않는다 — 고정한 electron 확인도 패키지의 파일과 부르는 쪽이 넘긴 resolve 만 본다.
 // env 이름은 대소문자를 가리지 않고 본다. Windows 의 env 는 이름의 대소문자를 가리지 않지만 펼친 복사본(Object.entries)은 원래 글자를
 // 지닌다 — 'Temp' 가 새로 넣은 'TEMP' 와 따로 남거나, 'NPM_CONFIG_NET' 으로 적힌 것을 'npm_config_net' 으로 찾다 놓치지 않게.

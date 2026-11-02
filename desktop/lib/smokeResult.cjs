@@ -5,7 +5,8 @@
 //   둘 다 비어 같아 보임)는 통과가 아니다 — truthiness 로 읽지 않는다.
 // - 필수 검사는 런처가 정한다(requiredChecks). result.required 는 앱이 적은 참고라 판정에 쓰지 않는다 — 앱이 요구를 줄일 수 없다.
 // - 적용되는 이유는 모두 낸다(첫 하나에서 멈추지 않는다). 던지지 않는다: 어떤 입력이 와도 { ok, reasons } 를 돌려준다.
-//   앱이 실패 단계에서 쓴 결과(smokeOut.failureResult — stage · error, checks 빈 목록)도 이유로 풀어 낸다.
+//   앱이 실패를 보고한 결과(smokeOut.failureResult — stage · error. checks 는 main 의 실패 단계면 빈 목록, 실행기의 fail 이면
+//   그때까지 돈 검사)도 이유로 풀어 낸다.
 // electron 을 require 하지 않는다.
 
 // 값 가드(객체 · 비어 있지 않은 문자열 · 값 표현)는 검사 평가기(smokeChecks)와 같은 것을 쓴다 — 복사본이 어긋나지 않게 guards.cjs 한 곳에 둔다.
@@ -29,8 +30,9 @@ const { isNonEmptyString, isRecord } = guards;
  * @property {string | null} commit 빌드한 커밋. git 이 없으면 null
  */
 /**
- * 앱 안 실행기가 쓰는 결과 파일(desktop/smoke-out/result.json)의 성공 모양. 실패 단계의 결과(smokeOut.failureResult)는
- * { nonce, stage, error, checks: [], versions } 만 가진 부분집합이다 — judgeSmoke 는 두 모양 모두 받는다.
+ * 앱 안 실행기가 쓰는 결과 파일(desktop/smoke-out/result.json)의 성공 모양. 실패 결과(smokeOut.failureResult)는
+ * { nonce, stage, error, checks, versions } 만 가진 부분집합이다 — checks 는 main 의 실패 단계(lock · tray-build)면 빈 목록,
+ * 실행기의 fail(watchdog · check:<이름> · barrier 등)이면 그때까지 돈 검사다. judgeSmoke 는 두 모양 모두 받는다.
  * stage · error 는 앱이 실패를 보고할 때만 쓴다: 있으면(null 이 아니면) 나머지가 정상이어도 통과하지 못한다.
  * @typedef {object} SmokeResult
  * @property {string} nonce 런처가 준 이번 실행의 표식 — 지난 실행의 결과와 섞이지 않게 한다

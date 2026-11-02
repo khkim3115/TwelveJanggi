@@ -16,7 +16,10 @@ const INFO = buildTrayBuildInfo(
   '2026-10-26T00:00:00.000Z',
   null,
 );
-/** 지금 npm run build:tray 가 쓰는 모양 — Supabase 값 없음 · 트레이가 아직 AI 를 import 하지 않음(workerScript null). */
+/**
+ * Supabase 값도 AI 워커도 없는 빌드(supabaseOrigin · workerScript null) — 모양으로는 받는다. 지금 build:tray 는 AI 워커 경로를
+ * 적고, workerScript null 은 스모크의 cspHeader 가 실패시킨다(smoke/active.cjs).
+ */
 const PLAIN = buildTrayBuildInfo(buildTrayCsp(undefined), null, '2026-10-27T02:35:34.894Z', '1832f3d');
 const META = INFO.csp.meta;
 

@@ -3,7 +3,8 @@
 // 규칙은 하나다: app://twelvejanggi 밖으로 가는 탐색은 막고, 허용 목록(links.cjs) 주소만 시스템 브라우저로 연다.
 // - will-frame-navigate 가 먼저 막으면 will-navigate 는 오지 않아 한 번만 열린다. 새 창(setWindowOpenHandler)은 늘 deny 이고,
 //   허용 목록 주소는 setImmediate 뒤에 연다. will-attach-webview 는 늘 막는다.
-// - open 은 주입받는다. 실제는 shell.openExternal(href).catch(), 스모크는 기록기다. record 는 선택이고 결정마다 한 번 불린다.
+// - open 은 주입받는다. 실제는 shell.openExternal(href) 이고 그 거부는 main 이 받아 '[tj] openExternal: …' 한 줄로 남긴다
+//   (main.js 의 guardWebContents). 스모크는 기록기다. record 는 선택이고 결정마다 한 번 불린다.
 // - fail-closed 순서: 막는 결정(preventDefault · deny)을 먼저 내고 그 뒤에 record · open 을 부른다. 콜백이 던져도 차단은 이미
 //   걸려 있고, 던진 오류는 다음 tick 에 다시 던져 묻히지 않게 한다. 던진 setWindowOpenHandler 가 deny 로 이어진다는 보장이 없어서
 //   windowOpen 은 콜백이 던져도 · 이상한 details 가 와도 던지지 않고 deny 를 돌려준다.

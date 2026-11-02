@@ -397,7 +397,7 @@ function appInfo() {
 }
 
 /**
- * 스모크 결과의 versions — 결과 파일마다 이 모양이다(smokeOut.cjs 의 SmokeVersions = 계획 Task 8 의 SmokeResult.versions).
+ * 스모크 결과의 versions — 결과 파일마다 이 모양이다(smokeOut.cjs 의 SmokeVersions).
  * @returns {import('./lib/smokeOut.cjs').SmokeVersions}
  */
 function smokeVersions() {

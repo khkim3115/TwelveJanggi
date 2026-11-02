@@ -13,7 +13,7 @@ const path = require('node:path');
 const RESULT_FILE = 'result.json';
 
 /**
- * 스모크 결과의 versions — 결과 파일마다 이 모양이다(계획 Task 8 의 SmokeResult.versions). 실패 단계의 결과도 같다.
+ * 스모크 결과의 versions — 결과 파일마다 이 모양이다(smokeResult.cjs 의 SmokeResult.versions 가 이 타입이다). 실패 단계의 결과도 같다.
  * IPC tj-app-info 의 응답(AppInfo { version, electron, chrome, platform })과는 다른 계약이다.
  * @typedef {object} SmokeVersions
  * @property {string} electron process.versions.electron
@@ -22,12 +22,16 @@ const RESULT_FILE = 'result.json';
  * @property {string} app 앱 버전(app.getVersion())
  */
 /**
- * 실패 단계의 결과 — 검사는 하나도 돌지 않았다(checks 는 빈 목록). 런처의 판정은 exit 1 과 필수 검사 없음으로 실패한다.
+ * 실패 결과 — 앱이 실패를 보고한다(stage · error). failureResult 는 checks 를 빈 목록으로 만든다: main 의 실패 단계(lock ·
+ * tray-build)는 검사 전이라 그대로 쓰고, 스모크 실행기(smoke/run.cjs 의 fail)는 그때까지 돈 검사로 checks 를 바꿔 쓴다.
+ * 런처의 판정은 stage · error 로 실패하고, exit 1 · 빠진 필수 검사도 이유로 낸다.
  * @typedef {object} FailureResult
  * @property {string} nonce 런처가 준 이번 실행의 표식
- * @property {string} stage 실패한 단계('lock' · 'tray-build')
+ * @property {string} stage 실패한 단계 — main 은 'lock' · 'tray-build', 실행기는 그 단계의 이름이다(예: 'watchdog' · 수집기 사건
+ *   'did-fail-load' · 'render-process-gone' · 'preload-error' · 'unresponsive' · 'barrier' · 'check:<이름>' · 'barrier:quiet' ·
+ *   'result' · 'quit' · main 이 넘긴 'uncaughtException' · 'unhandledRejection')
  * @property {string} error 이유 한 줄
- * @property {unknown[]} checks 빈 목록
+ * @property {unknown[]} checks main 의 실패 단계는 빈 목록, 실행기는 그때까지 돈 검사
  * @property {SmokeVersions} versions 버전
  */
 

@@ -2,7 +2,9 @@
 // registerIpc → beforeLoad → setTray)로 꽂고 첫 did-finish-load 부터 장벽 → 수동 검사 → 능동 검사 → 장벽 → cspViolations · consoleErrors →
 // canary → noNetwork · loginItem → 결과 → 붙은 메뉴 '종료' 까지 실제로 돌린다.
 // 앱은 띄우지 않고 electron 은 import · require 하지 않는다(실행기도 하지 않는다 — Electron 객체는 main 이 넘긴다). 실제 바이너리의 판정은
-// 스모크가 보고, 여기서는 가짜가 내놓는 사실이 바뀔 때 검사가 판정을 바꾸는지 본다 — 검사마다 음성 사례가 하나 이상 있다.
+// 스모크가 보고, 여기서는 가짜가 내놓는 사실이 바뀔 때 검사가 판정을 바꾸는지 본다. 음성 사례는 아직 일부 검사에만 있다 — boot ·
+// webPreferences · sandboxEffective · bridge · ipc · mime · tray · screenshot · loginItem 은 여기서 양성 갈래만 탄다(webPreferences ·
+// screenshot 의 판정 함수 evaluateWebPreferences · countDistinctColors 는 smokeChecks.test.ts 가 음성까지 본다).
 // - 가짜 페이지는 실행기가 보내는 코드의 태그 주석(smoke/pageScripts.cjs)으로 처리기를 고른다. 기본 처리기는 실제 앱이 낼 사실을 낸다:
 //   - 탐색 · 새 창은 main 처럼 lib/navigation.cjs 의 가드를 실행기의 record · open 에 이어 부른다. 탐색은 Electron 44.9.3 의 실제 순서
 //     (did-start-navigation → 가드 → did-stop-loading — 막힌 탐색에 did-fail-provisional-load 는 없다)로 사건을 낸다.
@@ -62,7 +64,7 @@ const SMOKE_URL = 'app://twelvejanggi/tray.html?smoke';
 /** check 처리기가 받는 requestingOrigin — 끝 슬래시가 붙은 출처. */
 const APP_ORIGIN_SLASH = 'app://twelvejanggi/';
 const RENDERER_PID = 4242;
-/** 가드 탐침(판결 1)과 그 상한 — 실행기가 메인 쪽에서 창의 세션으로 보내는 요청. */
+/** 가드 탐침(가드가 살아 있는지 보는 양성 대조)과 그 상한 — 실행기가 메인 쪽에서 창의 세션으로 보내는 요청. */
 const PROBE_URL = 'https://example.invalid/tj-net-guard-probe';
 const PROBE_CAP_MS = 5_000;
 /** 실행기가 다시 보는 간격 — 가짜 시계를 이만큼씩 민다. */
@@ -654,7 +656,7 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
   });
 });
 
-describe('noNetwork — 가드 탐침은 가드의 기록 + ERR_BLOCKED_BY_CLIENT 거부일 때만 센다(F1)', () => {
+describe('noNetwork — 가드 탐침은 가드의 기록 + ERR_BLOCKED_BY_CLIENT 거부일 때만 센다', () => {
   it('가드가 기록하고 취소한다 → ok, detail 은 본 거부를 싣는다', async () => {
     const outcome = await runScenario();
     expect(outcome.fetches).toStrictEqual([PROBE_URL]);
@@ -773,7 +775,7 @@ describe('networkGuard — --net 일 때만 Supabase 두 요청(출처 + 경로)
   });
 });
 
-describe('securityWarnings — 경고 검사가 켜졌다는 근거가 있어야 0건이 뜻이 있다(F2)', () => {
+describe('securityWarnings — 경고 검사가 켜졌다는 근거가 있어야 0건이 뜻이 있다', () => {
   it('execPath 가 개발 바이너리 → ok, detail 은 그 근거와 main 의 값으로 추론했다는 말을 싣는다', async () => {
     const check = checkOf(await runScenario({ arming: { execPath: DEV_BINARY } }), 'securityWarnings');
     expect(check.ok, check.detail).toBe(true);
