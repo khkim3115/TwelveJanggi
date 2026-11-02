@@ -3,7 +3,8 @@
 // 사실을 모으는 일(Electron 호출)은 실행기가 하고 여기는 값만 본다 — 그래서 electron 없이 시험된다. electron 을 require 하지 않는다.
 // 읽기는 엄격하다(반목표 1 '아무것도 증명하지 못한 채 통과' 를 막는다):
 // - 기대한 값과 정확히 같을 때만 ok 다. 거짓처럼 보이는 값('true' · 1 · undefined)은 true/false 가 아니다.
-// - 입력이 비었거나 모양이 틀리면 ok:false 다. 증거가 없다는 사실이 '통과' 가 되지 않는다.
+// - 입력이 비었거나 모양이 틀리면 ok:false 다. 증거가 없다는 사실이 '통과' 가 되지 않는다 — '없었다' 를 보는 판정도 양성 기록을
+//   함께 요구한다: evaluateQuiet 는 장벽 표식을, evaluateNoNetwork 는 비어 있지 않은 기대 목록(가드 탐침)이 모두 기록됐기를.
 // - detail 은 실패한 이유만 풀어 쓴다. 긴 목록은 앞 몇 건만 싣는다(요약 파일이 커지지 않게).
 
 // 값 가드(객체 · 비어 있지 않은 문자열 · 값 표현)는 판정기(smokeResult)와 같은 것을 쓴다 — 복사본이 어긋나지 않게 guards.cjs 한 곳에 둔다.
@@ -103,12 +104,15 @@ function list(items) {
  * CSP 정책 문자열의 공백을 정리한다 — 연속 공백(줄바꿈 · 탭 포함)은 하나로, 앞뒤 공백은 없애고, 세미콜론 둘레는 '; ' 로 맞춘다.
  * securitypolicyviolation 의 originalPolicy 는 전달된 글(meta 속성 · 응답 헤더 값)이라 tray-build.json 의 글과 공백만 다를 수
  * 있다. 공백만 다룬다 — 글자 · 대소문자 · 지시문 순서는 그대로다. 문자열이 아니면 빈 문자열.
+ * 공백은 CSP 가 가르는 ASCII 공백(TAB · LF · FF · CR · SPACE)뿐이다. JS 의 \s 와 trim() 은 NBSP · U+3000 · BOM · U+2028 · VT 도
+ * 공백으로 보지만, 브라우저는 그런 글자가 든 지시문을 다르게 읽으므로(ASCII 가 아닌 지시문은 버린다) 접으면 다른 정책이 같아 보인다.
  * @param {string} s
  * @returns {string}
  */
 function normalizePolicy(s) {
   if (typeof s !== 'string') return '';
-  return s.replace(/\s+/g, ' ').replace(/ ?; ?/g, '; ').trim();
+  // 앞뒤도 ASCII 공백만 뗀다 — 접은 뒤에는 SPACE 만 남는다
+  return s.replace(/[\t\n\f\r ]+/g, ' ').replace(/ ?; ?/g, '; ').replace(/^ +| +$/g, '');
 }
 
 // ── 검사 평가 ─────────────────────────────────────────────────────────────
@@ -264,16 +268,19 @@ function endpointKey(value) {
 
 /**
  * `noNetwork` — 네트워크 가드가 기록한 요청이 기대 목록과 같은가. 기록한 키의 집합과 기대한 키의 집합이 같아야 통과다
- * (키 = 프로토콜 + 호스트 + 경로). 기본 기대 목록은 비어 있어 기록 0건이 통과이고, 한 건이라도 있으면 실패다. 기대한 요청이
- * 빠져도 실패다 — 가드가 기대한 요청을 못 봤다면 아무것도 증명하지 못한 것이다(부분집합이면 통과인 읽기가 아니다).
- * records 가 배열이 아니거나 URL 문자열이 아닌 기록이 있으면 실패다. 같은 요청이 여러 번 기록돼도 한 번으로 센다.
+ * (키 = 프로토콜 + 호스트 + 경로). 기대 목록은 비어 있지 않아야 한다 — 기록 0건은 '아무 일도 없었다' 일 뿐 가드가 일했다는
+ * 근거가 아니어서, 목록에는 늘 양성 대조(실행기의 가드 탐침)가 든다. 비었거나 없으면 실패다. 기대 밖 요청이 한 건이라도 있으면
+ * 실패이고, 기대한 요청이 빠져도 실패다 — 가드가 기대한 요청을 못 봤다면 아무것도 증명하지 못한 것이다(부분집합이면 통과인
+ * 읽기가 아니다). records 가 배열이 아니거나 URL 문자열이 아닌 기록이 있으면 실패다. 같은 요청이 여러 번 기록돼도 한 번으로 센다.
  * @param {unknown} records 가드가 기록한 요청 URL 들
- * @param {unknown} [expectedUrls] 기록돼야 하는 요청 URL 들(예: .invalid 빌드의 connectProbe 두 주소). 기본 빈 목록
+ * @param {unknown} expectedUrls 기록돼야 하는 요청 URL 들 — 비어 있지 않은 배열(가드 탐침, .invalid 빌드면 connectProbe 두 주소,
+ *   --net 이면 두 요청을 더한다). connectAllowed 는 connectProbe 두 주소만 준다
  * @returns {CheckVerdict}
  */
-function evaluateNoNetwork(records, expectedUrls = []) {
+function evaluateNoNetwork(records, expectedUrls) {
   if (!Array.isArray(records)) return fail(`records 가 배열이 아니다: ${repr(records)}`);
   if (!Array.isArray(expectedUrls)) return fail(`기대 목록이 배열이 아니다: ${repr(expectedUrls)}`);
+  if (expectedUrls.length === 0) return fail('기대 목록이 비었다 — 양성 대조(가드 탐침) 없이 0건은 증명이 아니다');
   const badRecords = records.filter((record) => endpointKey(record) === null);
   if (badRecords.length > 0) return fail(`URL 이 아닌 기록이 ${badRecords.length}건 있다: ${list(badRecords)}`);
   const badExpected = expectedUrls.filter((url) => endpointKey(url) === null);
@@ -283,9 +290,7 @@ function evaluateNoNetwork(records, expectedUrls = []) {
   const expected = new Set(expectedUrls.map((url) => /** @type {string} */ (endpointKey(url))));
   const unexpected = [...seen].filter((key) => !expected.has(key));
   const missing = [...expected].filter((key) => !seen.has(key));
-  if (unexpected.length === 0 && missing.length === 0) {
-    return pass(expected.size === 0 ? '네트워크 요청 0건' : `기대한 요청 ${expected.size}종만 기록됐다(${records.length}건)`);
-  }
+  if (unexpected.length === 0 && missing.length === 0) return pass(`기대한 요청 ${expected.size}종만 기록됐다(${records.length}건)`);
   const problems = [];
   if (unexpected.length > 0) problems.push(`기대 밖 요청 ${unexpected.length}종: ${list(unexpected)}`);
   if (missing.length > 0) problems.push(`기대했지만 기록되지 않은 요청 ${missing.length}종: ${list(missing)}`);

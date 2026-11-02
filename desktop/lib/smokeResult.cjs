@@ -91,12 +91,13 @@ function present(value) {
 }
 
 /**
- * 출처 값의 종류 — 문자열이거나 null(값 없는 빌드). undefined 는 아니다.
+ * 출처 값의 종류 — 비어 있지 않은 문자열이거나 null(값 없는 빌드). undefined 도 빈 문자열도 아니다 — 빈 값끼리 같아 보이는 것은
+ * 통과가 아니다(머리말).
  * @param {unknown} value
  * @returns {value is string | null}
  */
 function isOriginValue(value) {
-  return value === null || typeof value === 'string';
+  return value === null || isNonEmptyString(value);
 }
 
 /**
@@ -243,7 +244,8 @@ function judgeResult(result, given, reasons) {
   if (malformed.length > 0) reasons.push(`검사 항목의 모양이 틀렸다(이름이 있는 객체가 아니다): #${malformed.join(', #')}`);
   const missing = required.filter((name) => !named.has(name));
   if (missing.length > 0) reasons.push(`필수 검사 누락 ${missing.length}개: ${missing.join(', ')}`);
-  reasons.push(...failed);
+  // 하나씩 넣는다 — push(...failed) 는 실패가 십몇만 건이면 인자 수가 호출 스택을 넘어 RangeError 로 던진다(던지지 않는다는 약속).
+  for (const reason of failed) reasons.push(reason);
 }
 
 /**

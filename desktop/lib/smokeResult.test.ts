@@ -384,6 +384,8 @@ describe('judgeSmoke — 실패 이유 하나씩', () => {
     ['런처는 출처가 있고, 결과는 null', 'https://abc.supabase.co', null],
     ['다른 출처', 'https://abc.supabase.co', 'https://xyz.supabase.co'],
     ['런처는 null, 결과는 빈 문자열', null, ''],
+    // 빈 값끼리의 일치는 통과가 아니다 — 손으로 고친 tray-build.json 의 '' 를 parseTrayBuild 는 받는다(build:tray 는 null 을 쓴다)
+    ['둘 다 빈 문자열', '', ''],
     ['결과에 키가 없다(런처 null)', null, undefined],
     ['런처가 undefined 를 줌(결과 null)', undefined, null],
     ['둘 다 undefined', undefined, undefined],
@@ -733,6 +735,11 @@ describe('judgeSmoke — 어떤 입력에도 던지지 않는다', () => {
     ['값이 모두 null', { nonce: null, checks: null, versions: null, build: null }],
     ['빈 객체', {}],
     ['빈 배열', []],
+    // 이유를 펼쳐 넣으면(push(...목록)) 인자 수가 호출 스택을 넘는 크기(Node 22 에서 약 13만 건부터 RangeError)
+    [
+      '실패한 검사 200,000건',
+      goodResult({ checks: Array.from({ length: 200_000 }, (_, i) => ({ name: `x${i}`, ok: false, detail: '실패' })) }),
+    ],
   ];
 
   it.each(JUNK)('result: %s', (_name, result) => {

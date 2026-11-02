@@ -245,6 +245,9 @@ describe('resolveAppRequest — 404', () => {
     'app://other/tray.html',
     'app://TwelveJanggi/tray.html',
     'app://twelvejanggi.evil/tray.html',
+    // 출처 글자로 시작하지만 호스트가 다르다 — 접두만 보면 나머지가 색인에 있는 경로(assets/a.js · tray.html)가 된다
+    'app://twelvejanggi.assets/a.js',
+    'app://twelvejanggiXtray.html',
     'app://twelvejanggi:80/tray.html',
     'app://user@twelvejanggi/tray.html',
     'app://twelvejanggi@other/tray.html',

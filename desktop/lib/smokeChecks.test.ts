@@ -37,12 +37,24 @@ describe('normalizePolicy', () => {
       META.replace(/; /g, ';'),
       `\r\n${META.replace(/; /g, ' ;\r\n  ')}\r\n`,
       `${META} `,
+      `\f${META.replace(/; /g, ';\f')}\f`,
     ];
     for (const variant of variants) {
       expect(normalizePolicy(variant)).toBe(META);
       expect(normalizePolicy(normalizePolicy(variant))).toBe(normalizePolicy(variant)); // 거듭 해도 같다
     }
     expect(normalizePolicy(HEADER.replace(/; /g, ';\n'))).toBe(HEADER);
+  });
+
+  it.each([
+    ['NBSP(U+00A0)', '\u00a0'],
+    ['전각 공백(U+3000)', '\u3000'],
+    ['BOM(U+FEFF)', '\ufeff'],
+    ['줄 구분자(U+2028)', '\u2028'],
+    ['VT(U+000B)', '\u000b'],
+  ])('ASCII 밖 공백 %s 은 접지 않는다 — CSP 는 TAB · LF · FF · CR · SPACE 로만 가르므로 다른 정책이다', (_name, ch) => {
+    // JS 의 \s 와 String.prototype.trim() 은 이 글자들도 공백으로 본다 — 가운데 · 앞 · 뒤 어디에 있어도 ASCII 판과 달라야 한다
+    for (const variant of [META.replace(' ', ch), `${ch}${META}`, `${META}${ch}`]) expect(normalizePolicy(variant)).not.toBe(META);
   });
 
   it('공백만 다룬다 — 글자 · 대소문자 · 지시문 순서는 그대로다', () => {
@@ -429,16 +441,27 @@ describe('evaluateCanary', () => {
 describe('evaluateNoNetwork', () => {
   const PROBE_HTTP = 'https://ci.invalid/tj-connect-probe';
   const PROBE_WSS = 'wss://ci.invalid/tj-connect-probe';
+  /** 실행기의 가드 탐침(smoke/remote.cjs 의 GUARD_PROBE_URL) — 기본 스모크의 기대 목록은 이것 하나다. */
+  const GUARD_PROBE = 'https://example.invalid/tj-net-guard-probe';
 
-  it('기본 기대 목록은 비어 있다 — 기록 0건이 통과다', () => {
-    const verdict = evaluateNoNetwork([]);
-    expect(verdict.ok).toBe(true);
-    expect(verdict.detail).toContain('0');
-    expect(evaluateNoNetwork([], []).ok).toBe(true);
+  it('기대 목록이 비었거나 없으면 실패다 — 양성 대조(가드 탐침) 없이 기록 0건은 증명이 아니다', () => {
+    const empty = evaluateNoNetwork([], []);
+    expect(empty.ok).toBe(false);
+    expect(empty.detail).toContain('기대 목록이 비었다');
+    expect(empty.detail).toContain('양성 대조');
+    expect(evaluateNoNetwork([], undefined).ok).toBe(false);
+    // 기록이 있어도 같다 — 기대 목록이 비면 무엇이 기록됐든 가드가 일했다는 근거가 없다
+    expect(evaluateNoNetwork([GUARD_PROBE], []).ok).toBe(false);
   });
 
-  it('기록이 하나라도 있으면 실패다 — 어떤 주소인지 detail 에 싣는다', () => {
-    const verdict = evaluateNoNetwork(['https://abcd.supabase.co/rest/v1/x']);
+  it('기본 스모크 모양 — 기대 목록이 가드 탐침 하나이고 그것만 기록되면 통과다', () => {
+    const verdict = evaluateNoNetwork([GUARD_PROBE], [GUARD_PROBE]);
+    expect(verdict.ok).toBe(true);
+    expect(verdict.detail).toContain('기대한 요청 1종만 기록됐다(1건)');
+  });
+
+  it('기대 밖 기록이 하나라도 있으면 실패다 — 어떤 주소인지 detail 에 싣는다', () => {
+    const verdict = evaluateNoNetwork([GUARD_PROBE, 'https://abcd.supabase.co/rest/v1/x'], [GUARD_PROBE]);
     expect(verdict.ok).toBe(false);
     expect(verdict.detail).toContain('https://abcd.supabase.co/rest/v1/x');
   });
@@ -508,7 +531,7 @@ describe('evaluateNoNetwork', () => {
     ['객체', { length: 0 }],
     ['숫자', 0],
   ])('records 가 배열이 아니면 실패다(빈 입력): %s', (_name, records) => {
-    const verdict = evaluateNoNetwork(records);
+    const verdict = evaluateNoNetwork(records, [GUARD_PROBE]);
     expect(verdict.ok).toBe(false);
     expect(verdict.detail).toContain('records');
   });
