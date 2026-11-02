@@ -7,8 +7,10 @@ import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   build,
+  createServer,
   loadConfigFromFile,
   normalizePath,
+  resolveConfig,
   type Plugin,
   type PluginOption,
   type Rollup,
@@ -505,6 +507,9 @@ describe('trayCsp 빌드', () => {
       expect(error.hook).toBe('writeBundle');
       const expected = ['index.html', 'sw.js', 'registerSW.js', 'manifest.webmanifest', 'workbox-abc.js'];
       for (const part of [...expected, 'manifest 링크', '/TwelveJanggi/']) expect(error.message).toContain(part);
+      // 걸린 빌드는 이미 디스크에 쓰였다(tray.html 이 있다) — 앱 main · 스모크 런처의 관문이 보는 tray-build.json 은 남지 않는다
+      expect(existsSync(join(dir, 'out', 'tray.html'))).toBe(true);
+      expect(existsSync(join(dir, 'out', 'tray-build.json'))).toBe(false);
     },
     BUILD_TIMEOUT,
   );
@@ -517,6 +522,77 @@ describe('trayCsp 빌드', () => {
       const error = await buildError(buildTray(dir));
       expect(error.message).toContain('VITE_SUPABASE_URL');
       expect(existsSync(join(dir, 'out'))).toBe(false);
+    },
+    BUILD_TIMEOUT,
+  );
+});
+
+// 실패한 build:tray 는 실행할 수 있는 빌드를 남기지 않는다 — 앱 main 과 스모크 런처는 tray-build.json 이 있고 맞으면 그 폴더를 연다.
+// Vite 는 번들링이 끝난 뒤에야 outDir 을 비우므로, 그 전의 실패는 지난 빌드를 그대로 두었다. 같은 임시 루트에 성공한 빌드를 먼저
+// 남겨 두고(지난 빌드) 실패하는 빌드를 돌린다.
+describe('trayCsp — 실패한 빌드는 tray-build.json 을 남기지 않는다', () => {
+  /** 지난 빌드 하나를 남기고 그 tray-build.json 경로를 돌려준다(Supabase 값 없는 성공 빌드). */
+  async function seedBuild(dir: string): Promise<string> {
+    vi.stubEnv('VITE_SUPABASE_URL', undefined);
+    await buildTray(dir);
+    const file = join(dir, 'out', 'tray-build.json');
+    expect(existsSync(file), '지난 빌드의 tray-build.json').toBe(true);
+    return file;
+  }
+
+  it(
+    '가드의 load 오류(트레이가 웹 전용 모듈을 import) — 번들링 중에 멈춰도 지난 tray-build.json 이 지워져 있다',
+    async () => {
+      const dir = trayCspRoot();
+      const stale = await seedBuild(dir);
+      mkdirSync(join(dir, 'src', 'ui'), { recursive: true });
+      writeFileSync(join(dir, 'src', 'ui', 'Header.tsx'), 'export const x = 1;\n');
+      writeFileSync(join(dir, 'main.ts'), `import './src/ui/Header.tsx';\n${readFileSync(join(dir, 'main.ts'), 'utf8')}`);
+      const error = await buildError(buildTray(dir, { plugins: [trayGuard(dir)] }));
+      expect(error.plugin).toBe('tj-tray-guard');
+      expect(error.hook).toBe('load');
+      expect(existsSync(stale)).toBe(false);
+    },
+    BUILD_TIMEOUT,
+  );
+
+  it(
+    '잘못된 VITE_SUPABASE_URL — 번들링 전에 멈춰도 지난 tray-build.json 이 지워져 있다',
+    async () => {
+      const dir = trayCspRoot();
+      const stale = await seedBuild(dir);
+      vi.stubEnv('VITE_SUPABASE_URL', 'http://example.com');
+      const error = await buildError(buildTray(dir));
+      expect(error.message).toContain('VITE_SUPABASE_URL');
+      expect(existsSync(stale)).toBe(false);
+    },
+    BUILD_TIMEOUT,
+  );
+
+  it(
+    '설정을 푸는 것만으로는 지우지 않는다 — resolveConfig(build) · dev 서버 뒤에도 지난 tray-build.json 이 그대로다',
+    async () => {
+      const dir = trayCspRoot();
+      const stale = await seedBuild(dir);
+      const inline = {
+        root: dir,
+        configFile: false as const,
+        envDir,
+        logLevel: 'silent' as const,
+        cacheDir: join(dir, '.vite-cache'),
+        build: { outDir: join(dir, 'out') },
+        plugins: [trayCsp()],
+      };
+      await resolveConfig(inline, 'build');
+      expect(existsSync(stale), 'resolveConfig(build) 뒤').toBe(true);
+      // dev 서버 — 소켓 · 감시 · 의존성 탐색 없이 만들고 닫는다(trayCsp 는 apply 'build' 라 서버에 들지 않는다)
+      const server = await createServer({
+        ...inline,
+        server: { middlewareMode: true, ws: false, hmr: false, watch: null },
+        optimizeDeps: { noDiscovery: true },
+      });
+      await server.close();
+      expect(existsSync(stale), 'dev 서버 뒤').toBe(true);
     },
     BUILD_TIMEOUT,
   );

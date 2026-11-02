@@ -7,6 +7,8 @@
 // buildTrayCsp · buildTrayBuildInfo 를 쓰려고 import 한다(Vite 는 타입만 가져온다).
 
 import { execFileSync } from 'node:child_process';
+import { rmSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Plugin, Rollup } from 'vite';
 
@@ -69,7 +71,7 @@ function supabaseOrigins(value: string): { http: string; ws: string } {
 /**
  * 트레이 CSP. 지시문 순서 · 구분자는 고정이다(설계 §5.3 — 스모크가 문자열로 대조한다).
  * Supabase 값이 있으면 connect-src 에 https · wss 출처를 둘 다 적는다(CSP3 에서 https 는 wss 를 덮지 않는다).
- * 값이 잘못됐으면 throw 한다 — configResolved 에서 불러 번들링 전에 멈춘다.
+ * 값이 잘못됐으면 throw 한다 — trayCsp 의 buildStart 가 불러 번들링 전에 멈춘다.
  */
 export function buildTrayCsp(supabaseUrl: string | undefined): TrayCsp {
   const origins = supabaseUrl ? supabaseOrigins(supabaseUrl) : null;
@@ -266,18 +268,47 @@ function trayOutputProblems(bundle: Rollup.OutputBundle, meta: string): string[]
   return problems;
 }
 
+/** Vite 가 쓰는 출력 폴더(Vite 의 getResolvedOutDirs 와 같은 규칙) — rollupOptions.output 에 dir 이 있으면 그것, 없으면 build.outDir. */
+function outputDirs(root: string, build: { outDir: string; rollupOptions: Rollup.RollupOptions }): string[] {
+  const output = build.rollupOptions.output;
+  if (!output) return [resolve(root, build.outDir)];
+  return (Array.isArray(output) ? output : [output]).map(({ dir }) => resolve(root, dir ?? build.outDir));
+}
+
+/**
+ * <dir>/tray-build.json 을 지운다(없으면 그만). 못 지우면 이유 한 줄을 돌려준다 — 부르는 쪽이 빌드 오류에 싣는다.
+ * 이 파일만 지운다: 앱 main 과 스모크 런처는 이 파일이 있고 맞아야 그 폴더를 연다(나머지 출력은 Vite 가 비운다).
+ */
+function removeBuildInfo(dir: string): string | null {
+  const file = join(dir, TRAY_BUILD_JSON);
+  try {
+    rmSync(file, { force: true });
+    return null;
+  } catch (error) {
+    return `${file} 를 지우지 못했다(${error instanceof Error ? error.message : String(error)}) — 남으면 앱 · 스모크가 그 빌드를 연다`;
+  }
+}
+
 /**
  * 트레이 CSP 플러그인(빌드에서만 — dev 에는 CSP 가 없다). 트레이 설정의 plugins 에만 넣는다(워커 하위 빌드마다 돌면 안 된다).
- * - configResolved: config.env.VITE_SUPABASE_URL 로 정책을 만든다 — 번들의 import.meta.env 와 같은 값이다
+ * 실패한 build:tray 는 실행할 수 있는 빌드를 남기지 않는다 — 앱 main 과 스모크 런처의 관문이 보는 tray-build.json 이 outDir 에 없다.
+ * - configResolved: 값만 읽는다(루트 · 출력 폴더 · config.env.VITE_SUPABASE_URL — 번들의 import.meta.env 와 같은 값). 지우거나
+ *   검사하지 않는다 — 설정을 읽거나 푸는 것만으로는(loadConfigFromFile · resolveConfig · dev 서버) 디스크가 바뀌지 않는다
+ * - buildStart: 실제 빌드의 첫 훅이다. 지난 tray-build.json 을 먼저 지우고 정책을 만든다 — 잘못된 값은 여기서, 번들링 전에 멈춘다.
+ *   Vite 는 번들링이 끝난 뒤에야 outDir 을 비우므로, 지우지 않으면 그 전의 실패(가드의 load 오류 · 잘못된 값)가 지난 빌드를 남긴다.
+ *   configResolved 가 아니라 여기서 지우는 것은 빌드마다(watch 의 다시 빌드 포함) 돌고, 설정을 푸는 것만으로는 돌지 않아서다
  * - transformIndexHtml: charset 바로 뒤에 meta
  * - generateBundle: tray-build.json(AI 워커 청크는 vite:worker 가 먼저 bundle 에 넣는다)
- * - writeBundle: 출력 검사. closeBundle 은 실패한 빌드에서도 돌아 원래 오류를 가리므로 쓰지 않는다
+ * - writeBundle: 출력 검사. 걸리면 방금 쓴 tray-build.json 을 지우고 실패시킨다. closeBundle 은 실패한 빌드에서도 돌아 원래 오류를
+ *   가리므로 쓰지 않는다
  */
 export function trayCsp(): Plugin {
   let csp: TrayCsp | null = null;
   let root = '';
+  let supabaseUrl: string | undefined;
+  let outDirs: string[] = [];
   const policy = (): TrayCsp => {
-    if (!csp) throw new Error('tj-tray-csp: configResolved 전에 불렸다');
+    if (!csp) throw new Error('tj-tray-csp: buildStart 전에 불렸다');
     return csp;
   };
   return {
@@ -285,7 +316,13 @@ export function trayCsp(): Plugin {
     apply: 'build',
     configResolved(config) {
       root = config.root;
-      csp = buildTrayCsp(config.env.VITE_SUPABASE_URL as string | undefined);
+      supabaseUrl = config.env.VITE_SUPABASE_URL as string | undefined;
+      outDirs = outputDirs(config.root, config.build);
+    },
+    buildStart() {
+      const failed = outDirs.map(removeBuildInfo).filter((problem) => problem !== null);
+      if (failed.length > 0) this.error(`지난 빌드를 치우지 못했다\n${failed.map((problem) => `- ${problem}`).join('\n')}`);
+      csp = buildTrayCsp(supabaseUrl);
     },
     transformIndexHtml(html) {
       return injectCspMeta(html, policy().meta);
@@ -296,9 +333,15 @@ export function trayCsp(): Plugin {
       const info = buildTrayBuildInfo(policy(), workers[0] ?? null, new Date().toISOString(), gitCommit(root));
       this.emitFile({ type: 'asset', fileName: TRAY_BUILD_JSON, source: `${JSON.stringify(info, null, 2)}\n` });
     },
-    writeBundle(_options, bundle) {
+    writeBundle(options, bundle) {
       const problems = trayOutputProblems(bundle, policy().meta);
-      if (problems.length > 0) this.error(`트레이 출력 검사 실패\n${problems.map((problem) => `- ${problem}`).join('\n')}`);
+      if (problems.length === 0) return;
+      // 걸린 빌드는 이미 디스크에 있다 — 그 tray-build.json 을 지워 앱 · 스모크가 그 폴더를 열지 않게 한다
+      for (const dir of options.dir ? [options.dir] : outDirs) {
+        const failed = removeBuildInfo(dir);
+        if (failed !== null) problems.push(failed);
+      }
+      this.error(`트레이 출력 검사 실패\n${problems.map((problem) => `- ${problem}`).join('\n')}`);
     },
   };
 }
