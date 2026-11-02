@@ -281,6 +281,9 @@ function startApp(executable, args, env) {
   });
   child.once('exit', (code, signal) => {
     exitSeen = true;
+    // 끝났다 — kill 뒤의 유예 타이머를 끈다. 켜 두면 남은 출력을 기다리는 동안(OUTPUT_DRAIN_MS) 유예가 먼저 끝나, 이미 끝난 앱을
+    // '끝나지 않았다'(죽은 PID 의 taskkill 안내)로 적고 실제 종료 코드를 잃는다.
+    clearTimeout(graceTimer);
     const finish = () => {
       clearTimeout(drainTimer);
       release();
