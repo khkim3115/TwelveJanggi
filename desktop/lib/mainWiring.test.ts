@@ -1,8 +1,8 @@
 // desktop/main.js 배선 시험(설계 §5.5 · §5.3 · §5.7) — main.js 를 가짜 electron 위에서 실제로 돌려, 글자 시험(mainSource.test.ts)이
 // 보지 못하는 실행 순서 · 조건 · 콜백을 본다. Electron 은 띄우지 않는다.
-// - 가짜 electron 은 Module._load 훅이 모듈 해석보다 먼저 돌려준다. 진짜 electron 패키지를 찾지 않으므로 desktop/node_modules 가
-//   없어도 돈다(electron 은 import · require 하지 않는다). 훅은 main.js 를 require 하는 동안만 걸고, require 캐시 · argv ·
-//   환경 변수 · process 값은 사례마다 되돌린다 — 다른 시험 파일에 남지 않게.
+// - 가짜 electron(fakeElectron.ts)은 Module._load 훅이 모듈 해석보다 먼저 돌려준다. 진짜 electron 패키지를 찾지 않으므로
+//   desktop/node_modules 가 없어도 돈다(electron 은 import · require 하지 않는다). 훅은 main.js 를 require 하는 동안만 걸고,
+//   require 캐시 · argv · 환경 변수 · process 값은 사례마다 되돌린다 — 다른 시험 파일에 남지 않게.
 // - main.js 는 개발 렌더러 루트(../dist-tray)와 트레이 아이콘을 __dirname 에서 찾는다. 제자리에서 돌리면 저장소의 dist-tray
 //   (build:tray 를 했는지에 따라 있거나 없다)를 읽게 되므로, 사례마다 mkdtemp(한글 · 공백 이름) 안에 같은 모양의 나무
 //   — desktop/(main.js · package.json · lib/*.cjs · smoke/*.cjs · assets/ 를 저장소에서 복사) · dist-tray/ · resources/renderer/ — 를 깔고
@@ -14,10 +14,11 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildTrayBuildInfo, buildTrayCsp } from '../../scripts/trayBuild.ts';
+import { APP_VERSION, ENTRY_URL, OPEN_ERROR, createFakeElectron, listenersOf, type Call, type Fake, type FakeContents, type Fn } from './fakeElectron.ts';
 
 const require = createRequire(import.meta.url);
 const { formatSmokeArgs, parseSmokeArgs } = require('./smokeArgs.cjs') as typeof import('./smokeArgs.cjs');
@@ -33,166 +34,13 @@ const proc = process as NodeJS.Process & { resourcesPath?: string };
 
 /** 저장소의 desktop/ — 사례마다 여기서 main.js · lib · assets 를 복사한다. */
 const DESKTOP_SRC = fileURLToPath(new URL('..', import.meta.url));
-const ENTRY_URL = 'app://twelvejanggi/tray.html';
-const APP_VERSION = '0.1.0';
 /** Node 에는 없는 process.versions 값 — 사례 동안만 채운다(스모크 결과의 versions · AppInfo 가 읽는다). */
 const ELECTRON_VERSIONS = { electron: '44.9.3', chrome: '152.0.7977.167' };
 const NONCE = '논스 1';
-const OPEN_ERROR = '브라우저를 띄우지 못했다';
 /** tray-build.json — build:tray 가 쓰는 모양(Supabase 값 없음). 200 응답의 CSP 는 이 header 판 그대로여야 한다. */
 const BUILD = buildTrayBuildInfo(buildTrayCsp(undefined), null, '2026-10-27T00:00:00.000Z', null);
 const TRAY_HTML = '<!doctype html>\n<meta charset="UTF-8" />\n<title>십이장기</title>\n';
 const TRAY_JS = 'console.log("십이장기");\n';
-
-/**
- * 가짜 electron 이 기록한 호출 하나. ready 는 whenReady 가 풀린 뒤인가, turn 은 ready 뒤 첫 동기 구간(1)인가 그 뒤(2)인가
- * (ready 전은 0) — onReady 사이에 await 가 끼면 그 뒤의 호출이 turn 2 가 된다.
- */
-type Call = { name: string; args: unknown[]; ready: boolean; turn: 0 | 1 | 2 };
-type Fn = (...args: unknown[]) => unknown;
-type FakeContents = {
-  mainFrame: { detached: boolean; url: string; origin: string };
-  on(event: string, listener: Fn): void;
-  setWindowOpenHandler(handler: Fn): void;
-  openDevTools(options: unknown): void;
-};
-type FakeImage = { isEmpty(): boolean; resize(size: unknown): FakeImage };
-type FakeOptions = { isPackaged: boolean; lock: boolean; appData: string; openExternal: 'resolve' | 'reject' };
-
-/** calls 가운데 name(첫 인자 key) 호출의 처리기(둘째 인자) — app.on('web-contents-created', fn) 의 fn 같은 것. */
-function listenersOf(calls: readonly Call[], name: string, key: string): Fn[] {
-  return calls.filter((call) => call.name === name && call.args[0] === key).map((call) => call.args[1] as Fn);
-}
-
-/**
- * 기록하는 가짜 electron — main.js 가 쓰는 멤버만 있다. 처리기 · 리스너는 기록에 남고 시험이 직접 부른다.
- * Electron 과 같게 한 것: setPath 는 없는 폴더면 던진다 · enableSandbox 와 registerSchemesAsPrivileged 는 ready 뒤면 던진다 ·
- * BrowserWindow 는 만들면서 'web-contents-created' 를 부른다. ipcMain 은 어느 멤버를 불러도(계산된 키 · 구조 분해 포함) 기록된다.
- */
-function createFakeElectron({ isPackaged, lock, appData, openExternal }: FakeOptions) {
-  const calls: Call[] = [];
-  const windows: Array<{ webContents: FakeContents }> = [];
-  let ready = false;
-  let turn: Call['turn'] = 0;
-  let userData: string | null = null;
-  const rec = (name: string, ...args: unknown[]): void => {
-    if (ready && turn === 0) {
-      turn = 1;
-      queueMicrotask(() => {
-        turn = 2;
-      });
-    }
-    calls.push({ name, args, ready, turn });
-  };
-
-  const app = {
-    get isPackaged(): boolean {
-      return isPackaged;
-    },
-    getPath(name: string): string {
-      rec('app.getPath', name);
-      if (name === 'appData') return appData;
-      if (name === 'userData') return userData ?? join(appData, 'TwelveJanggi');
-      throw new Error(`가짜 getPath 가 모르는 이름이다: ${name}`);
-    },
-    setPath(name: string, value: string): void {
-      rec('app.setPath', name, value);
-      if (!isAbsolute(value) || !existsSync(value)) throw new Error(`setPath: 없는 폴더다 (${value})`);
-      if (name === 'userData') userData = value;
-    },
-    enableSandbox(): void {
-      rec('app.enableSandbox');
-      if (ready) throw new Error('enableSandbox 는 ready 전에만 부를 수 있다');
-    },
-    /** 잠금은 지금의 userData 에 걸린다 — 기록의 인자가 그 값이다(null 은 Electron 기본값). */
-    requestSingleInstanceLock(): boolean {
-      rec('app.requestSingleInstanceLock', userData);
-      return lock;
-    },
-    whenReady(): Promise<void> {
-      rec('app.whenReady');
-      return Promise.resolve().then(() => {
-        ready = true;
-      });
-    },
-    on: (event: string, listener: Fn) => rec('app.on', event, listener),
-    exit: (code: number) => rec('app.exit', code),
-    quit: () => rec('app.quit'),
-    setAppUserModelId: (id: string) => rec('app.setAppUserModelId', id),
-    getVersion: () => APP_VERSION,
-  };
-  class BrowserWindow {
-    readonly webContents: FakeContents = {
-      mainFrame: { detached: false, url: ENTRY_URL, origin: 'app://twelvejanggi' },
-      on: (event, listener) => rec('webContents.on', event, listener),
-      setWindowOpenHandler: (handler) => rec('webContents.setWindowOpenHandler', handler),
-      openDevTools: (options) => rec('webContents.openDevTools', options),
-    };
-    readonly once = (event: string, listener: Fn) => rec('win.once', event, listener);
-    readonly on = (event: string, listener: Fn) => rec('win.on', event, listener);
-    readonly isDestroyed = () => false;
-    constructor(options: unknown) {
-      rec('new BrowserWindow', options);
-      windows.push(this);
-      // Electron 처럼 webContents 를 만들면서 'web-contents-created' 를 부른다 — main 의 탐색 가드가 여기서 걸린다.
-      for (const listener of listenersOf(calls, 'app.on', 'web-contents-created')) listener({}, this.webContents);
-    }
-    loadURL(url: string): Promise<void> {
-      rec('win.loadURL', url);
-      return Promise.resolve();
-    }
-  }
-  class Tray {
-    readonly setToolTip = (text: string) => rec('tray.setToolTip', text);
-    readonly setContextMenu = (menu: unknown) => rec('tray.setContextMenu', menu);
-    readonly on = (event: string, listener: Fn) => rec('tray.on', event, listener);
-    constructor(image: FakeImage) {
-      rec('new Tray', { empty: image.isEmpty() });
-    }
-  }
-  const nativeImage = {
-    createFromPath(file: string): FakeImage {
-      rec('nativeImage.createFromPath', file);
-      const image: FakeImage = { isEmpty: () => !existsSync(file), resize: () => image };
-      return image;
-    },
-  };
-  const Menu = {
-    setApplicationMenu: (menu: unknown) => rec('Menu.setApplicationMenu', menu),
-    buildFromTemplate: (template: unknown) => ({ template }),
-  };
-  const dialog = { showErrorBox: (title: string, content: string) => rec('dialog.showErrorBox', title, content) };
-  const ipcMain = new Proxy(
-    {},
-    { get: (_target, key) => (typeof key === 'string' ? (...args: unknown[]) => rec(`ipcMain.${key}`, ...args) : undefined) },
-  );
-  const protocol = {
-    registerSchemesAsPrivileged(schemes: unknown): void {
-      rec('protocol.registerSchemesAsPrivileged', schemes);
-      if (ready) throw new Error('registerSchemesAsPrivileged 는 ready 전에만 부를 수 있다');
-    },
-    handle: (scheme: string, handler: Fn) => rec('protocol.handle', scheme, handler),
-  };
-  const session = {
-    defaultSession: {
-      setPermissionRequestHandler: (handler: Fn) => rec('session.setPermissionRequestHandler', handler),
-      setPermissionCheckHandler: (handler: Fn) => rec('session.setPermissionCheckHandler', handler),
-      setDevicePermissionHandler: (handler: Fn) => rec('session.setDevicePermissionHandler', handler),
-      on: (event: string, listener: Fn) => rec('session.on', event, listener),
-      webRequest: { onBeforeRequest: (listener: Fn) => rec('session.webRequest.onBeforeRequest', listener) },
-    },
-  };
-  const shell = {
-    openExternal(href: string): Promise<void> {
-      rec('shell.openExternal', href);
-      return openExternal === 'resolve' ? Promise.resolve() : Promise.reject(new Error(OPEN_ERROR));
-    },
-  };
-  /** main 은 스모크 실행기에 넘기기만 한다 — 배선 시험에서는 아무도 부르지 않는다. */
-  const net = {};
-  return { electron: { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, net, protocol, session, shell }, calls, windows };
-}
-type Fake = ReturnType<typeof createFakeElectron>;
 
 type Mode = 'dev' | 'smoke' | 'packaged';
 /** 렌더러 루트 — valid 는 tray-build.json · tray.html · assets/tray.js, 나머지는 fail-closed 원인 하나씩이다. */
