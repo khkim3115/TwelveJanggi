@@ -167,6 +167,7 @@ export type Outcome = {
 type Running = { fetches: string[]; ended(): boolean; finish(): Promise<Outcome> };
 type Rig = { run: SmokeRun; start(): Running };
 
+/** 이번 사례의 mkdtemp 폴더 — 사례 밖(설치 전 · 사례 사이)에는 '' 다. 읽기는 rigBase() 로만 한다(사례 밖이면 던진다). */
 let base = '';
 let restoreProcess = (): void => {};
 /** 이번 사례의 실행기에 will-quit 을 낸다 — 감시 타이머가 남았으면 끈다. */
@@ -189,16 +190,23 @@ export function installRigLifecycle(): void {
   });
 
   afterEach(() => {
+    // base 부터 비운다 — 뒤의 단계가 던져도 사례 밖의 rig 사용은 rigBase() 가 막는다
+    const laid = base;
+    base = '';
     vi.useRealTimers();
     quitApp?.();
     quitApp = null;
     restoreProcess();
-    rmSync(base, { recursive: true, force: true });
+    if (laid !== '') rmSync(laid, { recursive: true, force: true }); // mkdtemp 가 던진 사례에는 지울 폴더가 없다
   });
 }
 
-/** 이번 사례의 mkdtemp 폴더 — rigScenario 가 앱 폴더 · 렌더러 루트 · outDir 을 이 안에 깐다(사례가 기대값으로 읽는다). */
+/**
+ * 이번 사례의 mkdtemp 폴더 — rigScenario 가 앱 폴더 · 렌더러 루트 · outDir 을 이 안에 깐다(사례가 기대값으로 읽는다).
+ * 사례 밖(installRigLifecycle() 호출이 없거나 사례 사이)에는 던진다 — 빈 base 로 깔면 경로가 모두 cwd 기준이 되어 저장소에 쓴다.
+ */
 export function rigBase(): string {
+  if (base === '') throw new Error('rig 는 사례 안에서만 쓴다 — 시험 파일 최상위에서 installRigLifecycle() 호출을 빠뜨렸거나 사례 밖에서 불렀다');
   return base;
 }
 
@@ -341,6 +349,7 @@ export function healthyPage(index: FileIndex): Record<string, PageHandler> {
 
 /** 실행기를 만들어 main 의 순서로 꽂는다. start() 가 첫 did-finish-load 를 낸다 — finish 는 '종료' 클릭이나 exit 까지 기다려 결과를 읽는다. */
 export function rigScenario(scenario: Scenario = {}): Rig {
+  const caseDir = rigBase(); // 사례 밖이면 여기서 던진다 — process 값을 바꾸거나 파일을 쓰기 전에
   const {
     guard = 'run',
     network = 'unresolved',
@@ -357,14 +366,14 @@ export function rigScenario(scenario: Scenario = {}): Rig {
 
   // 앱 폴더 — ipc 검사가 desktop 패키지 · 고정한 electron 패키지의 version 을 읽는다. 렌더러 루트 — protocol 검사의 전제(바로 위의
   // package.json · 디렉터리 assets · tray-build.json)를 깐다
-  const appRoot = join(base, 'desktop');
-  const rendererRoot = join(base, 'dist-tray');
-  const outDir = join(base, 'smoke out');
+  const appRoot = join(caseDir, 'desktop');
+  const rendererRoot = join(caseDir, 'dist-tray');
+  const outDir = join(caseDir, 'smoke out');
   mkdirSync(join(appRoot, 'node_modules', 'electron'), { recursive: true });
   mkdirSync(join(rendererRoot, 'assets'), { recursive: true });
   writeFileSync(join(appRoot, 'package.json'), JSON.stringify({ version: APP_VERSION }));
   writeFileSync(join(appRoot, 'node_modules', 'electron', 'package.json'), JSON.stringify({ version: ELECTRON_VERSION }));
-  if (scenario.noParentFile !== true) writeFileSync(join(base, 'package.json'), JSON.stringify({ name: '저장소' }));
+  if (scenario.noParentFile !== true) writeFileSync(join(caseDir, 'package.json'), JSON.stringify({ name: '저장소' }));
   const trayBuild = buildTrayBuildInfo(buildTrayCsp(SUPABASE_URLS[build]), workerScript, '2026-10-29T00:00:00.000Z', null);
   writeFileSync(join(rendererRoot, 'tray-build.json'), JSON.stringify(trayBuild));
   const index: FileIndex = {
@@ -487,7 +496,7 @@ export function rigScenario(scenario: Scenario = {}): Rig {
   const mainFetch = scenario.mainFetch ?? (async (url: string) => ({ status: resolveAppRequest({ url, method: 'GET' }, index).status }));
 
   const run = createSmokeRun({
-    args: { enabled: true, outDir, profile: join(base, 'profile'), net, nonce: NONCE, error: null },
+    args: { enabled: true, outDir, profile: join(caseDir, 'profile'), net, nonce: NONCE, error: null },
     app,
     session: { defaultSession },
     net: { fetch: mainFetch },
