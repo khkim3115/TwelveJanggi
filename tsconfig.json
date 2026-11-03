@@ -9,6 +9,7 @@
 
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
+    "allowJs": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
     "noEmit": true,
@@ -20,5 +21,5 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["src", "scripts", "vite.config.ts", "vitest.config.ts", "pwa-assets.config.ts"]
+  "include": ["src", "scripts", "desktop/lib", "vite.config.ts", "vite.tray.config.ts", "vitest.config.ts", "pwa-assets.config.ts"]
 }

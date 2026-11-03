@@ -15,8 +15,9 @@ const BANNED = [
   '動物' + '将棋',
 ].map((w) => w.toLowerCase());
 
-const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.tmp', '.claude']);
-const TEXT = /\.(ts|tsx|js|mjs|css|html|md|json|sql|yml|yaml|svg)$/;
+// dist-tray(트레이 빌드 산출물) · release(설치 파일) · smoke-out(스모크 결과) · .superpowers(에이전트 작업 기록)는 소스가 아니다.
+const SKIP_DIRS = new Set(['node_modules', 'dist', 'dist-tray', 'release', 'smoke-out', '.git', '.tmp', '.claude', '.superpowers']);
+const TEXT = /\.(ts|tsx|js|mjs|cjs|css|html|md|json|sql|yml|yaml|svg|nsh)$/;
 
 function walk(dir: string, out: string[]): string[] {
   for (const name of readdirSync(dir)) {

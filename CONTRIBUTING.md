@@ -16,7 +16,7 @@
 
 - 형식: `<type>(<scope>): <한국어 설명> (#이슈)`
   - 예) `feat(engine): 어려움 AI 전치표 추가 (#25)`
-- `scope` 예: `core`, `engine`, `solo`, `mp`, `ui`, `web`, `ci`, `deps` …
+- `scope` 예: `core`, `engine`, `solo`, `mp`, `ui`, `web`, `desktop`, `ci`, `deps` …
 
 ## PR & 머지
 
@@ -60,5 +60,8 @@
 - `src/core` 를 손댔다면 `src/engine` 강도 회귀 테스트까지 반드시 확인한다.
 - `src/core` 나 `supabase/` 의 규칙을 바꿨다면 서버·클라이언트 규칙 일치를 확인한다 — 먼저 로컬에서
   `npm run test:sql -- --deep`, 그다음 `npm run e2e:mp`(실서버에 방·익명 사용자를 만든다 — `README.md` 의 '규칙 일치 검증').
+- 트레이 앱(`desktop/` · `src/tray/` · `vite.tray.config.ts` · `scripts/trayBuild.ts`)을 바꿨다면 `npm run build:tray` ·
+  `npm run typecheck:desktop`(먼저 `npm --prefix desktop ci`) · 스모크 `npm --prefix desktop run smoke` 까지 확인한다 —
+  스모크는 실제 Electron 을 띄운다(Windows 에서만 검증 — `desktop/README.md`).
 - Supabase 스키마는 공유 프로젝트다 — 바꿀 때는 새 마이그레이션 파일과 `supabase/schema.sql` 을 함께 고치고,
   `tj_` 객체 이름을 하나씩 적어 권한을 다룬다(`CLAUDE.md` 의 '멀티플레이').

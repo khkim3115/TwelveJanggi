@@ -6,11 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:tray": "vite build --config vite.tray.config.ts",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:sql": "tsx scripts/sql-parity.ts",
     "typecheck": "tsc --noEmit",
+    "typecheck:desktop": "tsc --noEmit -p desktop/tsconfig.json && tsc --noEmit -p desktop/tsconfig.preload.json",
     "bench:seats": "tsx scripts/bench-seats.ts",
     "e2e:mp": "tsx scripts/mp-e2e.ts",
     "generate-pwa-assets": "pwa-assets-generator"

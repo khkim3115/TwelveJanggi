@@ -11,15 +11,23 @@ React 19 + Vite 6 + TypeScript + Zustand 프런트엔드, Supabase(Postgres + Re
 ```bash
 npm install
 npm run dev                  # vite dev server → http://localhost:5173 (서비스 워커 꺼짐)
-npm test                     # vitest run — 규칙 계약 · AI 강도 회귀 · 스토어 계약 · 표기 가드
+npm test                     # vitest run — 규칙 계약 · AI 강도 회귀 · 스토어 계약 · 표기 가드 · 트레이 빌드 도구(scripts/) · desktop/lib 순수 모듈
 npm run test:watch
 npm run test:sql             # 서버(plpgsql)·클라이언트 규칙 일치를 로컬 Postgres(PGlite)로 — 빠른 모드, `-- --deep` 은 깊은 모드
-npm run typecheck            # tsc --noEmit (scripts/ · 설정 파일 포함)
+npm run typecheck            # tsc --noEmit (scripts/ · desktop/lib 시험 · 설정 파일 포함 — desktop 의 JS 는 typecheck:desktop)
 npm run build                # tsc --noEmit + vite build → dist/ (PWA 서비스 워커·매니페스트 포함)
 npm run preview              # 빌드 결과 서빙 — PWA 설치·오프라인은 dev 가 아니라 여기서 확인
 npm run generate-pwa-assets  # public/icon.svg → PWA 아이콘·favicon (pwa-assets.config.ts)
 npm run bench:seats          # 선후공 편차 실측(수백 판 — vitest 밖)
 npm run e2e:mp               # 실서버 규칙 일치 검증(.env.local 필요 — 아래 '멀티플레이' 참고)
+
+# 트레이 앱(Electron) — 아래 '트레이 앱' 절. Windows 에서만 검증했다
+npm run build:tray           # vite build --config vite.tray.config.ts → dist-tray/ (PWA 없음, CSP meta · tray-build.json 포함)
+npm run typecheck:desktop    # desktop/ 의 JS(main · preload · lib · smoke · scripts)를 checkJs 로 — 먼저 npm --prefix desktop ci
+npm --prefix desktop ci      # Electron 설치 — 42+ 는 바이너리를 받지 않는다(처음 start 때 받는다). `--prefix` 와 인자 없는 `install` 의 조합은 쓰지 않는다
+npm --prefix desktop start   # 트레이 앱 실행(= electron .) — 먼저 npm run build:tray
+npm --prefix desktop run smoke           # 실제 앱 스모크(한 판 약 2초, 이 PC 기준) — 결과는 desktop/smoke-out/
+npm --prefix desktop run smoke -- --net  # + 실제 Supabase 연결 — 공유 프로젝트라 사용자 확인 뒤에만. `--` 없이는 npm 이 플래그를 가져가 런처가 거부한다
 ```
 
 단일 테스트: `npx vitest run src/core/gameState.test.ts` (`-t "<이름>"` 으로 한 케이스만).
@@ -42,6 +50,8 @@ npm run e2e:mp               # 실서버 규칙 일치 검증(.env.local 필요 
   `resolveSeat` 로 딱 한 번 확정되고 판이 끝날 때까지 불변이다. 사람이 적이면 새 판 직후 AI 가 먼저 둔다(`startGame`).
   난이도도 같은 원칙 — 고른 값(`difficulty`, 다음 판부터)과 이번 판 값(`gameDifficulty`)을 섞지 말 것.
 - **`src/core`·`src/engine` 에는 React/DOM import 가 없다** — `node` 환경 vitest 로 테스트한다(`src/**/*.test.ts`).
+- **트레이 앱 출처는 동결 계약이다** — `app://twelvejanggi`(진입 `tray.html`, 스모크는 `tray.html?smoke`). localStorage · 익명 세션이 이 출처에 묶여
+  바꾸면 저장된 설정과 세션이 끊긴다(`desktop/lib/appProtocol.cjs` 의 `APP_ORIGIN`).
 - **표기**: 비슷한 3×4 변형 게임의 상표명을 코드·문서·화면 어디에도 쓰지 않는다(`src/naming.test.ts` 가 막는다).
 
 ## Layering
@@ -61,7 +71,11 @@ src/engine/    AI (UI 무관)
 src/store/     Zustand — appStore(화면) · gameStore(혼자 하기) · multiplayerStore(온라인) — 엔진·서버와 UI 사이의 접착제
 src/ui/        React 컴포넌트 (표현 전담, 상태는 스토어에서)
 src/lib/       supabase.ts(클라이언트 — 동적 import 전용) · env.ts(설정 여부만) · chat · feedback
+               · loadSupabase.ts(supabase.ts 를 동적 import 하는 약속 하나 — 스토어 · 트레이 스모크 공용)
 src/data/      changelog(패치노트 단일 진실원본) · links
+src/tray/      트레이 앱 화면(tray.html 진입) — 웹 전용 모듈 import 금지 · desktop.ts(window.tjDesktop 접근자) · smoke.ts(?smoke 때만)
+desktop/       Electron 셸 — main.js · preload.js · smoke/(앱 안 스모크 실행기) · scripts/smoke.cjs(런처)
+  lib/           순수 .cjs 모듈 + 시험 — electron 을 import 하지 않는다(루트 검사는 desktop 설치 없이 통과해야 한다)
 supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
 ```
 
@@ -102,15 +116,16 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
     `stack depth limit exceeded`) 오류를 많이 내는 전수 대조는 국면마다 새 인스턴스(템플릿의 `clone()`)에서 돌린다.
   - `npm run e2e:mp`(`scripts/mp-e2e.ts`) — 익명 세션 2개로 **실서버**에서 시나리오와 AI 자가대국을 두며 매 수
     판·손패·차례·직전 수·승패를 대조한다. `--steps-sql` 은 `tj_can_step` 전수 대조 SQL.
-- **공개 RPC 시그니처**(클라이언트가 부르는 `tj_*` 9개의 이름·인자·반환)는 옛 클라이언트(배포 전에 열어 둔 탭·설치한 PWA)와의
-  계약이다. 인자는 기본값을 붙여 뒤에만 더한다. 인자 목록이 바뀐 `create or replace` 는 실서버에서 함수를 바꾸지 않고
-  오버로드를 하나 더 만들어 옛 호출을 'not unique' 로 깨므로, 마이그레이션에서 옛 시그니처를 `drop function` 한 뒤 새로 만들고
-  revoke/grant 를 다시 한다. `test:sql` 의 `PUBLIC_RPCS` 표와 'schema.sql = migrations/' 대조가 이것을 지키게 한다.
+- **공개 RPC 시그니처**(클라이언트가 부르는 `tj_*` 9개의 이름·인자·반환)는 옛 클라이언트(배포 전에 열어 둔 탭·설치한 PWA·설치한 트레이 앱 —
+  트레이 앱은 화면 번들을 앱 안에 담아 쓰므로(패키지 실행은 `resources/renderer`) 웹 배포가 닿지 않는다)와의 계약이다. 인자는 기본값을 붙여 뒤에만 더한다.
+  인자 목록이 바뀐 `create or replace` 는 실서버에서 함수를 바꾸지 않고 오버로드를 하나 더 만들어 옛 호출을 'not unique' 로 깨므로,
+  마이그레이션에서 옛 시그니처를 `drop function` 한 뒤 새로 만들고 revoke/grant 를 다시 한다. `test:sql` 의 `PUBLIC_RPCS` 표와
+  'schema.sql = migrations/' 대조가 이것을 지키게 한다.
 - **⚠️ `.env.local` 이 있으면 e2e 가 확인 없이 실서버에 방·익명 사용자를 만든다.** 서브에이전트·리뷰를 돌릴 때는
   `.env.local` 을 레포 밖으로 치워 둔다. `service_role` 키는 절대 쓰지 않는다(스크립트가 거부한다).
 - 단위 테스트(vitest)는 `.env*` 를 읽지 않는다(`vitest.config.ts` 의 `envDir`, `src/lib/env.test.ts` 가 지킨다). #11 에서 스토어의
-  동시 `import('../lib/supabase')` 가 vitest mock 을 새게 해 테스트가 실서버로 읽기 요청을 보낸 적이 있다 — 그래서 스토어는
-  `loadSupabase()` 의 import 약속 하나를 나눠 쓴다. 동적 import 를 새로 만들 때도 같은 약속을 쓴다.
+  동시 `import('../lib/supabase')` 가 vitest mock 을 새게 해 테스트가 실서버로 읽기 요청을 보낸 적이 있다 — 그래서 스토어와 트레이 스모크
+  (`src/tray/smoke.ts`)는 `src/lib/loadSupabase.ts` 의 `loadSupabase()` import 약속 하나를 나눠 쓴다. 동적 import 를 새로 만들 때도 같은 약속을 쓴다.
 
 ## PWA · 배포 · CI
 
@@ -128,9 +143,42 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
 - 아이콘은 `public/icon.svg` 하나가 원본이다(王 은 글꼴이 아니라 획으로 그린다). 고친 뒤 `npm run generate-pwa-assets`.
 - `main` push 마다 `.github/workflows/deploy.yml` 이 GitHub Pages 로 배포한다(Node 24). repo Variables
   `VITE_SUPABASE_URL`·`VITE_SUPABASE_ANON_KEY` 가 비어 있으면 온라인 대전이 꺼진 채 나가지 않게 빌드가 멈춘다.
-- PR(대상 `main`)마다 `.github/workflows/ci.yml` 이 `npm ci` → typecheck → test → test:sql → build 를 돌린다(Node 24, `ubuntu-latest`
-  잡 `check` 하나, Supabase 값 없이 빌드). `check` 는 `main` 브랜치 보호의 **필수 검사**다 — 잡 이름을 바꾸거나 경로 필터를
-  걸면 검사가 보고되지 않는 PR 이 머지 대기로 막힌다(바꿀 때는 보호 설정도 함께).
+- PR(대상 `main`)마다 `.github/workflows/ci.yml` 이 잡 둘을 돌린다(Node 24). `check`(`ubuntu-latest`)는 `npm ci` → typecheck → test →
+  test:sql → build(Supabase 값 없이) → `build:tray` → `npm --prefix desktop ci` → `typecheck:desktop` 이다 — 루트 단계가 desktop 설치 없이
+  도는지 매번 보이게 설치를 뒤에 둔다. `check` 는 `main` 브랜치 보호의 **필수 검사**다 — 잡 이름을 바꾸거나 경로 필터를 걸면 검사가
+  보고되지 않는 PR 이 머지 대기로 막힌다 (바꿀 때는 보호 설정도 함께). `tray-smoke`(`windows-latest`)는 `desktop/lib` · `scripts` 시험 →
+  `.invalid` Supabase 값으로 `build:tray` → 스모크 → `smoke-out/` 아티팩트이고(Electron 바이너리는 `.electron-cache` 에 캐시),
+  **아직 필수 검사가 아니다** — 필수로 둘지는 첫 PR 의 초록 실행 뒤 브랜치 보호가 정한다.
+
+## 트레이 앱 (Electron)
+
+- 구조: `tray.html` 과 `src/tray/` 를 `vite.tray.config.ts`(웹 설정과 따로 — PWA 없음, 도구 `scripts/trayBuild.ts`)로 `dist-tray/` 에
+  빌드하고 `desktop/` 의 Electron 이 `app://twelvejanggi/tray.html` 로 연다(사용법 · 스모크 표 · 문제 해결은 `desktop/README.md`, Windows 만 검증).
+  개발은 `npm run dev` → `/tray.html`(CSP 없음 · `window.tjDesktop` 은 스텁), 앱은 `build:tray` → `npm --prefix desktop ci` →
+  `npm --prefix desktop start`. 설치는 `ci` 로만 한다 — `--prefix` 와 인자 없는 `install` 은 Windows 에서 저장소 루트를 `desktop/node_modules`
+  에 링크하고, node_modules 정션을 따라간 삭제는 진짜 폴더를 지운 적이 있다(다른 정션이었다). lock 은 `desktop/` 안에서 `npm install` 로만 다시 쓴다.
+- 스킴 특권은 `{ standard, secure, supportFetchAPI }` 뿐이다 — `supportFetchAPI` 는 제품 코드가 아니라 스모크의 페이지 안 fetch 검사용이고,
+  `corsEnabled`(다른 출처가 app:// 응답을 읽게 된다) · `stream` · `bypassCSP` 는 넣지 않는다.
+- 처리기: app:// 는 시작할 때 만든 파일 색인에서만 내주고(요청 문자열은 경로 계산에 넣지 않는다 · 호스트 정확 일치 · GET/HEAD 만, 그 밖은 405 ·
+  없거나 거부하면 404, throw 없음), IPC 는 `createGuardedIpc` 로만 등록하고, 앱 밖 탐색 · 새 창은 막은 뒤 허용 목록(`links.cjs`)만 시스템 브라우저로 연다.
+- **CSP 는 한 원본이다** — `buildTrayCsp` 한 문자열이 `tray.html` 의 meta 와 `tray-build.json` → app:// 응답 헤더(+`frame-ancestors 'none'`)에
+  그대로 간다(전용 워커는 문서 meta 를 물려받지 않는다). **fail-closed**: `tray-build.json` 이 없거나 틀리거나 `tray.html` 이 없으면
+  main 은 처리기 · 창 · 트레이를 만들지 않고 알린 뒤 끝낸다(`tray.html` 의 내용은 `build:tray` 의 출력 검사와 스모크 `cspMeta` 가 본다).
+- **빌드 가드는 양방향이다** — `trayGuard`(트레이 빌드에 PWA 가상 모듈 · `src/main.tsx` · `Header` · `Home` · `appStore` 등)와 `webGuard`(웹 빌드에
+  `src/tray/**` — `apply: 'build'` 라 dev 의 `/tray.html` 은 막지 않는다)가 `load` 훅과 `worker.plugins` 에서 빌드를 실패시킨다.
+  쓸 부분이 웹 전용 모듈에 있으면 순수 모듈로 옮긴다. `build:tray` 는 cwd 와 무관하다(루트 · 진입 · 가드 루트가 `repoRoot(import.meta.url)` 한 값).
+- `desktop/main.js` 최상위(ready 전 · 동기)는 **순서가 의미를 가진다**: 스모크 인자 → userData → `enableSandbox` →
+  `registerSchemesAsPrivileged` → 단일 인스턴스 잠금. webPreferences 는 `lib/windowPrefs.cjs` 한 공장에서만 만들어
+  스모크와 같다(`additionalArguments` 금지).
+- **스모크**(`npm --prefix desktop run smoke [-- --net]`)는 실제 앱을 `tray.html?smoke` · 격리 프로필로 띄워 필수 검사 20개를 하나도
+  건너뛰지 않는다(`.invalid` 빌드는 +`connectAllowed`, `--net` 은 +`net`). 기본 스모크 · CI 는 원격으로 나가는 요청이 0 이고,
+  `--net` 은 공유 Supabase 에 닿으니 사용자 확인 뒤에만 돌린다.
+- **Windows 앱 실행 규칙**: 에이전트는 앱 · 스모크를 한 번에 하나만 돌린다 — 스모크는 `run smoke` 런처로, 앱은 PID 를 기록하는 `spawn` 도우미로 띄우고
+  PID 로 끝낸다(Git Bash 는 `taskkill //PID <pid> //T //F` — `/PID` 를 경로로 바꾸므로 슬래시를 겹친다. cmd · PowerShell 은 `/PID <pid> /T /F`).
+  `/IM electron.exe`(다른 Electron 앱도 꺼진다)와 `npm --prefix desktop start` 의 도구 포그라운드 · 백그라운드 실행은 금지다.
+  끝나면 `TwelveJanggi` 가 든 `electron.exe` 가 없는지 조회한다.
+- 버전 규칙: Electron 은 첫 출시 후 2주가 지난 가장 높은 메이저(`^44.9.3`)를 쓰고 패치는 `desktop/package-lock.json` 이 고정한다.
+  트레이 앱의 CSS 클래스는 모두 `tapp-` 접두사다(`index.css` 의 `.tray*` 는 손패 것).
 
 ## Contributing & releases
 

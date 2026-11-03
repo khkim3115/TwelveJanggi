@@ -1,5 +1,6 @@
 // AI 호출 창구. 워커가 있으면 워커에서, 없으면(테스트·구형 환경) 같은 스레드에서 계산한다.
 // UI 는 이 모듈만 부르고 워커의 존재를 몰라도 된다.
+// 어느 길로 답했는지는 getAiPath() 로 읽는다 — 조용한 동기 폴백이 워커 답으로 보이지 않게 하는 진단용이다.
 //
 // 응답 규칙: move:null 은 "취소됨"(새 판·되돌리기)이거나 둘 수가 없을 때뿐이다. 워커가 죽으면 기다리던
 // 요청은 같은 스레드에서 다시 계산해 답하고, 이후로는 워커를 만들지 않는다 — 그러지 않으면 AI 차례가
@@ -14,6 +15,12 @@ export interface AiAnswer {
   score?: number;
 }
 
+/**
+ * 요청이 어느 길로 끝났는지(진단용 — 동작에는 쓰이지 않는다). 'unused': 끝난 요청 없음(취소는 세지 않는다) ·
+ * 'worker': 워커의 응답이 요청을 끝냈다 · 'fallback': 같은 스레드 계산이 요청을 끝낸 적이 있다(한 번 되면 그대로).
+ */
+export type AiPath = 'unused' | 'worker' | 'fallback';
+
 interface Pending {
   req: AiRequest;
   resolve: (r: AiAnswer) => void;
@@ -24,9 +31,13 @@ let worker: Worker | null = null;
 let workerBroken = false;
 let nextId = 1;
 const pending = new Map<number, Pending>();
+/** getAiPath() 의 값. 쓰는 곳은 computeSync(fallback)와 워커 onmessage(worker) 둘뿐이다 — 취소는 건드리지 않는다. */
+let aiPath: AiPath = 'unused';
 
 /** 워커 없이 같은 스레드에서 계산한다. 엔진이 예외를 던져도 요청은 반드시 끝낸다(수 없음으로). */
 function computeSync(req: AiRequest): AiAnswer {
+  // 이 계산이 요청을 끝낸다. 워커 없음 · 생성 실패 · 워커 고장이 모두 여기로 오므로 한 곳에서 남긴다.
+  aiPath = 'fallback';
   try {
     const state = fromTransfer(req.state);
     if (req.kind === 'hint') {
@@ -50,6 +61,8 @@ function getWorker(): Worker | null {
       const p = pending.get(e.data.id);
       if (!p) return; // 이미 버려진(취소된) 요청
       pending.delete(e.data.id);
+      // 살아 있는 워커의 응답이 요청을 끝냈다. 이미 fallback 이 남았다면 덮지 않는다.
+      if (aiPath !== 'fallback') aiPath = 'worker';
       p.resolve({ move: e.data.move, score: e.data.score });
     };
     w.onerror = () => {
@@ -106,4 +119,9 @@ export function cancelPendingAi(): void {
     worker.terminate();
     worker = null;
   }
+}
+
+/** 지금까지 요청이 어느 길로 끝났는지(진단용). 스모크가 AI 가 워커에서 돈 것인지 조용한 폴백인지 가려 내려고 읽는다. */
+export function getAiPath(): AiPath {
+  return aiPath;
 }

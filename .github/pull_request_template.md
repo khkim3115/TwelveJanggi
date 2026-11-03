@@ -24,4 +24,5 @@ Closes #
 - [ ] `npm run test:sql` 통과
 - [ ] `npm run build` 통과
 - [ ] `src/core` 나 `supabase/` 규칙을 바꿨다면 `npm run test:sql -- --deep`(로컬)과 `npm run e2e:mp`(실서버)로 서버·클라이언트 규칙 일치 확인
+- [ ] 트레이 앱(`desktop/` · `src/tray/` · `vite.tray.config.ts` · `scripts/trayBuild.ts`)을 바꿨다면 `npm run build:tray` · `npm run typecheck:desktop` · `npm --prefix desktop run smoke` 통과
 - [ ] 화면을 바꿨다면 브라우저에서 직접 확인(375px · 라이트/다크 · 키보드)

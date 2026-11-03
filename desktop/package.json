@@ -1,0 +1,18 @@
+{
+  "name": "twelvejanggi-desktop",
+  "productName": "TwelveJanggi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "십이장기 트레이 앱 — 웹과 같은 코드의 트레이 빌드(dist-tray)를 app://twelvejanggi 에서 여는 Electron 셸",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "smoke": "node scripts/smoke.cjs"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "devDependencies": {
+    "electron": "^44.9.3"
+  }
+}
