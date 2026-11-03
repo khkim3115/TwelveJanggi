@@ -57,7 +57,11 @@ const PROCESS_EVENTS: ProcessEvent[] = ['uncaughtException', 'unhandledRejection
 const processListeners = (event: ProcessEvent): unknown[] =>
   event === 'uncaughtException' ? process.listeners(event) : process.listeners(event);
 
-let tree: Tree;
+/**
+ * 이번 사례의 나무 — beforeEach 가 null 로 되돌린 뒤 깔고, 깔지 못하면 null 로 남는다. afterEach 가 지난 사례의 나무(첫 사례면
+ * undefined)를 읽지 않게 한다. 사례 · 도우미는 currentTree() 로 읽는다.
+ */
+let tree: Tree | null = null;
 let stderr: string[] = [];
 let rejections: unknown[] = [];
 let electronRequesters: Array<string | null> = [];
@@ -85,35 +89,49 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve));
 }
 
-/** 사례 하나의 나무 — desktop/ 는 저장소에서 복사한다. 렌더러 루트 · userData · 스모크 폴더는 아직 없다(runMain · main 이 만든다). */
+/**
+ * 사례 하나의 나무 — desktop/ 는 저장소에서 복사한다. 렌더러 루트 · userData · 스모크 폴더는 아직 없다(runMain · main 이 만든다).
+ * 깔다가 던지면 만든 폴더를 지우고 다시 던진다 — 그 사례의 tree 는 null 로 남으므로 afterEach 는 이 폴더를 모른다.
+ */
 function layTree(): Tree {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'tj-main 배선 ')));
-  const desktop = join(base, 'desktop');
-  const copy = (rel: string) => copyFileSync(join(DESKTOP_SRC, rel), join(desktop, rel));
-  mkdirSync(join(desktop, 'lib'), { recursive: true });
-  mkdirSync(join(desktop, 'smoke'));
-  mkdirSync(join(desktop, 'assets'));
-  copy('main.js');
-  copy('package.json'); // type 필드가 없다 — 저장소에서처럼 main.js 가 CommonJS 로 읽힌다
-  for (const name of readdirSync(join(DESKTOP_SRC, 'lib'))) if (name.endsWith('.cjs')) copy(join('lib', name));
-  for (const name of readdirSync(join(DESKTOP_SRC, 'smoke'))) if (name.endsWith('.cjs')) copy(join('smoke', name));
-  for (const name of readdirSync(join(DESKTOP_SRC, 'assets'))) copy(join('assets', name));
-  const appData = join(base, 'AppData Roaming');
-  mkdirSync(appData);
-  return {
-    base,
-    desktop,
-    main: join(desktop, 'main.js'),
-    devRoot: join(base, 'dist-tray'),
-    resources: join(base, 'resources'),
-    appData,
-    profile: join(base, '스모크 프로필'),
-    outDir: join(base, 'smoke out'),
-  };
+  try {
+    const desktop = join(base, 'desktop');
+    const copy = (rel: string) => copyFileSync(join(DESKTOP_SRC, rel), join(desktop, rel));
+    mkdirSync(join(desktop, 'lib'), { recursive: true });
+    mkdirSync(join(desktop, 'smoke'));
+    mkdirSync(join(desktop, 'assets'));
+    copy('main.js');
+    copy('package.json'); // type 필드가 없다 — 저장소에서처럼 main.js 가 CommonJS 로 읽힌다
+    for (const name of readdirSync(join(DESKTOP_SRC, 'lib'))) if (name.endsWith('.cjs')) copy(join('lib', name));
+    for (const name of readdirSync(join(DESKTOP_SRC, 'smoke'))) if (name.endsWith('.cjs')) copy(join('smoke', name));
+    for (const name of readdirSync(join(DESKTOP_SRC, 'assets'))) copy(join('assets', name));
+    const appData = join(base, 'AppData Roaming');
+    mkdirSync(appData);
+    return {
+      base,
+      desktop,
+      main: join(desktop, 'main.js'),
+      devRoot: join(base, 'dist-tray'),
+      resources: join(base, 'resources'),
+      appData,
+      profile: join(base, '스모크 프로필'),
+      outDir: join(base, 'smoke out'),
+    };
+  } catch (error) {
+    rmSync(base, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+/** 이번 사례의 나무 — beforeEach 가 깐 뒤에만 부른다(깔지 못한 사례는 본문이 돌지 않는다). */
+function currentTree(): Tree {
+  if (tree === null) throw new Error('이번 사례의 나무가 없다 — beforeEach 의 layTree 가 실패했다');
+  return tree;
 }
 
 /** 모드의 렌더러 루트 — main.js 가 고르는 곳(개발 ../dist-tray · 패키지 resources/renderer). 스모크는 개발 나무에서 돈다. */
-const rootOf = (mode: Mode): string => (mode === 'packaged' ? join(tree.resources, 'renderer') : tree.devRoot);
+const rootOf = (mode: Mode): string => (mode === 'packaged' ? join(currentTree().resources, 'renderer') : currentTree().devRoot);
 
 function writeRenderer(root: string, renderer: Renderer): void {
   if (renderer === 'missing') return; // 루트째 없다 — build:tray 를 안 했거나 dist-tray 를 지웠다
@@ -143,14 +161,14 @@ async function runMain(mode: Mode, options: RunOptions = {}): Promise<Fake> {
   const fake = createFakeElectron({
     isPackaged: mode === 'packaged',
     lock: options.lock ?? true,
-    appData: tree.appData,
+    appData: currentTree().appData,
     openExternal: options.openExternal ?? 'reject',
   });
   const smokeArgv =
-    options.smokeArgv ?? (mode === 'smoke' ? formatSmokeArgs({ outDir: tree.outDir, profile: tree.profile, net: false, nonce: NONCE }) : []);
+    options.smokeArgv ?? (mode === 'smoke' ? formatSmokeArgs({ outDir: currentTree().outDir, profile: currentTree().profile, net: false, nonce: NONCE }) : []);
   if (options.devtools !== undefined) process.env.TJ_DEVTOOLS = options.devtools;
   const argv = process.argv;
-  process.argv = [process.execPath, tree.desktop, ...smokeArgv];
+  process.argv = [process.execPath, currentTree().desktop, ...smokeArgv];
   const before = { uncaughtException: new Set(processListeners('uncaughtException')), unhandledRejection: new Set(processListeners('unhandledRejection')) };
   lastFake = fake;
   nodeModule._load = function (request, parent, isMain) {
@@ -159,7 +177,7 @@ async function runMain(mode: Mode, options: RunOptions = {}): Promise<Fake> {
     return fake.electron;
   };
   try {
-    require(tree.main);
+    require(currentTree().main);
   } finally {
     nodeModule._load = realLoad;
     process.argv = argv;
@@ -189,18 +207,20 @@ function windowContents(fake: Fake): FakeContents {
 }
 /** 스모크 결과 — out 폴더에는 result.json 하나만 있다(임시 파일 없음). */
 function readResult(): Record<string, unknown> {
-  expect(readdirSync(tree.outDir)).toStrictEqual([RESULT_FILE]);
-  return JSON.parse(readFileSync(join(tree.outDir, RESULT_FILE), 'utf8')) as Record<string, unknown>;
+  expect(readdirSync(currentTree().outDir)).toStrictEqual([RESULT_FILE]);
+  return JSON.parse(readFileSync(join(currentTree().outDir, RESULT_FILE), 'utf8')) as Record<string, unknown>;
 }
 /** 결과의 versions(smokeOut.cjs 의 SmokeVersions) — 결과 파일마다 이 모양이다. IPC 의 AppInfo 와는 다른 계약이다. */
 const expectedVersions = () => ({ electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node, app: APP_VERSION });
 
 beforeEach(() => {
-  tree = layTree();
+  // 지난 사례의 값부터 비운다 — layTree 가 던져도 afterEach 는 지난 사례의 나무 · 기록을 읽지 않는다(폴더는 layTree 가 치웠다)
+  tree = null;
   stderr = [];
   rejections = [];
   electronRequesters = [];
   cacheBefore = new Set(Object.keys(require.cache));
+  tree = layTree();
   const devtools = process.env.TJ_DEVTOOLS;
   const resourcesPath = proc.resourcesPath;
   const added = Object.entries(ELECTRON_VERSIONS).filter(([key]) => !(key in process.versions));
@@ -230,7 +250,7 @@ afterEach(async () => {
   nodeModule._load = realLoad;
   for (const key of Object.keys(require.cache)) if (!cacheBefore.has(key)) delete require.cache[key];
   restoreProcess();
-  rmSync(tree.base, { recursive: true, force: true });
+  if (tree !== null) rmSync(tree.base, { recursive: true, force: true }); // 깔지 못한 사례의 폴더는 layTree 가 이미 지웠다
   expect(rejections, 'unhandledRejection').toStrictEqual([]);
 });
 
@@ -246,7 +266,7 @@ const MODES: Mode[] = ['dev', 'smoke', 'packaged'];
 describe('최상위(ready 전)', () => {
   /** 모드마다 main 이 고르는 userData — null 은 setPath 를 부르지 않는다(패키지는 Electron 기본값). */
   const chosenUserData = (mode: Mode): string | null =>
-    mode === 'dev' ? join(tree.appData, 'TwelveJanggi-dev') : mode === 'smoke' ? tree.profile : null;
+    mode === 'dev' ? join(currentTree().appData, 'TwelveJanggi-dev') : mode === 'smoke' ? currentTree().profile : null;
 
   it.each(MODES)('%s — userData → enableSandbox → 스킴 특권 → 단일 인스턴스 잠금, 잠금은 고른 userData 에 걸린다', async (mode) => {
     const fake = await runMain(mode);
@@ -275,12 +295,12 @@ describe('최상위(ready 전)', () => {
   });
 
   it('틀린 스모크 인자 — [tj] smoke args 한 줄 + exit(1) 말고는 아무것도 하지 않는다(userData · sandbox · 잠금 · 결과 파일 없음)', async () => {
-    const smokeArgv = ['--tj-smoke', `--tj-smoke-out=${tree.outDir}`];
+    const smokeArgv = ['--tj-smoke', `--tj-smoke-out=${currentTree().outDir}`];
     const fake = await runMain('smoke', { smokeArgv });
     expect(fake.calls.map((call) => [call.name, ...call.args])).toStrictEqual([['app.exit', 1]]);
     expect(stderr).toStrictEqual([`[tj] smoke args: ${parseSmokeArgs(smokeArgv).error}`]);
-    expect(existsSync(tree.outDir)).toBe(false);
-    expect(existsSync(tree.profile)).toBe(false);
+    expect(existsSync(currentTree().outDir)).toBe(false);
+    expect(existsSync(currentTree().profile)).toBe(false);
   });
 
   it('잠금을 못 얻은 스모크 — [tj] lock 한 줄 · 결과(stage lock) · exit(1), ready 를 기다리지 않는다', async () => {
@@ -288,7 +308,7 @@ describe('최상위(ready 전)', () => {
     const lockAt = indexOf(fake.calls, 'app.requestSingleInstanceLock');
     expect(fake.calls.slice(lockAt + 1).map((call) => [call.name, ...call.args])).toStrictEqual([['app.exit', 1]]);
     const result = readResult();
-    expect(result).toStrictEqual({ nonce: NONCE, stage: 'lock', error: expect.stringContaining(tree.profile), checks: [], versions: expectedVersions() });
+    expect(result).toStrictEqual({ nonce: NONCE, stage: 'lock', error: expect.stringContaining(currentTree().profile), checks: [], versions: expectedVersions() });
     expect(stderr).toStrictEqual([`[tj] lock: ${String(result.error)}`]);
   });
 
@@ -297,7 +317,7 @@ describe('최상위(ready 전)', () => {
     const lockAt = indexOf(fake.calls, 'app.requestSingleInstanceLock');
     expect(fake.calls.slice(lockAt + 1).map((call) => call.name)).toStrictEqual(['app.quit']);
     expect(stderr).toStrictEqual([]);
-    expect(existsSync(tree.outDir)).toBe(false);
+    expect(existsSync(currentTree().outDir)).toBe(false);
   });
 });
 
@@ -359,14 +379,14 @@ describe('ready 뒤 — 정상 렌더러', () => {
         show: false,
         title: '십이장기',
         backgroundColor: '#0d1117',
-        webPreferences: { preload: join(tree.desktop, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false },
+        webPreferences: { preload: join(currentTree().desktop, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false },
       },
     ]);
     expect(callsOf(fake, 'win.loadURL').map((call) => call.args)).toStrictEqual([[mode === 'smoke' ? `${ENTRY_URL}?smoke` : ENTRY_URL]]);
     if (mode !== 'smoke') expect(callsOf(fake, 'session.webRequest.onBeforeRequest')).toStrictEqual([]); // hooks 는 비스모크에서 없다
     expect(callsOf(fake, 'app.exit')).toStrictEqual([]);
     expect(callsOf(fake, 'app.quit')).toStrictEqual([]);
-    expect(existsSync(tree.outDir)).toBe(false);
+    expect(existsSync(currentTree().outDir)).toBe(false);
   });
 
   it('세션 처리기는 permissions.cjs 의 판정 그대로다 — 권한(request · check) · 장치 · 다운로드 · 클라이언트 인증서', async () => {
@@ -421,7 +441,7 @@ describe('ready 뒤 — 정상 렌더러', () => {
 
   it('electron 은 main.js 만 require 한다 — 훅이 해석보다 먼저 답해 진짜 패키지는 캐시에 오지 않는다', async () => {
     await runMain('dev');
-    expect(electronRequesters).toStrictEqual([tree.main]);
+    expect(electronRequesters).toStrictEqual([currentTree().main]);
     expect(Object.keys(require.cache).filter((key) => /[\\/]node_modules[\\/]electron[\\/]/.test(key))).toStrictEqual([]);
   });
 });
@@ -474,7 +494,7 @@ describe.each(CAUSES)('fail-closed — $label', ({ renderer, what, where }) => {
     expect(fake.calls.at(-1)?.name).toBe('app.quit');
     expect(indexOf(fake.calls, 'app.quit')).toBeGreaterThan(indexOf(fake.calls, 'dialog.showErrorBox'));
     expect(callsOf(fake, 'app.exit')).toStrictEqual([]);
-    expect(existsSync(tree.outDir)).toBe(false);
+    expect(existsSync(currentTree().outDir)).toBe(false);
   });
 
   it('smoke — [tj] 한 줄 · 결과(stage tray-build, 같은 이유) · exit(1), 오류 상자 없음', async () => {
@@ -582,8 +602,8 @@ describe('허용 목록 주소 — 기본 open 은 shell.openExternal', () => {
   });
 });
 
-/** 스모크 실행기의 수집기 — 창과 loadURL 사이에 트레이 창의 webContents 에 동기로 붙는다(설계 §5.10 '앱 안 실행기'). */
-const COLLECTORS = ['console-message', 'did-fail-load', 'did-fail-provisional-load', 'render-process-gone', 'preload-error', 'unresponsive', 'did-finish-load'];
+/** 스모크 실행기의 수집기 — 창과 loadURL 사이에 트레이 창의 webContents 에 동기로 붙는다(설계 §5.10 '앱 안 실행기'). run.cjs 의 beforeLoad 순서. */
+const COLLECTORS = ['console-message', 'did-fail-load', 'did-fail-provisional-load', 'did-start-navigation', 'did-stop-loading', 'render-process-gone', 'preload-error', 'unresponsive', 'did-finish-load'];
 /** 탐색 가드가 webContents.on 으로 거는 사건 — 비스모크에서는 이것뿐이다. */
 const NAVIGATION_EVENTS = ['will-frame-navigate', 'will-navigate', 'will-redirect', 'will-attach-webview'];
 
@@ -613,15 +633,15 @@ describe('스모크 실행기 연결(smoke/run.cjs) — main 은 스모크에서
     expect(after.filter((call) => call.turn !== 1).map((call) => call.name)).toStrictEqual([]);
     expect(PROCESS_EVENTS.map((event) => added[event].length)).toStrictEqual([1, 1]);
     // 실행기는 electron 을 require 하지 않는다 — Electron 객체는 main 이 넘긴다
-    expect(Object.keys(require.cache)).toContain(join(tree.desktop, 'smoke', 'run.cjs'));
+    expect(Object.keys(require.cache)).toContain(join(currentTree().desktop, 'smoke', 'run.cjs'));
     expect(Object.keys(require.cache).filter((key) => /[\\/]node_modules[\\/]electron[\\/]/.test(key))).toStrictEqual([]);
     expect(stderr).toStrictEqual([]);
-    expect(existsSync(tree.outDir)).toBe(false); // 결과는 검사가 끝나거나 실패할 때만 쓴다
+    expect(existsSync(currentTree().outDir)).toBe(false); // 결과는 검사가 끝나거나 실패할 때만 쓴다
   });
 
   it.each(['dev', 'packaged'] as const)('%s — 꽂지 않는다: run.cjs 를 require 하지 않고, 가드 · tj-smoke-* · 수집기 · will-quit · process 처리기가 없다', async (mode) => {
     const fake = await runMain(mode);
-    expect(Object.keys(require.cache).filter((key) => key.startsWith(join(tree.desktop, 'smoke')))).toStrictEqual([]);
+    expect(Object.keys(require.cache).filter((key) => key.startsWith(join(currentTree().desktop, 'smoke')))).toStrictEqual([]);
     expect(callsOf(fake, 'session.webRequest.onBeforeRequest')).toStrictEqual([]);
     expect(callsOf(fake, 'ipcMain.on')).toStrictEqual([]);
     expect(callsOf(fake, 'webContents.on').map((call) => call.args[0])).toStrictEqual(NAVIGATION_EVENTS);
@@ -696,7 +716,7 @@ describe('스모크 실행기 연결(smoke/run.cjs) — main 은 스모크에서
     failLoad?.({}, -3, 'ERR_ABORTED', 'https://example.invalid/', false, 1, 2);
     failProvisional?.({}, -3, 'ERR_ABORTED', 'https://example.invalid/', true, 1, 1);
     await settle();
-    expect(existsSync(tree.outDir)).toBe(false);
+    expect(existsSync(currentTree().outDir)).toBe(false);
     expect(callsOf(fake, 'app.exit')).toStrictEqual([]);
     expect(stderr).toStrictEqual([]);
   });
@@ -706,7 +726,7 @@ describe('스모크 실행기 연결(smoke/run.cjs) — main 은 스모크에서
     try {
       const fake = await runMain('smoke');
       vi.advanceTimersByTime(59_999);
-      expect(existsSync(tree.outDir)).toBe(false);
+      expect(existsSync(currentTree().outDir)).toBe(false);
       vi.advanceTimersByTime(1);
       expect(readResult()).toStrictEqual({ nonce: NONCE, stage: 'watchdog', error: expect.stringContaining('60'), checks: [], versions: expectedVersions() });
       expect(callsOf(fake, 'app.exit').map((call) => call.args)).toStrictEqual([[1]]);
@@ -723,7 +743,7 @@ describe('스모크 실행기 연결(smoke/run.cjs) — main 은 스모크에서
       expect(quits).toHaveLength(1);
       for (const quit of quits) quit();
       vi.advanceTimersByTime(120_000);
-      expect(existsSync(tree.outDir)).toBe(false);
+      expect(existsSync(currentTree().outDir)).toBe(false);
       expect(callsOf(fake, 'app.exit')).toStrictEqual([]);
     } finally {
       vi.useRealTimers();
