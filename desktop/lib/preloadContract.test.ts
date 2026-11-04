@@ -2,11 +2,12 @@
 // new Function('require', 'process', 'exports', 'module', 'global', 본문) 으로 돌린다. 가짜 require 는 'electron' 만 알고 그 밖은
 // 던진다(45 sandbox 규칙을 기계적으로 지킨다). location · document 는 vi.stubGlobal 로 준다. 진짜 electron 은 import 하지 않는다 —
 // 바이너리를 받거나 MODULE_NOT_FOUND 가 난다.
-// - 비스모크: 브리지 하나(tjDesktop = { getAppInfo }, 얼림)만 노출하고 아무것도 보내거나 듣지 않는다.
+// - 비스모크: 브리지 하나(tjDesktop, 11키, 얼림)만 노출하고 로드 때 아무것도 보내거나 듣지 않는다(#36 T6-5).
 // - 스모크(?smoke): 실효 상태 보고 · 격리 world 표식 · CSP 위반 수집(보내기와 격리 world 버퍼 모두 최대 50건).
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TJ_DESKTOP_KEYS } from '../../src/tray/desktop.ts';
+import { PUSH_CHANNELS } from './pushChannels.cjs';
 
 const SOURCE = readFileSync(new URL('../preload.js', import.meta.url), 'utf8');
 /**
@@ -28,11 +29,13 @@ function runPreload(search: string, state: ProcessState = PROCESS_STATES[0]) {
   const exposeInMainWorld = vi.fn();
   const invoke = vi.fn((..._args: unknown[]) => Promise.resolve('invoke 결과'));
   const send = vi.fn();
+  const on = vi.fn();
+  const removeListener = vi.fn();
   const addEventListener = vi.fn();
   const required: string[] = [];
   const fakeRequire = (name: string) => {
     required.push(name);
-    if (name === 'electron') return { contextBridge: { exposeInMainWorld }, ipcRenderer: { invoke, send } };
+    if (name === 'electron') return { contextBridge: { exposeInMainWorld }, ipcRenderer: { invoke, send, on, removeListener } };
     throw new Error(`sandbox preload 는 ${name} 을 require 할 수 없다`);
   };
   vi.stubGlobal('location', { search });
@@ -40,7 +43,7 @@ function runPreload(search: string, state: ProcessState = PROCESS_STATES[0]) {
   const module = { exports: {} };
   const wrapped = new Function('require', 'process', 'exports', 'module', 'global', SOURCE);
   wrapped(fakeRequire, { ...state, type: 'renderer', platform: 'win32' }, module.exports, module, globalThis);
-  return { exposeInMainWorld, invoke, send, addEventListener, required };
+  return { exposeInMainWorld, invoke, send, on, removeListener, addEventListener, required };
 }
 
 /** exposeInMainWorld 로 노출한 브리지(한 번만 불렸다는 것은 각 시험이 따로 본다). */
@@ -92,7 +95,106 @@ describe.each(['', '?smoke'])('브리지 — location.search %j', (search) => {
   });
 });
 
+type Fn = (...args: unknown[]) => unknown;
+
+describe.each(['', '?smoke'])('보내는 쪽 — location.search %j', (search) => {
+  it("getState() 는 invoke('tj-get-state') 하나다 — 그 약속을 그대로 돌려준다", async () => {
+    const { exposeInMainWorld, invoke } = runPreload(search);
+    await expect((exposedBridge(exposeInMainWorld).getState as Fn)()).resolves.toBe('invoke 결과');
+    expect(invoke.mock.calls).toStrictEqual([['tj-get-state']]);
+  });
+
+  it.each([
+    ['setTheme', 'tj-set-theme', 'light'],
+    ['setOpacity', 'tj-set-opacity', 55],
+    ['setLayout', 'tj-set-layout', 'online'],
+    // 값은 preload 에서 고치지 않는다 — 정규화는 main 한 곳이다.
+    ['setTheme', 'tj-set-theme', 'purple'],
+    ['setOpacity', 'tj-set-opacity', -5],
+  ])('%s(%j) → send(%s, 값 그대로)', (name, channel, value) => {
+    const { exposeInMainWorld, send } = runPreload(search);
+    (exposedBridge(exposeInMainWorld)[name] as Fn)(value);
+    expect(send.mock.calls.filter(([c]) => c === channel)).toStrictEqual([[channel, value]]);
+  });
+
+  it("hide() 는 send('tj-hide') 하나다(값 없음)", () => {
+    const { exposeInMainWorld, send } = runPreload(search);
+    (exposedBridge(exposeInMainWorld).hide as Fn)('무시되는 인자');
+    expect(send.mock.calls.filter(([c]) => c === 'tj-hide')).toStrictEqual([['tj-hide']]);
+  });
+});
+
+const SUBSCRIPTIONS = [
+  ['onTheme', 'tj-theme', ['light']],
+  ['onOpacity', 'tj-opacity', [55]],
+  ['onMode', 'tj-mode', ['online']],
+  ['onShown', 'tj-shown', []],
+  ['onHidden', 'tj-hidden', []],
+] as const;
+
+describe.each(['', '?smoke'])('구독 — location.search %j', (search) => {
+  it.each(SUBSCRIPTIONS)('%s: on(%s) 한 번 · cb 는 payload 만 받고 · 해제는 removeListener 한 번', (name, channel, payload) => {
+    const { exposeInMainWorld, on, removeListener } = runPreload(search);
+    const subscribe = exposedBridge(exposeInMainWorld)[name] as (cb: unknown) => () => void;
+    const other = vi.fn();
+    const cb = vi.fn();
+    subscribe(other);
+    on.mockClear();
+    const unsubscribe = subscribe(cb);
+
+    expect(on).toHaveBeenCalledTimes(1);
+    expect(on.mock.calls[0]?.[0]).toBe(channel);
+    const listener = on.mock.calls[0]?.[1] as Fn;
+    const event = { sender: '이벤트 객체' };
+    listener(event, ...payload);
+    // 이벤트 객체가 페이지로 넘어가지 않는다 — payload 만, 개수 그대로.
+    expect(cb.mock.calls).toStrictEqual([[...payload]]);
+    expect(other).not.toHaveBeenCalled();
+
+    expect(typeof unsubscribe).toBe('function');
+    expect(removeListener).not.toHaveBeenCalled();
+    unsubscribe();
+    expect(removeListener.mock.calls).toStrictEqual([[channel, listener]]);
+  });
+
+  it.each(SUBSCRIPTIONS)('%s: cb 가 함수가 아니면 아무것도 걸지 않고 함수를 돌려준다', (name) => {
+    const { exposeInMainWorld, on, removeListener } = runPreload(search);
+    const subscribe = exposedBridge(exposeInMainWorld)[name] as (cb: unknown) => () => void;
+    for (const bad of [undefined, null, 'x', 3, {}]) {
+      const unsubscribe = subscribe(bad);
+      expect(typeof unsubscribe).toBe('function');
+      unsubscribe();
+    }
+    expect(on).not.toHaveBeenCalled();
+    expect(removeListener).not.toHaveBeenCalled();
+  });
+});
+
+describe('채널 집합', () => {
+  it('구독이 거는 채널 = Object.keys(PUSH_CHANNELS) — 기록된 on() 도 preload 글자도', () => {
+    const { exposeInMainWorld, on } = runPreload('');
+    const bridge = exposedBridge(exposeInMainWorld);
+    for (const [name] of SUBSCRIPTIONS) (bridge[name] as Fn)(() => {});
+    const expected = Object.keys(PUSH_CHANNELS).sort();
+    expect(on.mock.calls.map(([channel]) => channel).sort()).toStrictEqual(expected);
+    const literals = [...SOURCE.matchAll(/subscribe\('(tj-[a-z-]+)'\)/g)].map((m) => m[1]);
+    expect([...new Set(literals)].sort()).toStrictEqual(expected);
+  });
+});
+
 describe('비스모크', () => {
+  // #36 T6-5 — 로드 직후만이 아니라 매크로태스크 하나 뒤에도 보내기 · invoke · 듣기 · 리스너 · 전역 변화가 없다.
+  it.each(['', '?smokey', '?x=smoke', '?nosmoke=1'])('로드 뒤 매크로태스크까지 호출 0 · 전역 차이 없음: %j', async (search) => {
+    // runPreload 가 stubGlobal 로 더하는 location · document 는 미리 두어 차이에서 뺀다.
+    vi.stubGlobal('location', { search });
+    vi.stubGlobal('document', {});
+    const before = Object.keys(globalThis).sort();
+    const { send, invoke, on, removeListener, addEventListener } = runPreload(search);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    for (const fn of [send, invoke, on, removeListener, addEventListener]) expect(fn).not.toHaveBeenCalled();
+    expect(Object.keys(globalThis).sort()).toStrictEqual(before);
+  });
+
   it.each(['', '?smokey', '?x=smoke', '?nosmoke=1'])('보내기 0 · 리스너 0 · 격리 world 전역 없음: %j', (search) => {
     const { send, addEventListener } = runPreload(search);
     expect(send).not.toHaveBeenCalled();
