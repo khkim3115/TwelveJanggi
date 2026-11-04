@@ -182,7 +182,7 @@ describe('connectBridge · requestSnapshot — 먼저 구독하고 그 뒤에만
     expect(page.dataset.theme).toBe('light');
     expect(store.items.get('tj_theme')).toBe('light');
     expect(page.classes.has('tapp-hidden')).toBe(true);
-    expect(rig.calls).toEqual([...SUBSCRIPTIONS, 'getState']);
+    expect(rig.calls).toEqual([...SUBSCRIPTIONS, 'getState', 'setLayout online']); // 모드가 solo → online 으로 바뀌었다
   });
 
   it('응답이 최종값이다 — 묻고 답을 받기 전에 온 push 는 반영되고, 뒤에 온 답이 덮는다', async () => {
@@ -206,6 +206,7 @@ describe('connectBridge · requestSnapshot — 먼저 구독하고 그 뒤에만
     await settle();
     expect(tray.getTrayView()).toEqual({ theme: 'light', opacity: 64, mode: 'online', hidden: false });
     expect(page.dataset.theme).toBe('light');
+    expect(rig.calls).toEqual([...SUBSCRIPTIONS, 'getState', 'setLayout online']);
   });
 
   it('getState 가 거부되면 console.warn 한 번 — 던지지 않고 상태는 그대로', async () => {
@@ -234,17 +235,6 @@ describe('push — main 이 민 값만 반영한다', () => {
     expect(tray.getTrayView().theme).toBe('light');
     expect(page.dataset.theme).toBe('light');
     expect(store.items.get('tj_theme')).toBe('light');
-    expect(rig.calls).toEqual([...SUBSCRIPTIONS, 'getState']);
-  });
-
-  it("onMode → view.mode — 레이아웃 요청(setLayout)은 화면(TrayApp)이 한다", async () => {
-    const { tray, rig } = await connected();
-
-    rig.push.mode('online');
-    expect(tray.getTrayView().mode).toBe('online');
-    rig.push.mode('solo');
-    expect(tray.getTrayView().mode).toBe('solo');
-
     expect(rig.calls).toEqual([...SUBSCRIPTIONS, 'getState']);
   });
 
@@ -283,6 +273,74 @@ describe('push — main 이 민 값만 반영한다', () => {
     rig.push.opacity(40);
     expect(seen).toHaveLength(1);
     expect(tray.getTrayView().opacity).toBe(40);
+  });
+});
+
+describe('레이아웃 중계(R27) — tj-mode 는 받을 때마다, 스냅샷은 모드가 바뀔 때만 view 를 바꾼 뒤 setLayout', () => {
+  /** view 가 바뀔 때마다 호출 기록에 'view <모드>' 를 끼운다 — view 와 setLayout 의 앞뒤를 같은 기록에서 본다. */
+  function recordViewChanges(tray: TrayStateModule, calls: string[]) {
+    tray.subscribeTrayView(() => calls.push(`view ${tray.getTrayView().mode}`));
+  }
+
+  it("onMode('online') → view 를 바꾼 뒤 setLayout('online') 정확히 한 번 · 같은 값이 다시 와도 한 번 더 보낸다", async () => {
+    const { tray, rig } = await connected();
+    recordViewChanges(tray, rig.calls);
+
+    rig.push.mode('online');
+    expect(tray.getTrayView().mode).toBe('online');
+    expect(rig.calls).toEqual([...SUBSCRIPTIONS, 'getState', 'view online', 'setLayout online']);
+
+    rig.push.mode('online'); // view 는 그대로(알림 없음), 레이아웃은 다시 알린다
+    expect(rig.calls).toEqual([...SUBSCRIPTIONS, 'getState', 'view online', 'setLayout online', 'setLayout online']);
+  });
+
+  it("처음 solo 에 스냅샷 mode 'online' → view 를 바꾼 뒤 setLayout('online') 한 번", async () => {
+    const { tray } = await fresh();
+    const rig = fakeBridge(() => Promise.resolve({ ...SNAPSHOT, mode: 'online' }));
+    recordViewChanges(tray, rig.calls);
+    tray.connectBridge(rig.bridge);
+    tray.requestSnapshot(rig.bridge);
+    await settle();
+
+    expect(tray.getTrayView().mode).toBe('online');
+    expect(rig.calls).toEqual([...SUBSCRIPTIONS, 'getState', 'view online', 'setLayout online']);
+  });
+
+  it("스냅샷 'solo'(콜드 스타트 — main 도 solo 레이아웃) → setLayout 을 보내지 않는다", async () => {
+    const { tray, rig } = await connected({ theme: 'light', opacity: 70, mode: 'solo', visible: true });
+
+    expect(tray.getTrayView()).toEqual({ theme: 'light', opacity: 70, mode: 'solo', hidden: false });
+    expect(rig.calls).toEqual([...SUBSCRIPTIONS, 'getState']);
+  });
+
+  it("구독 → getState → onMode('online') → 응답 'online' — setLayout 은 모두 한 번(push 의 것)", async () => {
+    const { tray } = await fresh();
+    let answer: (state: TrayState) => void = () => {
+      throw new Error('getState 를 부르지 않았다');
+    };
+    const rig = fakeBridge(
+      () =>
+        new Promise<TrayState>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    tray.connectBridge(rig.bridge);
+    tray.requestSnapshot(rig.bridge);
+
+    rig.push.mode('online'); // 묻고 답을 받기 전에 메뉴에서 '온라인 대전'
+    answer({ ...SNAPSHOT, mode: 'online' });
+    await settle();
+
+    expect(tray.getTrayView().mode).toBe('online');
+    expect(rig.calls).toEqual([...SUBSCRIPTIONS, 'getState', 'setLayout online']);
+  });
+
+  it("브리지가 없으면 applySnapshot(mode 'online') 은 던지지 않고 화면만 바꾼다", async () => {
+    const { tray } = await fresh();
+    tray.connectBridge(undefined);
+
+    expect(() => tray.applySnapshot({ ...SNAPSHOT, mode: 'online' })).not.toThrow();
+    expect(tray.getTrayView().mode).toBe('online');
   });
 });
 

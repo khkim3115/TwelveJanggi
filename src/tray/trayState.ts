@@ -1,8 +1,11 @@
 // 트레이 화면의 상태(설계 §5.4) — 테마 · 투명도 · 모드 · 숨김을 담는 작은 외부 스토어(useSyncExternalStore).
 // - 값은 main 이 민 것(tj-theme · tj-opacity · tj-mode · tj-shown · tj-hidden)과 스냅샷(getState)으로만 바뀐다. 받은 값은 고치지 않는다
 //   — 정규화는 main 한 곳이다(설계 §5.3).
-// - 브리지 구독은 main.tsx 가 모듈 최상위에서 한 번만 건다(connectBridge). 처음 상태는 구독을 모두 건 뒤에 묻는다(requestSnapshot):
-//   구독보다 먼저 온 send 는 사라지고, 물은 뒤에 일어난 변경은 응답보다 먼저 와서 응답이 최종값이 된다.
+// - 브리지 구독은 main.tsx 가 모듈 최상위에서 한 번만 건다(connectBridge — 다섯뿐이다). 처음 상태는 구독을 모두 건 뒤에 묻는다
+//   (requestSnapshot): 구독보다 먼저 온 send 는 사라지고, 물은 뒤에 일어난 변경은 응답보다 먼저 와서 응답이 최종값이 된다.
+// - 레이아웃 중계(창 크기는 main 이 정한다): tj-mode 를 받으면 view 를 바꾼 뒤 setLayout(mode) 를 보낸다 — 같은 값이어도 받을 때마다.
+//   묻기 전에 건 구독이라 시작 직후 온 모드도 따라간다. 스냅샷은 모드가 그때의 view 와 다를 때만 한 번 보낸다 — 콜드 스타트
+//   (solo → solo)는 main 도 solo 레이아웃이라 보내지 않는다(시작 때 placeNow 가 한 번 더 돌지 않게).
 // - ☀️ · 슬라이더의 처리 함수(requestThemeToggle · requestOpacity)도 여기 있다 — main 에 청하기만 하고 미리 바꾸지 않는다(토글 흐름은
 //   하나). 브리지가 없으면(브라우저 개발 /tray.html) 아무것도 하지 않는다.
 // - 받은 테마는 <html data-theme> 과 저장값(tj_theme)에 반영한다(src/lib/theme.ts). 숨김은 <html> 의 tapp-hidden 이다 — 대화상자가
@@ -66,7 +69,10 @@ export function useTrayView(): TrayView {
   return useSyncExternalStore(subscribeTrayView, getTrayView);
 }
 
-/** 브리지에 붙는다 — 구독 다섯(테마 · 투명도 · 모드 · 보임 · 숨김)만 건다. 묻기는 requestSnapshot 이 따로 한다. 브리지가 없으면 아무것도 하지 않는다. */
+/**
+ * 브리지에 붙는다 — 구독 다섯(테마 · 투명도 · 모드 · 보임 · 숨김)만 건다. 묻기는 requestSnapshot 이 따로 한다. 모드 구독은 레이아웃도
+ * 중계한다(view 를 바꾼 뒤 setLayout — 같은 값이어도 보낸다). 브리지가 없으면 아무것도 하지 않는다.
+ */
 export function connectBridge(bridge: TjDesktop | undefined): void {
   connected = bridge;
   if (bridge === undefined) return;
@@ -75,7 +81,10 @@ export function connectBridge(bridge: TjDesktop | undefined): void {
     update({ theme });
   });
   bridge.onOpacity((percent) => update({ opacity: percent }));
-  bridge.onMode((mode) => update({ mode }));
+  bridge.onMode((mode) => {
+    update({ mode });
+    bridge.setLayout(mode);
+  });
   // tj-shown · tj-hidden 은 값 없이 온다.
   bridge.onShown(() => {
     paintHidden(false);
@@ -92,11 +101,16 @@ export function requestSnapshot(bridge: TjDesktop | undefined): void {
   bridge?.getState().then(applySnapshot, (err: unknown) => console.warn('[tray] getState', err));
 }
 
-/** main 메모리의 스냅샷을 그대로 반영한다(최종값). 테마는 페이지에도, visible false 면 숨김 클래스도. */
+/**
+ * main 메모리의 스냅샷을 그대로 반영한다(최종값). 테마는 페이지에도, visible false 면 숨김 클래스도. 모드가 그때의 view 와 다를 때만
+ * view 를 바꾼 뒤 그 레이아웃을 한 번 알린다(콜드 스타트 solo → solo 는 보내지 않는다). 브리지가 없으면 보내지 않는다.
+ */
 export function applySnapshot(s: TrayState): void {
+  const modeChanged = s.mode !== view.mode;
   paintTheme(s.theme);
   paintHidden(!s.visible);
   update({ theme: s.theme, opacity: s.opacity, mode: s.mode, hidden: !s.visible });
+  if (modeChanged) connected?.setLayout(s.mode);
 }
 
 /** ☀️/🌙 — 지금 테마의 반대를 청한다. 반영은 tj-theme 를 받을 때다. */

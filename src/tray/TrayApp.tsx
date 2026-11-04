@@ -14,7 +14,8 @@ const OPACITY_MAX = 100;
 
 /**
  * 트레이 앱 창의 화면 — 제목 줄(이름 · 앱 버전 · 🔅 투명도 · ☀️/🌙 테마 · ✕ 숨기기), 🔅 로 펼치는 투명도 덮개, 모드 자리표시 문구.
- * 상태와 처리 함수는 trayState 에 있다 — 이 컴포넌트는 붙이기만 한다. 테마 · 투명도는 main 이 민 값으로만 바뀐다(미리 바꾸지 않는다).
+ * 상태와 처리 함수는 trayState 에 있다 — 이 컴포넌트는 붙이기만 한다(브리지 구독 · tj-mode 의 레이아웃 중계도 trayState 가 한다).
+ * 테마 · 투명도는 main 이 민 값으로만 바뀐다(미리 바꾸지 않는다).
  * 버전은 브리지에서 받는다. 브리지가 없으면(브라우저 개발) 버전은 그리지 않고, 브리지를 쓰는 단추(☀️ · 슬라이더 · ✕)는 아무것도 하지 않는다.
  */
 export function TrayApp() {
@@ -36,13 +37,6 @@ export function TrayApp() {
     return () => {
       alive = false;
     };
-  }, []);
-
-  // tj-mode 를 받으면 그 모드의 레이아웃을 main 에 알린다(창 크기는 main 이 정한다). 화면 전환은 trayState 의 구독이 한다.
-  // 처음 모드(스냅샷)로는 보내지 않는다 — 콜드 스타트는 main 도 solo 레이아웃이다. 해제 함수가 effect 의 정리다.
-  useEffect(() => {
-    const bridge = desktop();
-    return bridge?.onMode((mode) => bridge.setLayout(mode));
   }, []);
 
   const toLight = view.theme === 'dark';
