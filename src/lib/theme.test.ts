@@ -43,9 +43,9 @@ describe('상수', () => {
 
 describe('readStoredTheme', () => {
   it('저장값을 읽고 틀리면 dark', () => {
-    vi.stubGlobal('localStorage', { getItem: () => 'light' });
+    vi.stubGlobal('localStorage', { getItem: (k: string) => (k === 'tj_theme' ? 'light' : null) });
     expect(readStoredTheme()).toBe('light');
-    vi.stubGlobal('localStorage', { getItem: () => 'x' });
+    vi.stubGlobal('localStorage', { getItem: (k: string) => (k === 'tj_theme' ? 'x' : 'light') });
     expect(readStoredTheme()).toBe('dark');
     vi.stubGlobal('localStorage', { getItem: () => null });
     expect(readStoredTheme()).toBe('dark');
