@@ -1,5 +1,5 @@
 // desktop/main.js 소스 시험(설계 §5.5 · §5.7). 소스를 글자로 읽어, 실행하지 않는 갈래까지 포함한 파일 전체에 대한 배선 규칙을 본다 —
-// IPC 등록 창구 · 최상위 호출 순서 · 스킴 특권 · webPreferences 공장 · 애플리케이션 메뉴 · DevTools 조건.
+// IPC 등록 창구 · 최상위 호출 순서 · 스킴 특권 · webPreferences 공장 · 애플리케이션 메뉴 · AUMID 상수 · DevTools 조건.
 // 글자로는 조건 · 콜백 · 계산된 키를 보지 못한다. 실제 실행 순서 · 조건 · fail-closed 는 mainWiring.test.ts 가 가짜 electron 위에서
 // main.js 를 돌려 본다.
 // 주석을 지운 소스만 본다: 설명 글에 적힌 호출이 규칙에 걸리거나 빠진 호출을 대신 채우지 않게. electron 은 import 하지 않는다.
@@ -99,6 +99,11 @@ describe('main.js', () => {
 
   it('애플리케이션 메뉴를 없앤다', () => {
     expect(SOURCE).toContain('Menu.setApplicationMenu(null)');
+  });
+
+  it('AUMID 는 자동 실행 이름 상수(AUTOSTART_NAME)로만 쓴다 — 그 값의 글자를 main.js 에 다시 적지 않는다(두 벌이 어긋나지 않게)', () => {
+    expect(SOURCE).toContain('app.setAppUserModelId(AUTOSTART_NAME)');
+    expect(SOURCE).not.toContain('com.khkim.twelvejanggi');
   });
 
   it('openDevTools 는 같은 줄이나 바로 위 줄(빈 줄 건너뜀)의 개발 · TJ_DEVTOOLS 조건 아래에서만 부른다', () => {

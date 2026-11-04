@@ -2,6 +2,10 @@
 // - electron 은 import · require 하지 않는다(import type 포함) — 루트 검사(typecheck · test)는 desktop/node_modules 없이 돈다.
 //   main.js 가 electron 을 require 하면 시험의 Module._load 훅이 이 객체를 돌려준다(mainWiring.test.ts 의 runMain).
 // - 이름이 *.test.ts 가 아니어서 vitest 가 시험으로 모으지 않는다.
+// - 호출은 모두 기록(calls)에 남는다 — 게터까지, ready · turn 과 함께. 처리기 · 리스너는 시험이 기록에서 꺼내 직접 부른다.
+// - 창 · screen 은 Electron 처럼 상태를 갖고 사건을 낸다: show() · hide() 는 보임이 바뀔 때 'show' · 'hide' 를 내고, 파괴한 창은 멤버마다
+//   던진다. 포커스 사건(blur)은 시험이 emit 으로 내거나 손잡이(handles.blurOnHide)가 낸다 — OS 의 포커스 규칙(전경 잠금 등)은 사례가 정한다.
+// - 디스플레이 · 아이콘 자리 · 손잡이(handles)는 사례가 정하고, 가짜가 부를 때마다 읽으므로 실행 도중에 바꿔도 된다.
 import { existsSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 
@@ -18,28 +22,111 @@ export const OPEN_ERROR = '브라우저를 띄우지 못했다';
  */
 export type Call = { name: string; args: unknown[]; ready: boolean; turn: 0 | 1 | 2 };
 export type Fn = (...args: unknown[]) => unknown;
+/** 가짜가 흉내 내는 플랫폼 갈래 — process.platform 값이다(runMain 이 둘을 같은 값으로 정한다). */
+export type FakePlatform = 'win32' | 'darwin' | 'linux';
+/** Electron 의 Rectangle · Point 와 같은 모양. */
+export type Rect = { x: number; y: number; width: number; height: number };
+export type Point = { x: number; y: number };
+/** Electron 의 Display 중 main 이 쓰는 부분. bounds 는 디스플레이 전체, workArea 는 작업표시줄 · 메뉴 막대를 뺀 영역이다. */
+export type FakeDisplay = { id: number; bounds: Rect; workArea: Rect; scaleFactor: number };
 export type FakeContents = {
   mainFrame: { detached: boolean; url: string; origin: string };
   on(event: string, listener: Fn): void;
   setWindowOpenHandler(handler: Fn): void;
   openDevTools(options: unknown): void;
+  send(channel: string, ...args: unknown[]): void;
+  isDevToolsOpened(): boolean;
+  setBackgroundThrottling(allowed: boolean): void;
+  getBackgroundThrottling(): boolean;
+};
+/** 가짜 BrowserWindow — main 이 new 로 만든다(fake.windows 에 쌓인다). */
+export type FakeWindow = {
+  readonly webContents: FakeContents;
+  once(event: string, listener: Fn): void;
+  on(event: string, listener: Fn): void;
+  emit(event: string, ...args: unknown[]): boolean;
+  isDestroyed(): boolean;
+  destroy(): void;
+  loadURL(url: string): Promise<void>;
+  show(): void;
+  hide(): void;
+  focus(): void;
+  isFocused(): boolean;
+  isVisible(): boolean;
+  getBounds(): Rect;
+  setBounds(bounds: Partial<Rect>): void;
+  setContentSize(width: number, height: number): void;
+  setOpacity(opacity: number): void;
+  setBackgroundColor(color: string): void;
+  setAlwaysOnTop(flag: boolean, level?: string): void;
 };
 export type FakeImage = { isEmpty(): boolean; resize(size: unknown): FakeImage };
-export type FakeOptions = { isPackaged: boolean; lock: boolean; appData: string; openExternal: 'resolve' | 'reject' };
+/** 사례가 실행 도중에도 바꾸는 손잡이 — 가짜가 부를 때마다 읽는다. */
+export type FakeHandles = {
+  /**
+   * hide() 안에서, 창의 보임을 끄기 전에 blur 를 동기로 낸다 — Windows 가 활성 창을 숨길 때처럼 리스너가 도는 동안 isVisible() 가
+   * 아직 true 다. 그때의 isVisible() 값을 'handle.blurOnHide' 로 기록한다(시험의 양성 대조). 기본은 끔.
+   */
+  blurOnHide: boolean;
+  /** setBounds() 안에서 move · moved 를 동기로 낸다 — macOS 의 moved 는 move 의 별칭이다. darwin 갈래의 기본값은 켬. */
+  moveOnSetBounds: boolean;
+  /** Tray.getBounds() 가 돌려주는 아이콘 자리. */
+  trayBounds: Rect;
+};
+export type FakeOptions = {
+  isPackaged: boolean;
+  lock: boolean;
+  appData: string;
+  openExternal: 'resolve' | 'reject';
+  platform: FakePlatform;
+  /** 붙어 있는 디스플레이(앞이 주 디스플레이) — 없으면 DEFAULT_DISPLAYS. 가짜는 사본을 쓴다. */
+  displays?: readonly FakeDisplay[];
+  /** 아이콘 자리 — 없으면 DEFAULT_TRAY_BOUNDS. */
+  trayBounds?: Rect;
+  /** 이 이름의 호출은 기록한 뒤 error 를 던진다 — onReady 안에서 던지는 사례(whenReady 실패)를 만든다. */
+  throwOn?: { name: string; error: unknown };
+};
+
+/** 디스플레이를 정하지 않은 사례의 화면 — 1920×1080 하나, 작업표시줄(높이 40)은 아래. */
+export const DEFAULT_DISPLAYS: readonly FakeDisplay[] = Object.freeze([
+  { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 }, workArea: { x: 0, y: 0, width: 1920, height: 1040 }, scaleFactor: 1 },
+]);
+/** 아이콘 자리를 정하지 않은 사례 — 기본 화면의 작업표시줄 오른쪽. */
+export const DEFAULT_TRAY_BOUNDS: Readonly<Rect> = Object.freeze({ x: 1800, y: 1040, width: 24, height: 40 });
 
 /** calls 가운데 name(첫 인자 key) 호출의 처리기(둘째 인자) — app.on('web-contents-created', fn) 의 fn 같은 것. */
 export function listenersOf(calls: readonly Call[], name: string, key: string): Fn[] {
   return calls.filter((call) => call.name === name && call.args[0] === key).map((call) => call.args[1] as Fn);
 }
 
+/** 두 사각형이 겹치는 넓이 — 겹치지 않거나 변만 닿으면 0. */
+function overlapArea(a: Rect, b: Rect): number {
+  const width = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+  const height = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+  return width > 0 && height > 0 ? width * height : 0;
+}
+
+/** 점에서 사각형까지의 맨해튼 거리 — 사각형 안(변 포함)이면 0. */
+function distanceTo(rect: Rect, point: Point): number {
+  const dx = Math.max(rect.x - point.x, 0, point.x - (rect.x + rect.width));
+  const dy = Math.max(rect.y - point.y, 0, point.y - (rect.y + rect.height));
+  return dx + dy;
+}
+
 /**
  * 기록하는 가짜 electron — main.js 가 쓰는 멤버만 있다. 처리기 · 리스너는 기록에 남고 시험이 직접 부른다.
  * Electron 과 같게 한 것: setPath 는 없는 폴더면 던진다 · enableSandbox 와 registerSchemesAsPrivileged 는 ready 뒤면 던진다 ·
- * BrowserWindow 는 만들면서 'web-contents-created' 를 부른다. ipcMain 은 어느 멤버를 불러도(계산된 키 · 구조 분해 포함) 기록된다.
+ * screen 은 ready 전이면 던진다 · app.dock 은 darwin 에만 있다 · BrowserWindow 는 만들면서 'web-contents-created' 를 부르고, 위치를
+ * 주지 않으면 주 디스플레이 작업영역 가운데에 놓인다 · 파괴한 창은 창 · webContents 의 멤버마다 TypeError('Object has been destroyed')
+ * 를 던진다(isDestroyed 만 답한다). ipcMain 은 어느 멤버를 불러도(계산된 키 · 구조 분해 포함) 기록된다. app 의 속성 쓰기는
+ * 'app.set' 으로 기록하고 값은 그대로 둔다(쓴 값이 그대로 남는다 — 동일성).
  */
-export function createFakeElectron({ isPackaged, lock, appData, openExternal }: FakeOptions) {
+export function createFakeElectron({ isPackaged, lock, appData, openExternal, platform, displays: shownDisplays = DEFAULT_DISPLAYS, trayBounds = DEFAULT_TRAY_BOUNDS, throwOn }: FakeOptions) {
   const calls: Call[] = [];
-  const windows: Array<{ webContents: FakeContents }> = [];
+  const windows: FakeWindow[] = [];
+  /** 지금 붙어 있는 디스플레이 — 앞이 주 디스플레이다. removeDisplay 가 줄인다. */
+  const displays: FakeDisplay[] = structuredClone([...shownDisplays]);
+  const handles: FakeHandles = { blurOnHide: false, moveOnSetBounds: platform === 'darwin', trayBounds: { ...trayBounds } };
   let ready = false;
   let turn: Call['turn'] = 0;
   let userData: string | null = null;
@@ -51,71 +138,290 @@ export function createFakeElectron({ isPackaged, lock, appData, openExternal }: 
       });
     }
     calls.push({ name, args, ready, turn });
+    if (throwOn !== undefined && name === throwOn.name) throw throwOn.error;
   };
 
-  const app = {
-    get isPackaged(): boolean {
-      return isPackaged;
+  const dock = { hide: () => rec('app.dock.hide') };
+  const app = new Proxy(
+    {
+      get isPackaged(): boolean {
+        return isPackaged;
+      },
+      getPath(name: string): string {
+        rec('app.getPath', name);
+        if (name === 'appData') return appData;
+        if (name === 'userData') return userData ?? join(appData, 'TwelveJanggi');
+        throw new Error(`가짜 getPath 가 모르는 이름이다: ${name}`);
+      },
+      setPath(name: string, value: string): void {
+        rec('app.setPath', name, value);
+        if (!isAbsolute(value) || !existsSync(value)) throw new Error(`setPath: 없는 폴더다 (${value})`);
+        if (name === 'userData') userData = value;
+      },
+      enableSandbox(): void {
+        rec('app.enableSandbox');
+        if (ready) throw new Error('enableSandbox 는 ready 전에만 부를 수 있다');
+      },
+      /** 잠금은 지금의 userData 에 걸린다 — 기록의 인자가 그 값이다(null 은 Electron 기본값). */
+      requestSingleInstanceLock(): boolean {
+        rec('app.requestSingleInstanceLock', userData);
+        return lock;
+      },
+      whenReady(): Promise<void> {
+        rec('app.whenReady');
+        return Promise.resolve().then(() => {
+          ready = true;
+        });
+      },
+      on: (event: string, listener: Fn) => rec('app.on', event, listener),
+      exit: (code: number) => rec('app.exit', code),
+      quit: () => rec('app.quit'),
+      setAppUserModelId: (id: string) => rec('app.setAppUserModelId', id),
+      getVersion: () => APP_VERSION,
+      /** macOS 에만 있다 — 그 밖의 갈래는 undefined 다(Electron 과 같다). */
+      get dock(): typeof dock | undefined {
+        rec('app.dock');
+        return platform === 'darwin' ? dock : undefined;
+      },
+      focus: (...args: [options?: unknown]) => rec('app.focus', ...args),
     },
-    getPath(name: string): string {
-      rec('app.getPath', name);
-      if (name === 'appData') return appData;
-      if (name === 'userData') return userData ?? join(appData, 'TwelveJanggi');
-      throw new Error(`가짜 getPath 가 모르는 이름이다: ${name}`);
+    {
+      set(target, key, value): boolean {
+        rec('app.set', key, value);
+        return Reflect.set(target, key, value);
+      },
     },
-    setPath(name: string, value: string): void {
-      rec('app.setPath', name, value);
-      if (!isAbsolute(value) || !existsSync(value)) throw new Error(`setPath: 없는 폴더다 (${value})`);
-      if (name === 'userData') userData = value;
-    },
-    enableSandbox(): void {
-      rec('app.enableSandbox');
-      if (ready) throw new Error('enableSandbox 는 ready 전에만 부를 수 있다');
-    },
-    /** 잠금은 지금의 userData 에 걸린다 — 기록의 인자가 그 값이다(null 은 Electron 기본값). */
-    requestSingleInstanceLock(): boolean {
-      rec('app.requestSingleInstanceLock', userData);
-      return lock;
-    },
-    whenReady(): Promise<void> {
-      rec('app.whenReady');
-      return Promise.resolve().then(() => {
-        ready = true;
-      });
-    },
-    on: (event: string, listener: Fn) => rec('app.on', event, listener),
-    exit: (code: number) => rec('app.exit', code),
-    quit: () => rec('app.quit'),
-    setAppUserModelId: (id: string) => rec('app.setAppUserModelId', id),
-    getVersion: () => APP_VERSION,
+  );
+
+  /** 주 디스플레이 — 목록의 첫 디스플레이다. */
+  const primary = (): FakeDisplay => {
+    const [first] = displays;
+    if (first === undefined) throw new Error('가짜에 붙어 있는 디스플레이가 없다');
+    return first;
   };
-  class BrowserWindow {
+  /** 점을 품은 디스플레이, 없으면 bounds 까지 가장 가까운 것(같으면 앞의 것). */
+  const nearestTo = (point: Point): FakeDisplay =>
+    displays.reduce((best, display) => (distanceTo(display.bounds, point) < distanceTo(best.bounds, point) ? display : best), primary());
+  /** 가장 많이 겹치는 디스플레이(같으면 앞의 것), 겹침이 없으면 사각형 가운데에서 가장 가까운 것 — Electron 의 getDisplayMatching 규칙. */
+  const matching = (rect: Rect): FakeDisplay => {
+    let best: FakeDisplay | null = null;
+    let bestArea = 0;
+    for (const display of displays) {
+      const area = overlapArea(display.bounds, rect);
+      if (area > bestArea) {
+        best = display;
+        bestArea = area;
+      }
+    }
+    return best ?? nearestTo({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 });
+  };
+  const screenListeners = new Map<string, Fn[]>();
+  /** screen 의 멤버를 기록한다 — Electron 처럼 ready 전에는 쓸 수 없다. */
+  const useScreen = (member: string, ...args: unknown[]): void => {
+    rec(`screen.${member}`, ...args);
+    if (!ready) throw new Error(`screen.${member} 는 ready 전에 쓸 수 없다`);
+  };
+  /** Electron 처럼 부를 때마다 새 Display 객체를 돌려준다(main 이 고쳐도 가짜의 목록은 그대로다). */
+  const screen = {
+    getPrimaryDisplay: (): FakeDisplay => {
+      useScreen('getPrimaryDisplay');
+      return structuredClone(primary());
+    },
+    getDisplayMatching: (rect: Rect): FakeDisplay => {
+      useScreen('getDisplayMatching', rect);
+      return structuredClone(matching(rect));
+    },
+    getDisplayNearestPoint: (point: Point): FakeDisplay => {
+      useScreen('getDisplayNearestPoint', point);
+      return structuredClone(nearestTo(point));
+    },
+    on: (event: string, listener: Fn): void => {
+      useScreen('on', event, listener);
+      screenListeners.set(event, [...(screenListeners.get(event) ?? []), listener]);
+    },
+    /** 사건을 낸다(시험이 부른다) — Electron 의 인자 모양 그대로 넘긴다: (event, display[, changedMetrics]). */
+    emit: (event: string, ...args: unknown[]): boolean => {
+      rec('screen.emit', event, ...args);
+      const listeners = screenListeners.get(event) ?? [];
+      for (const listener of listeners) listener(...args);
+      return listeners.length > 0;
+    },
+  };
+  /** 디스플레이 하나를 떼고(목록에서 뺀다) Electron 처럼 'display-removed'(event, 뗀 디스플레이)를 낸다. */
+  function removeDisplay(id: number): void {
+    const at = displays.findIndex((display) => display.id === id);
+    if (at === -1) throw new Error(`붙어 있지 않은 디스플레이다: ${id}`);
+    const [removed] = displays.splice(at, 1);
+    screen.emit('display-removed', {}, structuredClone(removed));
+  }
+
+  type WindowOptions = { x?: number; y?: number; width?: number; height?: number; show?: boolean };
+  class BrowserWindow implements FakeWindow {
+    readonly #listeners = new Map<string, Array<{ listener: Fn; once: boolean }>>();
+    #destroyed = false;
+    #visible: boolean;
+    #focused = false;
+    #bounds: Rect;
+    #devToolsOpened = false;
+    #backgroundThrottling = true;
+    /** hide() 가 blur 를 내는 중이다 — 그 리스너가 다시 hide() 를 불러도 blur 를 또 내지 않는다. */
+    #blurringInHide = false;
+
     readonly webContents: FakeContents = {
       mainFrame: { detached: false, url: ENTRY_URL, origin: 'app://twelvejanggi' },
-      on: (event, listener) => rec('webContents.on', event, listener),
-      setWindowOpenHandler: (handler) => rec('webContents.setWindowOpenHandler', handler),
-      openDevTools: (options) => rec('webContents.openDevTools', options),
+      on: (event, listener) => this.#use('webContents.on', event, listener),
+      setWindowOpenHandler: (handler) => this.#use('webContents.setWindowOpenHandler', handler),
+      openDevTools: (options) => {
+        this.#use('webContents.openDevTools', options);
+        this.#devToolsOpened = true;
+      },
+      send: (channel, ...args) => this.#use('webContents.send', channel, ...args),
+      isDevToolsOpened: () => {
+        this.#use('webContents.isDevToolsOpened');
+        return this.#devToolsOpened;
+      },
+      setBackgroundThrottling: (allowed) => {
+        this.#use('webContents.setBackgroundThrottling', allowed);
+        this.#backgroundThrottling = allowed;
+      },
+      getBackgroundThrottling: () => {
+        this.#use('webContents.getBackgroundThrottling');
+        return this.#backgroundThrottling;
+      },
     };
-    readonly once = (event: string, listener: Fn) => rec('win.once', event, listener);
-    readonly on = (event: string, listener: Fn) => rec('win.on', event, listener);
-    readonly isDestroyed = () => false;
-    constructor(options: unknown) {
+
+    constructor(options: WindowOptions) {
       rec('new BrowserWindow', options);
+      const width = options.width ?? 800;
+      const height = options.height ?? 600;
+      const area = primary().workArea;
+      this.#bounds = {
+        x: options.x ?? Math.round(area.x + (area.width - width) / 2),
+        y: options.y ?? Math.round(area.y + (area.height - height) / 2),
+        width,
+        height,
+      };
+      this.#visible = options.show !== false;
       windows.push(this);
       // Electron 처럼 webContents 를 만들면서 'web-contents-created' 를 부른다 — main 의 탐색 가드가 여기서 걸린다.
       for (const listener of listenersOf(calls, 'app.on', 'web-contents-created')) listener({}, this.webContents);
     }
-    loadURL(url: string): Promise<void> {
-      rec('win.loadURL', url);
+
+    readonly once = (event: string, listener: Fn): void => {
+      this.#use('win.once', event, listener);
+      this.#listen(event, listener, true);
+    };
+    readonly on = (event: string, listener: Fn): void => {
+      this.#use('win.on', event, listener);
+      this.#listen(event, listener, false);
+    };
+    /** 사건을 낸다(시험이 부른다) — 상태는 바꾸지 않는다(Electron 의 emit 과 같다). OS 가 숨긴 것은 hide() 로 흉내 낸다. */
+    readonly emit = (event: string, ...args: unknown[]): boolean => {
+      this.#alive();
+      return this.#emit(event, ...args);
+    };
+    readonly isDestroyed = (): boolean => this.#destroyed;
+    readonly destroy = (): void => {
+      this.#use('win.destroy');
+      this.#destroyed = true;
+    };
+    readonly loadURL = (url: string): Promise<void> => {
+      this.#use('win.loadURL', url);
       return Promise.resolve();
+    };
+    readonly show = (): void => {
+      this.#use('win.show');
+      if (this.#visible) return;
+      this.#visible = true;
+      this.#emit('show', {});
+    };
+    readonly hide = (): void => {
+      this.#use('win.hide');
+      if (!this.#visible) return;
+      if (handles.blurOnHide && !this.#blurringInHide) {
+        this.#blurringInHide = true;
+        try {
+          this.#focused = false; // blur 리스너 안의 isFocused() 는 false 다(Electron)
+          rec('handle.blurOnHide', this.#visible); // 낸 때의 isVisible() — 보임은 아직 켜져 있다
+          this.#emit('blur', {});
+        } finally {
+          this.#blurringInHide = false;
+        }
+        if (!this.#visible) return; // blur 리스너가 이 안에서 이미 숨겼다('hide' 도 그때 냈다)
+      }
+      this.#visible = false;
+      this.#focused = false;
+      this.#emit('hide', {});
+    };
+    readonly focus = (): void => {
+      this.#use('win.focus');
+      this.#focused = true;
+    };
+    readonly isFocused = (): boolean => {
+      this.#use('win.isFocused');
+      return this.#focused;
+    };
+    readonly isVisible = (): boolean => {
+      this.#use('win.isVisible');
+      return this.#visible;
+    };
+    readonly getBounds = (): Rect => {
+      this.#use('win.getBounds');
+      return { ...this.#bounds };
+    };
+    /** 주지 않은 값은 지금 값 그대로다(Electron). 손잡이가 켜져 있으면(darwin 기본) 그 안에서 move · moved 를 낸다. */
+    readonly setBounds = (bounds: Partial<Rect>): void => {
+      this.#use('win.setBounds', bounds);
+      this.#bounds = { ...this.#bounds, ...bounds };
+      if (handles.moveOnSetBounds) {
+        this.#emit('move', {});
+        this.#emit('moved', {});
+      }
+    };
+    /** 프레임 없는 창이라 콘텐츠 크기가 창 크기다. */
+    readonly setContentSize = (width: number, height: number): void => {
+      this.#use('win.setContentSize', width, height);
+      this.#bounds = { ...this.#bounds, width, height };
+    };
+    readonly setOpacity = (opacity: number): void => this.#use('win.setOpacity', opacity);
+    readonly setBackgroundColor = (color: string): void => this.#use('win.setBackgroundColor', color);
+    readonly setAlwaysOnTop = (...args: [flag: boolean, level?: string]): void => this.#use('win.setAlwaysOnTop', ...args);
+
+    /** 파괴한 창의 멤버는 Electron 처럼 던진다(기록하지 않는다). */
+    #alive(): void {
+      if (this.#destroyed) throw new TypeError('Object has been destroyed');
+    }
+    /** 창 · webContents 멤버 하나를 쓴다 — 살아 있으면 기록한다. */
+    #use(name: string, ...args: unknown[]): void {
+      this.#alive();
+      rec(name, ...args);
+    }
+    #listen(event: string, listener: Fn, once: boolean): void {
+      this.#listeners.set(event, [...(this.#listeners.get(event) ?? []), { listener, once }]);
+    }
+    /** 'win.emit' 으로 기록하고 리스너를 등록 순서대로 부른다 — once 는 부르기 전에 뗀다(Node 의 EventEmitter 와 같다). */
+    #emit(event: string, ...args: unknown[]): boolean {
+      rec('win.emit', event, ...args);
+      const entries = this.#listeners.get(event) ?? [];
+      this.#listeners.set(
+        event,
+        entries.filter((entry) => !entry.once),
+      );
+      for (const { listener } of entries) listener(...args);
+      return entries.length > 0;
     }
   }
   class Tray {
     readonly setToolTip = (text: string) => rec('tray.setToolTip', text);
     readonly setContextMenu = (menu: unknown) => rec('tray.setContextMenu', menu);
     readonly on = (event: string, listener: Fn) => rec('tray.on', event, listener);
+    readonly getBounds = (): Rect => {
+      rec('tray.getBounds');
+      return { ...handles.trayBounds };
+    };
+    /** 받은 이미지 객체를 그대로 기록한다 — 스모크에 넘긴 아이콘이 붙인 것과 같은 객체인지 본다. */
     constructor(image: FakeImage) {
-      rec('new Tray', { empty: image.isEmpty() });
+      rec('new Tray', image);
     }
   }
   const nativeImage = {
@@ -158,6 +464,15 @@ export function createFakeElectron({ isPackaged, lock, appData, openExternal }: 
   };
   /** main 은 스모크 실행기에 넘기기만 한다 — 배선 시험에서는 아무도 부르지 않는다. */
   const net = {};
-  return { electron: { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, net, protocol, session, shell }, calls, windows };
+  return {
+    electron: { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, net, protocol, screen, session, shell },
+    calls,
+    windows,
+    /** 기록기 — 시험 장치(mainWiring 의 hooks 엿보기)도 같은 기록에 남긴다. */
+    rec,
+    handles,
+    displays,
+    removeDisplay,
+  };
 }
 export type Fake = ReturnType<typeof createFakeElectron>;

@@ -93,7 +93,8 @@ const SCREENSHOT_FILE = 'screenshot.png';
 /**
  * main 이 hooks 에 꽂는 것과 fail.
  * @typedef {object} SmokeRun
- * @property {(entry: DecisionRecord) => void} record 권한 · 탐색 결정 기록(main 의 hooks.record)
+ * @property {(entry: MainRecord) => void} record main 의 기록(hooks.record) — 권한 · 탐색 결정만 facts.decisions 에 쌓고, 창 · 전달 ·
+ *   로그인 항목 기록은 버린다
  * @property {(href: string) => void} open 허용 목록 주소를 열지 않고 기록한다(main 의 hooks.open)
  * @property {(details: { url: unknown, method?: unknown }, callback: (response: { cancel?: boolean }) => void) => void} networkGuard
  *   기본 세션의 onBeforeRequest — http · https · ws · wss 는 기록하고, 원격 요청 계획이 통과시키는 것(--net 의 두 요청) 말고는 취소한다
@@ -102,7 +103,7 @@ const SCREENSHOT_FILE = 'screenshot.png';
  * @property {(tray: import('electron').Tray, menu: import('electron').Menu) => void} setTray 붙은 트레이 메뉴를 받는다
  * @property {(stage: string, error: unknown) => void} fail 실패 결과를 한 번 쓰고 app.exit(1) — 처음 실패가 이긴다. 던지지 않는다
  */
-/** @typedef {import('./support.cjs').DecisionRecord} DecisionRecord */
+/** @typedef {import('../main.js').MainRecord} MainRecord */
 /** @typedef {import('./support.cjs').ConsoleEntry} ConsoleEntry */
 /** @typedef {import('./support.cjs').LoadFailure} LoadFailure */
 /** @typedef {import('./support.cjs').SmokeFacts} SmokeFacts */
@@ -300,8 +301,13 @@ function createSmokeRun({ args, app, session, net, nativeImage, trayBuild, rende
 
   // ── 연결점(main 의 hooks) ──────────────────────────────────────────────
 
-  /** @param {DecisionRecord} entry */
+  /**
+   * main 의 기록 — 권한 · 탐색 결정만 facts.decisions 에 쌓는다. 창 보이기 · 숨기기(window) · 렌더러로 민 채널(sent) · 로그인 항목
+   * 요청(login-item)은 아직 읽는 검사가 없어 버린다.
+   * @param {MainRecord} entry
+   */
   function record(entry) {
+    if (entry.kind === 'window' || entry.kind === 'sent' || entry.kind === 'login-item') return;
     facts.decisions.push(entry);
   }
 
