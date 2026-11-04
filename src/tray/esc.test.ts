@@ -186,4 +186,25 @@ describe('installEscHandlers', () => {
     win.dispatch(keyEvent()); // 이제 대화상자가 없다
     expect(hide).toHaveBeenCalledTimes(1);
   });
+
+  it('결정은 버블 단계에서 한다 — install 보다 먼저 건 window 버블 리스너가 preventDefault 한 Esc 로는 숨지 않는다', () => {
+    const win = fakeWindow();
+    const hide = vi.fn();
+    let preventing = true;
+    // 안쪽 처리기가 이 Esc 를 쓴 것과 같다 — 기록 처리기(캡처)보다 늦고 결정 처리기(버블)보다 먼저 돈다
+    win.addEventListener('keydown', (event) => {
+      if (preventing && event.key === 'Escape') event.preventDefault();
+    });
+    installEscHandlers(win as unknown as Window, { isDialogOpen: () => false, hide });
+
+    const prevented = keyEvent();
+    win.dispatch(prevented);
+    expect(prevented.defaultPrevented).toBe(true); // 양성 기록 — 앞선 리스너가 돌았다
+    expect(prevented.preventDefault).toHaveBeenCalledTimes(1); // 우리 처리기는 숨기지도, 다시 막지도 않았다
+    expect(hide).not.toHaveBeenCalled();
+
+    preventing = false; // 같은 배선에서 막지 않은 Esc 는 숨긴다 — 처리기가 걸려 있다(헛통과가 아니다)
+    win.dispatch(keyEvent());
+    expect(hide).toHaveBeenCalledTimes(1);
+  });
 });
