@@ -535,6 +535,8 @@ const TWO_DISPLAYS: readonly FakeDisplay[] = [
 ];
 /** 작업표시줄 가운데쯤의 아이콘 — 아이콘 쪽 위치가 작업영역 가장자리에 잘리지 않는다(340×400 → { 1342, 632 }). */
 const TRAY_LEFT: Rect = { x: 1500, y: 1040, width: 24, height: 40 };
+/** 레이아웃 'solo' 의 콘텐츠 크기 — 배치(setBounds)는 위치와 함께 이 크기를 넘긴다(판정 R26). */
+const SOLO_SIZE = { width: 340, height: 400 } as const;
 
 beforeEach(() => {
   // 지난 사례의 값부터 비운다 — layTree 가 던져도 afterEach 는 지난 사례의 나무 · 기록 · 되돌리기를 쓰지 않는다(폴더는 layTree 가 치웠다)
@@ -1351,7 +1353,7 @@ describe('설정 — <userData>/settings.json (설계 §5.2 설정 쓰기)', () 
     expect(only(fake, 'new BrowserWindow').args[0]).toMatchObject({ backgroundColor: '#f5f6f8', opacity: 0.64 });
     expect(getState(fake)).toStrictEqual({ theme: 'light', opacity: 64, mode: 'solo', visible: false });
     const win = readyToShow(fake);
-    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[{ x: 100, y: 100 }]]);
+    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[{ x: 100, y: 100, ...SOLO_SIZE }]]);
     vi.advanceTimersByTime(301);
     loseFocus(win);
     expect(win.isVisible()).toBe(true);
@@ -1512,13 +1514,13 @@ describe('IPC · push — 상태 묻기 · 바꾸기 · 숨기기 · 창 사건 
     const sized = fake.calls.slice(mark).filter((call) => call.name === 'win.setContentSize' || call.name === 'win.setBounds');
     expect(sized.map((call) => [call.name, ...call.args])).toStrictEqual([
       ['win.setContentSize', 360, 480],
-      ['win.setBounds', { x: 1332, y: 552 }],
+      ['win.setBounds', { x: 1332, y: 552, width: 360, height: 480 }],
     ]);
     // 레이아웃은 남는다 — 숨겼다가 다시 보여도 그 크기로 놓는다
     rendererSend(fake, 'tj-hide');
     const again = fake.calls.length;
     trayClick(fake);
-    expect(argsOf(fake, 'win.setBounds', again)).toStrictEqual([[{ x: 1332, y: 552 }]]);
+    expect(argsOf(fake, 'win.setBounds', again)).toStrictEqual([[{ x: 1332, y: 552, width: 360, height: 480 }]]);
   });
 
   it('tj-hide(Esc · ✕) — 숨기고 { window · hide · request } 를 기록한다', async () => {
@@ -1563,7 +1565,7 @@ describe('보이기 · 숨기기 · blur (설계 §5.2 — 가짜 시계)', () =
     const mark = fake.calls.length;
     const win = readyToShow(fake);
     const order = fake.calls.slice(mark).filter((call) => ['win.setBounds', 'win.show', 'win.focus'].includes(call.name));
-    expect(order.map((call) => [call.name, ...call.args])).toStrictEqual([['win.setBounds', { x: 1342, y: 632 }], ['win.show'], ['win.focus']]);
+    expect(order.map((call) => [call.name, ...call.args])).toStrictEqual([['win.setBounds', { x: 1342, y: 632, ...SOLO_SIZE }], ['win.show'], ['win.focus']]);
     expect([win.isVisible(), win.isFocused()]).toStrictEqual([true, true]);
     expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, visible: true });
     expect(recordsOf(fake, 'window')).toStrictEqual(isSmokeMode(mode) ? [{ kind: 'window', action: 'show', reason: 'start' }] : []);
@@ -1742,16 +1744,16 @@ describe('배치 · 이동 (설계 §5.2 — 아이콘 쪽 배치 · 디스플�
   ] as const)('첫 표시는 아이콘 쪽 — %s', async (_label, displays, trayBounds, placed) => {
     const fake = await runMain('dev', { displays: displays as readonly FakeDisplay[], trayBounds });
     readyToShow(fake);
-    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[placed]]);
+    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[{ ...placed, ...SOLO_SIZE }]]);
   });
 
   it('저장 위치가 주 디스플레이 밖 — 그 디스플레이의 작업영역 안(3700 → 3492). 보이는 중에 그 디스플레이를 떼면 남은 디스플레이 작업영역 안으로', async () => {
     writeSettingsFileOf('dev', savedSettings({ position: { x: 3700, y: 100 } }));
     const fake = await runMain('dev', { displays: TWO_DISPLAYS });
     readyToShow(fake);
-    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[{ x: 3492, y: 100 }]]);
+    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[{ x: 3492, y: 100, ...SOLO_SIZE }]]);
     fake.removeDisplay(2);
-    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[{ x: 3492, y: 100 }], [{ x: 1572, y: 100 }]]);
+    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[{ x: 3492, y: 100, ...SOLO_SIZE }], [{ x: 1572, y: 100, ...SOLO_SIZE }]]);
   });
 
   it('숨긴 중에는 디스플레이를 떼도 · 바뀌어도 배치하지 않는다 — 다음 표시가 남은 디스플레이 안으로 놓는다', async () => {
@@ -1764,7 +1766,7 @@ describe('배치 · 이동 (설계 §5.2 — 아이콘 쪽 배치 · 디스플�
     fake.removeDisplay(2);
     expect(argsOf(fake, 'win.setBounds', mark)).toStrictEqual([]);
     trayClick(fake);
-    expect(argsOf(fake, 'win.setBounds', mark)).toStrictEqual([[{ x: 1572, y: 100 }]]);
+    expect(argsOf(fake, 'win.setBounds', mark)).toStrictEqual([[{ x: 1572, y: 100, ...SOLO_SIZE }]]);
   });
 
   it('보이는 중 display-metrics-changed(배율 · 작업영역) — 바뀐 작업영역 안으로 다시 배치', async () => {
@@ -1775,7 +1777,21 @@ describe('배치 · 이동 (설계 §5.2 — 아이콘 쪽 배치 · 디스플�
     if (second === undefined) throw new Error('둘째 디스플레이가 없다');
     second.workArea = { x: 1920, y: 0, width: 1800, height: 1040 }; // 그 디스플레이 오른쪽에 작업표시줄이 섰다
     fake.electron.screen.emit('display-metrics-changed', {}, structuredClone(second), ['workArea']);
-    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[{ x: 3492, y: 100 }], [{ x: 3372, y: 100 }]]);
+    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[{ x: 3492, y: 100, ...SOLO_SIZE }], [{ x: 3372, y: 100, ...SOLO_SIZE }]]);
+  });
+
+  it('배치는 위치와 함께 레이아웃 크기를 넘긴다 — main 밖에서 창이 344×404 로 자라 있어도 다시 보이면 340×400 으로 놓는다(판정 R26)', async () => {
+    const fake = await runMain('dev', { trayBounds: TRAY_LEFT });
+    const win = readyToShow(fake);
+    rendererSend(fake, 'tj-hide');
+    // 가짜에 바로(main 을 거치지 않는다) — Windows 소수 배율에서 크기를 getBounds() 로 채운 setBounds 가 반올림으로 키운 창을 흉내 낸다
+    win.setBounds({ width: 344, height: 404 });
+    expect(win.getBounds()).toMatchObject({ width: 344, height: 404 });
+    const mark = fake.calls.length;
+    trayClick(fake);
+    // 위치만 넘기면 가짜는(Electron 처럼) 빠진 크기를 지금 값으로 둔다 — 자란 크기가 남는다
+    expect(argsOf(fake, 'win.setBounds', mark)).toStrictEqual([[{ x: 1342, y: 632, ...SOLO_SIZE }]]);
+    expect(win.getBounds()).toStrictEqual({ x: 1342, y: 632, ...SOLO_SIZE });
   });
 
   it.each(['win32', 'darwin'] as const)('%s — 이동 저장: will-move 없는 moved 는 저장하지 않고, will-move 뒤의 moved 는 300ms 뒤 저장한다. 다시 보이면(배치) 게이트가 닫힌다', async (platform) => {
@@ -1825,7 +1841,7 @@ describe('배치 · 이동 (설계 §5.2 — 아이콘 쪽 배치 · 디스플�
     const moved = (): number => callsOf(fake, 'win.emit').filter((call) => call.args[0] === 'moved').length;
     const before = moved();
     fake.electron.screen.emit('display-metrics-changed', {}, fake.displays[0], ['workArea']);
-    expect(argsOf(fake, 'win.setBounds').at(-1)).toStrictEqual([{ x: 842, y: 632 }]); // 새 아이콘 쪽으로 다시 놓았다
+    expect(argsOf(fake, 'win.setBounds').at(-1)).toStrictEqual([{ x: 842, y: 632, ...SOLO_SIZE }]); // 새 아이콘 쪽으로 다시 놓았다
     expect(moved()).toBe(before + 1); // 양성 대조 — 그 setBounds 안에서 moved 가 왔다
     vi.advanceTimersByTime(400);
     expect(readSettingsFile('dev').position).toBeNull();
@@ -1899,7 +1915,7 @@ describe('파괴 · 종료 — 창은 liveWindow() 로만 만진다 (설계 §5.
     expect(fire).not.toThrow();
     const touched = touchedSince(fake, mark);
     if (condition !== '그대로') expect(touched).toStrictEqual([]);
-    else if (fired === 'display-removed') expect(touched.filter(([name]) => name === 'win.setBounds')).toStrictEqual([['win.setBounds', { x: 1572, y: 100 }]]);
+    else if (fired === 'display-removed') expect(touched.filter(([name]) => name === 'win.setBounds')).toStrictEqual([['win.setBounds', { x: 1572, y: 100, ...SOLO_SIZE }]]);
     else expect(touched.filter(([name]) => name === 'win.hide')).toStrictEqual([['win.hide']]);
   });
 

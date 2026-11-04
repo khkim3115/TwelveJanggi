@@ -690,6 +690,8 @@ function clearDeferredBlur() {
  * 창을 놓는다 — 배치는 모두 이 함수다(placeWindow 가 계산한다). 저장 위치가 있으면 그 위치와 가장 많이 겹치는 디스플레이(떼어 낸
  * 모니터면 남은 디스플레이)의 작업영역 안으로, 없으면 아이콘이 있는 디스플레이(아이콘 자리를 모르면 주 디스플레이)에서 아이콘 쪽에
  * 붙인다. 놓는 동안(setBounds 안의 동기 moved — macOS)은 사용자 이동이 아니고, 놓은 뒤의 위치가 이동 판별의 기준이 된다.
+ * 위치와 함께 레이아웃 크기를 넘긴다: 위치만 넘기면 Electron 이 빠진 크기를 getBounds() 로 채우는데, Windows 소수 배율에서는
+ * DIP↔픽셀 반올림이 바깥쪽이라 열 때마다 창이 조금씩 자란다(스모크 실측 510×603 → 516×606).
  * @param {import('./lib/position.cjs').Size} size 콘텐츠 크기(프레임 없는 창이라 창 크기와 같다)
  */
 function placeNow(size) {
@@ -701,7 +703,7 @@ function placeNow(size) {
     const trayDisplay = isEmptyRect(trayBounds) ? screen.getPrimaryDisplay() : screen.getDisplayMatching(trayBounds);
     const saved = settings.position;
     const savedDisplay = saved === null ? null : screen.getDisplayMatching({ ...saved, ...size });
-    win.setBounds(placeWindow({ size, saved, savedDisplay, trayBounds, trayDisplay }));
+    win.setBounds({ ...placeWindow({ size, saved, savedDisplay, trayBounds, trayDisplay }), width: size.width, height: size.height });
   } finally {
     moveBaseline = win.getBounds();
     manualMoveSeen = false;
