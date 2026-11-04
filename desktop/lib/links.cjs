@@ -34,4 +34,9 @@ function externalHref(url) {
   return null;
 }
 
-module.exports = { externalHref };
+/** 트레이 메뉴 '웹에서 열기' 의 주소 — 위 허용 목록을 그대로 통과한다(links.test.ts). */
+const WEB_URL = 'https://khkim3115.github.io/TwelveJanggi/';
+/** 트레이 메뉴 '의견 보내기' 의 주소 — 위 허용 목록을 그대로 통과한다(links.test.ts). */
+const FEEDBACK_URL = 'https://github.com/khkim3115/TwelveJanggi/issues/new/choose';
+
+module.exports = { externalHref, WEB_URL, FEEDBACK_URL };
