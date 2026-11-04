@@ -64,7 +64,7 @@ const { formatSmokeArgs, parseSmokeArgs } = require('./smokeArgs.cjs') as typeof
 const { RESULT_FILE } = require('./smokeOut.cjs') as typeof import('./smokeOut.cjs');
 const { PUSH_CHANNELS } = require('./pushChannels.cjs') as typeof import('./pushChannels.cjs');
 const { consoleLine } = require('./consoleLine.cjs') as typeof import('./consoleLine.cjs');
-const { loginItemSettings } = require('./autostart.cjs') as typeof import('./autostart.cjs');
+const { loginItemQuery, loginItemSettings } = require('./autostart.cjs') as typeof import('./autostart.cjs');
 const { FEEDBACK_URL, WEB_URL } = require('./links.cjs') as typeof import('./links.cjs');
 
 // 바꿔 끼우는 자리 — main.js 가 require 로 받는 것과 같은 객체다(main · lib 은 바꾼 node:fs 멤버를 그대로 부른다).
@@ -681,7 +681,7 @@ afterAll(() => {
   expect(Object.keys(require.cache).filter((key) => key.includes('tj-main 배선'))).toStrictEqual([]);
 });
 
-/** main 이 거는 IPC(설계 §5.3 표 순서) — [등록 함수, 채널]. 스모크는 이 뒤에 hooks.registerIpc 가 tj-smoke-* 를 더한다. */
+/** main 이 거는 IPC(설계 §5.3 표 순서) — [등록 함수, 채널]. 스모크는 이 뒤에 hooks.registerIpc 가 tj-smoke-* 와 tj-hide · tj-set-opacity 수신 기록을 더한다. */
 const MAIN_IPC: Array<[string, string]> = [
   ['ipcMain.handle', 'tj-app-info'],
   ['ipcMain.handle', 'tj-get-state'],
@@ -1115,7 +1115,7 @@ const COLLECTORS = ['console-message', 'did-fail-load', 'did-fail-provisional-lo
 const NAVIGATION_EVENTS = ['will-frame-navigate', 'will-navigate', 'will-redirect', 'will-attach-webview'];
 
 describe('스모크 실행기 연결(smoke/run.cjs) — main 은 스모크에서만 꽂는다', () => {
-  it.each(['smoke', 'packaged-smoke'] as const)('%s — 처리기 · 창 · 트레이보다 먼저 꽂힌다: 네트워크 가드(창 전) · tj-smoke-* 수신(tj-app-info 다음, 창 전) · 수집기(창과 loadURL 사이) · will-quit · process 처리기, 한 동기 구간', async (mode) => {
+  it.each(['smoke', 'packaged-smoke'] as const)('%s — 처리기 · 창 · 트레이보다 먼저 꽂힌다: 네트워크 가드(창 전) · tj-smoke-* 수신과 tj-hide · tj-set-opacity 수신 기록(main 채널 다음, 창 전) · 수집기(창과 loadURL 사이) · will-quit · process 처리기, 한 동기 구간', async (mode) => {
     const fake = await runMain(mode);
     const after = fake.calls.filter((call) => call.ready);
     const windowAt = indexOf(after, 'new BrowserWindow');
@@ -1124,12 +1124,14 @@ describe('스모크 실행기 연결(smoke/run.cjs) — main 은 스모크에서
     expect(callsOf(fake, 'session.webRequest.onBeforeRequest')).toHaveLength(1);
     expect(indexOf(after, 'session.webRequest.onBeforeRequest')).toBeLessThan(windowAt);
     // preload 의 send 는 듣는 쪽이 없으면 버려진다 — 수신은 창보다 먼저, 발신자 검증(createGuardedIpc)을 거친다. main 채널을 모두 건 뒤에
-    // 실행기의 것(hooks.registerIpc)이다.
+    // 실행기의 것(hooks.registerIpc)이다: 스모크 채널 둘, 그리고 main 이 처리하는 tj-hide · tj-set-opacity 에 하나씩 더 단 수신 기록.
     const ipc = after.flatMap((call, at) => (call.name.startsWith('ipcMain.') ? [{ call, at }] : []));
     expect(ipc.map(({ call }) => [call.name, call.args[0]])).toStrictEqual([
       ...MAIN_IPC,
       ['ipcMain.on', 'tj-smoke-preload'],
       ['ipcMain.on', 'tj-smoke-csp'],
+      ['ipcMain.on', 'tj-hide'],
+      ['ipcMain.on', 'tj-set-opacity'],
     ]);
     for (const { call, at } of ipc) expect(at, String(call.args[0])).toBeLessThan(windowAt);
     for (const event of COLLECTORS) {
@@ -1145,6 +1147,14 @@ describe('스모크 실행기 연결(smoke/run.cjs) — main 은 스모크에서
     expect(Object.keys(require.cache).filter((key) => /[\\/]node_modules[\\/]electron[\\/]/.test(key))).toStrictEqual([]);
     expect(stderr).toStrictEqual([]);
     expect(existsSync(currentTree().outDir)).toBe(false); // 결과는 검사가 끝나거나 실패할 때만 쓴다
+  });
+
+  it.each(PLATFORMS)("%s — main 이 실행기에 자기 갈래(process.platform)를 넘긴다: 실행기가 대체 함수를 끼운 뒤 처음 읽는 로그인 항목이 loginItemQuery(갈래) 다", async (platform) => {
+    const fake = await runMain('smoke', { platform });
+    const reads = callsOf(fake, 'app.getLoginItemSettings');
+    expect(reads[0]?.args).toStrictEqual([loginItemQuery(platform)]); // win32 { args: ['--hidden'] } · 그 밖 {}
+    expect(indexOf(fake.calls, 'app.set', 'setLoginItemSettings')).toBeLessThan(indexOf(fake.calls, 'app.getLoginItemSettings'));
+    expect(indexOf(fake.calls, 'app.getLoginItemSettings')).toBeLessThan(indexOf(fake.calls, 'Menu.buildFromTemplate')); // main 의 메뉴(win32)보다 먼저 — 실행기의 시작 값이다
   });
 
   it.each(['dev', 'packaged'] as const)('%s — 꽂지 않는다: run.cjs 를 require 하지 않고, 가드 · tj-smoke-* · 수집기 · will-quit · process 처리기가 없다', async (mode) => {

@@ -2,19 +2,23 @@
 // registerIpc → beforeLoad → setTray)로 꽂고 첫 did-finish-load 부터 장벽 → 수동 검사 → 능동 검사 → 장벽 → cspViolations · consoleErrors →
 // canary → noNetwork · loginItem → 결과 → 붙은 메뉴 '종료' 까지 실제로 돌린다.
 // 앱은 띄우지 않고 electron 은 import · require 하지 않는다(실행기도 하지 않는다 — Electron 객체는 main 이 넘긴다). 실제 바이너리의 판정은
-// 스모크가 보고, 여기서는 가짜가 내놓는 사실이 바뀔 때 검사가 판정을 바꾸는지 본다. 음성 사례는 아직 일부 검사에만 있다 — boot ·
-// webPreferences · sandboxEffective · bridge · ipc · mime · tray · screenshot · loginItem 은 여기서 양성 갈래만 탄다(webPreferences ·
-// screenshot 의 판정 함수 evaluateWebPreferences · countDistinctColors 는 smokeChecks.test.ts 가 음성까지 본다).
-// - 가짜 Electron 장치(rigScenario — 가짜 페이지 · 기본 세션 · 시계)와 사례마다의 준비 · 정리(installRigLifecycle)는 smokeRig.ts 에 있다
-//   (#36 T6-8 · T11-5). 사례는 처리기 하나(Scenario.page)를 바꿔 그 검사의 음성 갈래를 탄다.
+// 스모크가 보고, 여기서는 가짜가 내놓는 사실이 바뀔 때 검사가 판정을 바꾸는지 본다. 음성 사례는 아직 일부 검사에만 있다 —
+// webPreferences · sandboxEffective · bridge · ipc · mime · screenshot 은 여기서 양성 갈래만 탄다(webPreferences · screenshot 의 판정 함수
+// evaluateWebPreferences · countDistinctColors 는 smokeChecks.test.ts 가 음성까지 본다).
+// - 가짜 Electron 장치(rigScenario — 가짜 페이지 · 기본 세션 · 흉내 낸 main · 시계)와 사례마다의 준비 · 정리(installRigLifecycle)는
+//   smokeRig.ts 에 있다(#36 T6-8 · T11-5). 사례는 손잡이 하나 — 페이지 처리기(Scenario.page) · main 의 결함(Scenario.main) · 갈래 ·
+//   로그인 항목 — 를 바꿔 그 검사의 음성 갈래를 탄다(#36 runner-N1 의 tray · boot · loginItem).
+// - 건강한 흐름은 세 갈래(win32 · darwin · linux)를 호스트와 상관없이 돈다(필수 check 는 ubuntu 에서 Windows 갈래를 덮는다).
 // - securityWarnings: 플랫폼마다 다른 켜짐 규칙은 securityWarningsArming 을 바로 불러 본다.
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { buildTrayCsp } from '../../scripts/trayBuild.ts';
+import { createFakeLoginItems } from './fakeElectron.ts';
 import {
   AI_MS,
   APP_ORIGIN_SLASH,
+  APP_VERSION,
   BLOCKED,
   CONNECT_PROBES,
   DEV_BINARY,
@@ -24,6 +28,7 @@ import {
   NONCE,
   NOT_RESOLVED,
   OTHER_BINARY,
+  RIG_FAKE_TIMERS,
   SETTINGS_URL,
   SMOKE_URL,
   SOCKET_URL,
@@ -47,6 +52,7 @@ import {
   startScenario,
   turns,
   violation,
+  type MenuTemplate,
   type Outcome,
   type PageHandler,
   type Scenario,
@@ -55,6 +61,10 @@ import {
 
 const require = createRequire(import.meta.url);
 const { requiredChecks } = require('./smokeResult.cjs') as typeof import('./smokeResult.cjs');
+const { AUTOSTART_NAME, loginItemQuery, loginItemSettings } = require('./autostart.cjs') as typeof import('./autostart.cjs');
+const { untilAsync } = require('../smoke/support.cjs') as {
+  untilAsync(predicate: () => boolean | Promise<boolean>, ms: number, what: string): Promise<boolean>;
+};
 /** securityWarningsArming 이 읽는 main 의 process 값. */
 type Proc = { platform: string; execPath: string; env: Record<string, string | undefined> };
 const { securityWarningsArming } = require('../smoke/run.cjs') as {
@@ -72,6 +82,37 @@ const ISOLATED_CODE = '({ probe: globalThis.__tjIsoProbe, buf: globalThis.__tjCs
 /** 실행기가 결과에 싣는 검사(실행 순서) — 조건부 검사(.invalid 빌드의 connectAllowed · --net 의 net)는 permissions 뒤에 온다. */
 const BEFORE_CONDITIONAL = ['boot', 'webPreferences', 'sandboxEffective', 'bridge', 'ipc', 'mime', 'securityWarnings', 'tray', 'screenshot', 'cspMeta', 'cspHeader', 'protocol', 'ai', 'navigation', 'permissions'];
 const AFTER_CONDITIONAL = ['cspViolations', 'consoleErrors', 'cspCanary', 'noNetwork', 'loginItem'];
+/** 갈래 — 실행기에 넘기는 platform(흉내 낸 main 도 따른다). 호스트 값이 아니다. */
+const PLATFORMS = ['win32', 'darwin', 'linux'] as const;
+/**
+ * 건강한 흐름의 창 기록(흉내 낸 main 이 넘긴 차례) — 시작 표시 → 열기 경로(win32 는 트레이 토글 → 트레이 클릭, 그 밖은 win.close() →
+ * 메뉴의 '열기') → win32 는 경합 단계(blur 숨김 → 같은 턴의 클릭 무시 → 경합 시간 뒤 클릭). 그 뒤 검사는 창 기록을 남기지 않는다.
+ */
+const HEALTHY_WINDOWS: Record<(typeof PLATFORMS)[number], Outcome['windows']> = {
+  win32: [
+    { action: 'show', reason: 'start' },
+    { action: 'hide', reason: 'toggle' },
+    { action: 'show', reason: 'tray' },
+    { action: 'hide', reason: 'blur' },
+    { action: 'show', reason: 'tray' },
+  ],
+  darwin: [
+    { action: 'show', reason: 'start' },
+    { action: 'hide', reason: 'close' },
+    { action: 'show', reason: 'menu' },
+  ],
+  linux: [
+    { action: 'show', reason: 'start' },
+    { action: 'hide', reason: 'close' },
+    { action: 'show', reason: 'menu' },
+  ],
+};
+
+/** tray 가 창을 main 의 길로 보인 채 끝냈다(판정 R13) — 마지막 창 기록이 show 이고, 바로 뒤의 screenshot 이 창을 직접 보이지 않았다. */
+function expectEndsShown(outcome: Outcome): void {
+  expect(outcome.windows.at(-1)?.action, '마지막 창 기록').toBe('show');
+  expect(checkOf(outcome, 'screenshot').detail).not.toContain('보이지 않던 창을 보인 뒤');
+}
 
 installRigLifecycle();
 
@@ -127,6 +168,230 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
     expect(checkOf(outcome, 'net').detail).toContain('join "SUBSCRIBED"');
     expect(checkOf(outcome, 'noNetwork').detail).toContain('기대한 요청 3종만 기록됐다');
   });
+
+  it.each(PLATFORMS)(
+    "%s — 20개 ok · 최신 메뉴의 '종료' 한 번 · 창은 main 의 길로만 숨고 보였다 · getLoginItemSettings 는 모두 loginItemQuery(갈래) 로 · 원래 setLoginItemSettings 0회",
+    async (platform) => {
+      const outcome = await runScenario({ platform });
+      expect(outcome.checks.map((entry) => entry.name)).toStrictEqual([...BEFORE_CONDITIONAL, ...AFTER_CONDITIONAL]);
+      expect(failing(outcome)).toStrictEqual([]);
+      expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
+      expect(outcome.windows).toStrictEqual(HEALTHY_WINDOWS[platform]);
+      expect(outcome.loginItemQueries.length).toBeGreaterThanOrEqual(2); // 실행기의 시작 · 끝(win32 는 main 의 메뉴도)
+      for (const query of outcome.loginItemQueries) expect(query).toStrictEqual(loginItemQuery(platform));
+      expect(outcome.loginItemWrites).toStrictEqual([]);
+      const tray = checkOf(outcome, 'tray').detail;
+      expect(tray).toContain(platform === 'win32' ? '열기: 트레이 클릭(토글) → 숨김(toggle) → 0.0ms 뒤 트레이 클릭 → 보임 · 포커스' : "열기: win.close() → 숨김(close) → 0.0ms 뒤 메뉴의 '열기' → 보임 · 포커스");
+      expect(tray).toContain(platform === 'win32' ? '경합: 표시 350.0ms 뒤 blur → 숨김(blur) → 같은 턴의 트레이 클릭 무시 → 300.0ms 뒤 트레이 클릭 → 보임(tray)' : `경합 단계 건너뜀(${platform}`);
+      expect(tray).toContain('아이콘 16×16');
+      expect(checkOf(outcome, 'loginItem').detail).toContain(`로그인 항목 요청 기록 ${JSON.stringify(platform === 'win32' ? [{ kind: 'login-item', on: true, managed: false }] : [])}(${platform})`);
+      expectEndsShown(outcome);
+    },
+  );
+});
+
+describe('boot — 제목 줄의 글자(.tapp-title)가 십이장기다(#36 T10-10)', () => {
+  it('제목 줄 안에 버전까지 그렸다 → 실패', async () => {
+    const boot = healthyPage({ files: new Map(), unmapped: [] }).boot;
+    const outcome = await runScenario({ page: { boot: (arg, app) => ({ ...(boot?.(arg, app) as object), title: `십이장기 ${APP_VERSION}` }) } });
+    expectOnlyFailure(outcome, 'boot', [`제목 줄(.tapp-title)이 "십이장기 ${APP_VERSION}" 다(기대 "십이장기")`]);
+  });
+
+  it('제목 줄이 없다(null) → 실패', async () => {
+    const boot = healthyPage({ files: new Map(), unmapped: [] }).boot;
+    const outcome = await runScenario({ page: { boot: (arg, app) => ({ ...(boot?.(arg, app) as object), title: null }) } });
+    expectOnlyFailure(outcome, 'boot', ['제목 줄(.tapp-title)이 null 다(기대 "십이장기")']);
+  });
+});
+
+describe('tray — 최신 메뉴(새 프로필) · main 이 붙인 아이콘 · 열기 경로 · 바깥 클릭과 경합(win32), 끝에는 main 의 길로 보인 채', () => {
+  /** 템플릿에서 그 라벨 항목을 고친다. */
+  const patchItem =
+    (label: string, patch: Record<string, unknown>) =>
+    (template: MenuTemplate): MenuTemplate =>
+      template.map((entry) => (entry.label === label ? { ...entry, ...patch } : entry));
+
+  it.each(PLATFORMS)("%s — 라벨이 실행기의 글자 목록과 다르다('의견 보내기' 가 빠졌다) → 실패", async (platform) => {
+    const outcome = await runScenario({ platform, main: { template: (template) => template.filter((entry) => entry.label !== '의견 보내기') } });
+    expectOnlyFailure(outcome, 'tray', ['메뉴 라벨이']);
+    expectEndsShown(outcome);
+  });
+
+  it("darwin 에 Windows 메뉴('열기' 없음) → 라벨 실패 · 숨긴 창을 열 수 없다 · 끝에도 열지 못했다", async () => {
+    const outcome = await runScenario({ platform: 'darwin', main: { template: (template) => template.filter((entry) => entry.label !== '열기') } });
+    expectOnlyFailure(outcome, 'tray', ['메뉴 라벨이', "최신 메뉴에 '열기' 가 없다 — 숨긴 창을 main 의 길로 열 수 없다", '끝에 창을 main 의 길로 보인 채 두지 못했다']);
+    expect(checkOf(outcome, 'screenshot').detail).toContain('보이지 않던 창을 보인 뒤'); // 뒤의 검사는 그래도 보이는 창에서 돈다
+  });
+
+  it.each([`십이장기 ${APP_VERSION}`, '자동 실행', '위치 초기화'])('%s 가 켜졌다 → 실패', async (label) => {
+    expectOnlyFailure(await runScenario({ main: { template: patchItem(label, { enabled: true }) } }), 'tray', [`꺼져 있어야 할 항목이 켜졌다: ${label}`]);
+  });
+
+  it.each(['자동 실행', '라이트 모드', '창 고정'])('새 프로필인데 %s 가 체크됐다 → 실패', async (label) => {
+    expectOnlyFailure(await runScenario({ main: { template: patchItem(label, { checked: true }) } }), 'tray', [`새 프로필인데 체크된 항목이 있다: ${label}`]);
+  });
+
+  it('아이콘 파일이 없다(빈 이미지) → 실패', async () => {
+    expectOnlyFailure(await runScenario({ main: { icon: 'missing' } }), 'tray', ['트레이 아이콘이 빈 이미지다', '트레이 아이콘이 0×0 다(기대 16×16)']);
+  });
+
+  it('아이콘을 16×16 으로 줄이지 않았다(원본 64×64) → 실패', async () => {
+    const check = expectOnlyFailure(await runScenario({ main: { icon: 'unresized' } }), 'tray', ['트레이 아이콘이 64×64 다(기대 16×16)']);
+    expect(check.detail).not.toContain('빈 이미지');
+  });
+
+  it.each(PLATFORMS)('%s — 연 창이 포커스를 받지 않는다(main 이 focus 를 부르지 않는다) → 실패', async (platform) => {
+    const outcome = await runScenario({ platform, main: { noFocus: true } });
+    expectOnlyFailure(outcome, 'tray', ['창이 보이고 포커스를 받지 않았다(보임 true · 포커스 false']);
+    expectEndsShown(outcome);
+  });
+
+  it('win32 — 토글 숨김에도 경합 가드를 켠다(곧바로 연 클릭을 삼킨다) → 실패, 끝에는 경합 시간 뒤에 main 의 길로 다시 보였다', async () => {
+    const outcome = await runScenario({ main: { guardEveryHide: true } });
+    expectOnlyFailure(outcome, 'tray', ['숨김(toggle) 기록 0.0ms 뒤의 트레이 클릭 뒤 창이 보이고 포커스를 받지 않았다(보임 false']);
+    expect(outcome.windows.map(({ action, reason }) => `${action}:${reason}`)).toStrictEqual(['show:start', 'hide:toggle', 'show:tray']);
+    expectEndsShown(outcome);
+  });
+
+  it.each([
+    ['win32', 'toggle'],
+    ['darwin', 'close'],
+    ['linux', 'close'],
+  ] as const)('%s — 숨김을 다른 이유(request)로 기록한다 → 실패(이유 %s 의 숨김 기록을 받지 못했다)', async (platform, reason) => {
+    const outcome = await runScenario({ platform, main: { relabelHide: { [reason]: 'request' } } });
+    const how = platform === 'win32' ? '트레이 클릭(토글)' : 'win.close()';
+    expectOnlyFailure(outcome, 'tray', [`${how} 뒤 이유 "${reason}" 의 숨김 기록을 받지 못했다(5000ms) — 마지막 창 기록 ["show:start","hide:request"]`]);
+    expectEndsShown(outcome);
+  });
+
+  it('win32 — 우연한 blur(표시 320ms 뒤 OS 가 포커스를 가져갔다) → 실패(경합 단계를 증명하지 못함), 끝에는 main 의 길로 다시 보였다', async () => {
+    const outcome = await runScenario({ main: { strayBlurAfterTrayShow: 320 } });
+    expectOnlyFailure(outcome, 'tray', ['우연한 숨김(이유 "blur") — 경합 단계를 증명하지 못함']);
+    expect(outcome.windows.map(({ action, reason }) => `${action}:${reason}`)).toStrictEqual(['show:start', 'hide:toggle', 'show:tray', 'hide:blur', 'show:tray']);
+    expectEndsShown(outcome);
+  });
+
+  it('win32 — 유예 뒤의 blur 가 숨기지 않는다(blur 처리기가 없다) → 실패', async () => {
+    const outcome = await runScenario({ main: { ignoreBlur: true } });
+    expectOnlyFailure(outcome, 'tray', ['표시 350.0ms 뒤의 blur 가 창을 동기로 숨기지 않았다(기대 숨김 하나 — 이유 "blur") — 새 창 기록 [] · 보임 true']);
+    expectEndsShown(outcome);
+  });
+
+  it('win32 — 경합 가드가 없다(blur 숨김과 같은 턴의 클릭이 다시 연다) → 실패', async () => {
+    const outcome = await runScenario({ main: { noRaceGuard: true } });
+    expectOnlyFailure(outcome, 'tray', ['blur 숨김과 같은 턴의 트레이 클릭이 무시되지 않았다(경합 가드) — 새 창 기록 ["show:tray"] · 보임 true']);
+    expectEndsShown(outcome);
+  });
+
+  it('win32 — 경합 가드가 1초 더 길다(경합 시간 뒤의 클릭도 삼킨다) → 실패, 끝에는 main 의 길로 다시 보였다', async () => {
+    const outcome = await runScenario({ main: { longerRace: 1_000 } });
+    expectOnlyFailure(outcome, 'tray', ['blur 숨김 300.0ms 뒤의 트레이 클릭이 창을 열지 않았다(기대 보임 — 이유 "tray") — 새 창 기록 [] · 보임 false']);
+    expectEndsShown(outcome);
+  });
+});
+
+describe('loginItem(D1) — 대체 함수가 서 있고 쓰기 0회 · 양성 대조(첫 실행 표시 · win32 의 요청 기록 하나) · 환경 전제(시작 · 끝 없음 · 같음)', () => {
+  /** '--hidden' 으로 등록된 이 실행의 로그인 항목(Windows 흉내 — 경로는 rig 의 execPath). */
+  const registered = (approved: boolean) => ({ name: AUTOSTART_NAME, path: OTHER_BINARY, args: ['--hidden'], approved });
+
+  it('대체 함수가 빠졌다(실행기를 만든 뒤 누가 원래 메서드로 되돌렸다) → 실패', async () => {
+    expectOnlyFailure(await runScenario({ unplugBlocker: true }), 'loginItem', ['app.setLoginItemSettings 가 D1 의 대체 함수가 아니다']);
+  });
+
+  it('win32 — 가드가 샌다(스모크인데 관리한다고 본다) → 대체 함수가 쓰기 1회를 받아 실패 · 이 PC 의 로그인 항목은 그대로(원래 메서드 0회)', async () => {
+    const outcome = await runScenario({ main: { leakLoginItem: true } });
+    expectOnlyFailure(outcome, 'loginItem', [`대체 함수가 로그인 항목 쓰기 1회를 받았다(기대 0 — main 의 가드가 샜다): ${JSON.stringify([loginItemSettings('win32', true)])}`]);
+    expect(outcome.loginItemWrites).toStrictEqual([]);
+  });
+
+  it('첫 실행 표시(autostartDefaultApplied)가 settings.json 에 없다 → 실패', async () => {
+    expectOnlyFailure(await runScenario({ main: { noFirstRunFlag: true } }), 'loginItem', ['autostartDefaultApplied 가 false 다(기대 true — 첫 실행 갈래가 돌지 않았다)']);
+  });
+
+  it.each([
+    ['none', '[]'],
+    ['twice', JSON.stringify([0, 1].map(() => ({ kind: 'login-item', on: true, managed: false })))],
+  ] as const)('win32 — 로그인 항목 요청 기록이 %s → 실패(정확히 하나여야 한다)', async (loginRecord, seen) => {
+    expectOnlyFailure(await runScenario({ main: { loginRecord } }), 'loginItem', [`양성 대조 — 로그인 항목 요청 기록이 ${seen} 다`]);
+  });
+
+  it("win32 — '--hidden' 으로 등록 · 승인된 항목이 이미 있다 → 시작 · 끝 openAtLogin true 로 실패(메뉴의 '자동 실행' 도 체크로 보인다)", async () => {
+    const outcome = await runScenario({ loginItems: [registered(true)] });
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(['tray', 'loginItem']);
+    const check = checkOf(outcome, 'loginItem');
+    expect(check.detail).toContain('환경 전제 — 시작의 openAtLogin 이 true 다');
+    expect(check.detail).toContain('환경 전제 — 시작의 executableWillLaunchAtLogin 이 true 다');
+    expect(checkOf(outcome, 'tray').detail).toContain('새 프로필인데 체크된 항목이 있다: 자동 실행');
+  });
+
+  it("win32 — '--hidden' 으로 등록 · 작업 관리자에서 끔(approved false) → 시작 openAtLogin true 로 실패(인자 없이 읽으면 놓친다)", async () => {
+    const outcome = await runScenario({ loginItems: [registered(false)] });
+    const check = expectOnlyFailure(outcome, 'loginItem', ['환경 전제 — 시작의 openAtLogin 이 true 다', '환경 전제 — 끝의 openAtLogin 이 true 다']);
+    expect(check.detail).not.toContain('executableWillLaunchAtLogin');
+    // 대조 — 같은 항목을 인자 없이 물으면 openAtLogin 도 거짓이다(그렇게 읽는 실행기는 통과시켰다)
+    expect(createFakeLoginItems([registered(false)]).read(undefined, AUTOSTART_NAME, OTHER_BINARY)).toStrictEqual({ openAtLogin: false, executableWillLaunchAtLogin: false });
+  });
+
+  it('darwin — 실행 도중 다른 실행이 같은 경로를 승인된 항목으로 남겼다(openAtLogin 은 그대로 false) → 시작 ≠ 끝으로만 실패', async () => {
+    const ai = healthyPage({ files: new Map(), unmapped: [] }).ai;
+    const outcome = await runScenario({
+      platform: 'darwin',
+      page: {
+        ai: (arg, app) => {
+          app.loginItems.push({ name: '다른 실행', path: OTHER_BINARY, args: [], approved: true });
+          return ai?.(arg, app);
+        },
+      },
+    });
+    const check = expectOnlyFailure(outcome, 'loginItem', ['환경 전제 — 시작과 끝이 다르다']);
+    expect(check.detail).not.toContain('openAtLogin 이');
+  });
+});
+
+describe('untilAsync — 비동기 predicate 를 ms 까지 기다린다(until 과 같은 모양 — 시간이 다 되면 false 이고 던지지 않는다)', () => {
+  /** 가짜 시계에서 work 를 돌려 ms 만큼 민 뒤의 끝(약속이 끝나지 않았으면 'pending'). */
+  async function settleOnFakeClock<T>(work: () => Promise<T>, ms: number): Promise<{ value: T } | { error: unknown } | 'pending'> {
+    vi.useFakeTimers(RIG_FAKE_TIMERS);
+    try {
+      let outcome: { value: T } | { error: unknown } | 'pending' = 'pending';
+      work().then(
+        (value) => (outcome = { value }),
+        (error: unknown) => (outcome = { error }),
+      );
+      await vi.advanceTimersByTimeAsync(ms);
+      expect(vi.getTimerCount(), '남은 타이머').toBe(0);
+      return outcome;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it('거짓인 동안 다시 보고, 참이 되면 true', async () => {
+    let calls = 0;
+    const outcome = await settleOnFakeClock(() => untilAsync(async () => (calls += 1) >= 3, 1_000, '셋째'), 1_000);
+    expect(outcome).toStrictEqual({ value: true });
+    expect(calls).toBe(3);
+  });
+
+  it('시간이 다 되면 false — 던지지 않는다', async () => {
+    expect(await settleOnFakeClock(() => untilAsync(async () => false, 500, '오지 않는 것'), 600)).toStrictEqual({ value: false });
+  });
+
+  it('한 번의 predicate 가 끝나지 않아도 ms 에서 false(기다림이 ms 를 넘지 않는다)', async () => {
+    expect(await settleOnFakeClock(() => untilAsync(() => new Promise<boolean>(() => {}), 500, '멈춘 페이지'), 500)).toStrictEqual({ value: false });
+  });
+
+  it("predicate 가 거부하거나 던지면 '<what>: <이유>' 로 거부한다(원인은 cause)", async () => {
+    const gone = new Error('페이지가 사라졌다');
+    const throwing = (): boolean => {
+      throw gone;
+    };
+    for (const predicate of [async () => Promise.reject(gone), throwing]) {
+      const outcome = await settleOnFakeClock(() => untilAsync(predicate, 500, 'tapp-hidden 클래스'), 100);
+      expect(outcome).toStrictEqual({ error: new Error('tapp-hidden 클래스: 페이지가 사라졌다') });
+      expect((outcome as { error: Error }).error.cause).toBe(gone);
+    }
+  });
 });
 
 describe('noNetwork — 가드 탐침은 가드의 기록 + ERR_BLOCKED_BY_CLIENT 거부일 때만 센다', () => {
@@ -165,7 +430,7 @@ describe('noNetwork — 가드 탐침은 가드의 기록 + ERR_BLOCKED_BY_CLIEN
   });
 
   it('가드가 기록하고 콜백을 부르지 않는다 → 상한(5초)까지 기다린 뒤 실패, detail 은 끝나지 않았다고 말한다', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.useFakeTimers(RIG_FAKE_TIMERS);
     try {
       const running = startScenario({ guard: 'hang' });
       await drive(() => running.fetches.length > 0);

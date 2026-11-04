@@ -374,7 +374,8 @@ function loadRenderer(root) {
 /**
  * 스모크 실행기(smoke/run.cjs)를 hooks 에 꽂는다 — 스모크에서만 부르고, run.cjs 도 여기서만 require 한다. onReady 가 처리기 · IPC ·
  * 창 · 트레이보다 먼저 부른다(그것들이 hooks 를 읽는다). 무인 실행이라 uncaughtException · unhandledRejection 도 실행기의 fail 로
- * 보낸다 — 결과를 쓰고 exit 1 한다(Electron 의 오류 상자가 런처의 시간 제한까지 막고 있지 않게).
+ * 보낸다 — 결과를 쓰고 exit 1 한다(Electron 의 오류 상자가 런처의 시간 제한까지 막고 있지 않게). 실행기의 플랫폼 갈래는 여기서 넘기는
+ * platform 만 따른다(설계 §5.5).
  * @param {SmokeOn} smoke
  * @param {string} root 렌더러 루트
  * @param {{ index: import('./lib/appProtocol.cjs').FileIndex, build: import('./lib/trayBuildInfo.cjs').TrayBuildInfo }} renderer
@@ -386,11 +387,11 @@ function plugSmokeRun(smoke, root, renderer) {
     app,
     session,
     net,
-    nativeImage,
     trayBuild: renderer.build,
     rendererRoot: root,
     appRoot: __dirname,
     index: renderer.index,
+    platform: process.platform,
   });
   process.on('uncaughtException', (err) => run.fail('uncaughtException', err));
   process.on('unhandledRejection', (reason) => run.fail('unhandledRejection', reason));
