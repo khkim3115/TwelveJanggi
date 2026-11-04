@@ -24,10 +24,14 @@
 //   뒤에 돌므로(가짜는 그 사건을 내지 않는다) 여기서는 연결점 · 수집기 · 실패 경로만 본다 — 검사 자체는 실제 바이너리의 스모크가 본다.
 //   hooks 엿보기: 훅은 main 이 부르는 실행기 모듈을 진짜로 읽은 뒤(진짜는 require.cache 에 남는다), 만든 run 의 record · setTray ·
 //   open 을 감싸 가짜의 기록(hook.record · hook.setTray · hook.open)에도 남기고 진짜에 넘긴다.
+// - 창 동작(설계 §5.2): 가짜는 ready-to-show 를 스스로 내지 않는다 — 보이는 창이 필요한 사례는 readyToShow 로 낸다. 렌더러의 IPC 는
+//   main 이 단 처리기를 신뢰하는 발신자(트레이 창의 메인 프레임)로 직접 부른다(rendererSend · rendererInvoke). 보이기 · 숨기기 이유와
+//   sent 기록은 스모크 모드의 hook.record 로 보고, dev · packaged 는 동작(창 상태 · 호출)만 본다. 설정 쓰기는 node:fs 의 renameSync 를
+//   세는 감싸개(countRenames)로, 콘솔 중계는 fd 2 · process.stderr.write 잡기(captureRelay)로 본다 — 둘 다 afterEach 가 되돌린다.
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildTrayBuildInfo, buildTrayCsp } from '../../scripts/trayBuild.ts';
@@ -51,6 +55,8 @@ import {
 const require = createRequire(import.meta.url);
 const { formatSmokeArgs, parseSmokeArgs } = require('./smokeArgs.cjs') as typeof import('./smokeArgs.cjs');
 const { RESULT_FILE } = require('./smokeOut.cjs') as typeof import('./smokeOut.cjs');
+const { PUSH_CHANNELS } = require('./pushChannels.cjs') as typeof import('./pushChannels.cjs');
+const { consoleLine } = require('./consoleLine.cjs') as typeof import('./consoleLine.cjs');
 
 // 바꿔 끼우는 자리 — main.js 가 require 로 받는 것과 같은 객체다(main · lib 은 바꾼 node:fs 멤버를 그대로 부른다).
 type LoadFn = (this: unknown, request: string, parent: { filename?: string | null } | null | undefined, isMain: boolean) => unknown;
@@ -59,6 +65,8 @@ const nodeFs = require('node:fs') as typeof import('node:fs');
 const realLoad = nodeModule._load;
 const realWriteSync = nodeFs.writeSync;
 const realMkdirSync = nodeFs.mkdirSync;
+const realRenameSync = nodeFs.renameSync;
+const realStderrWrite = process.stderr.write;
 const proc = process as NodeJS.Process & { resourcesPath?: string };
 /** 시험 전의 process.platform · execPath — runMain 이 바꾸고 afterEach 가 이 서술자로 되돌린다(afterAll 이 그대로인지 본다). */
 const REAL_PLATFORM = Object.getOwnPropertyDescriptor(process, 'platform');
@@ -122,6 +130,8 @@ let added: AddedListeners = { uncaughtException: [], unhandledRejection: [] };
 let readyFailureAllowed = false;
 /** 사례가 바꾼 node:fs 멤버의 원래 값 — afterEach 가 되돌린다(patchFs). */
 const fsOriginals = new Map<string, unknown>();
+/** 사례가 바꾼 process.stderr.write 를 되돌린다(captureRelay) — afterEach 가 부른다. */
+let restoreStderr = (): void => {};
 
 const onRejection = (reason: unknown): void => {
   rejections.push(reason);
@@ -159,6 +169,66 @@ function captureWriteSync(this: unknown, fd: unknown, data: unknown, ...rest: un
   return Reflect.apply(realWriteSync, nodeFs, [fd, data, ...rest]);
 }
 
+/**
+ * 콘솔 중계 잡기(Task 7 의 '[tj]' 줄 잡기와 따로) — '[tj] ' 로 시작하지 않는 fd 2 쓰기 전부와 process.stderr.write 를 돌려주는 목록에
+ * 모으고 내보내지 않는다. '[tj] ' 줄은 지금처럼 stderr 로 간다(main 의 logError 로 중계했다면 거기서 드러난다). afterEach 가 되돌린다.
+ */
+function captureRelay(): string[] {
+  const relay: string[] = [];
+  patchFs('writeSync', function (this: unknown, fd: unknown, data: unknown, ...rest: unknown[]): unknown {
+    if (fd === 2 && !(typeof data === 'string' && data.startsWith('[tj] '))) {
+      relay.push(String(data));
+      return typeof data === 'string' ? Buffer.byteLength(data) : 0;
+    }
+    return Reflect.apply(captureWriteSync, this, [fd, data, ...rest]);
+  });
+  const stream = process.stderr;
+  stream.write = ((chunk: unknown) => {
+    relay.push(String(chunk));
+    return true;
+  }) as typeof stream.write;
+  restoreStderr = () => {
+    stream.write = realStderrWrite;
+  };
+  return relay;
+}
+
+/** 설정 파일로 가는 rename 한 번 — 성공했는가. */
+type RenameAttempt = { ok: boolean };
+type RenameLog = {
+  /** 설정 파일로 간 rename 시도(차례대로) — 다른 경로의 rename 은 세지 않고 그대로 넘긴다. */
+  attempts: RenameAttempt[];
+  /** 다음 한 번의 rename 이 error 를 던진다(Error 인스턴스여야 settings.cjs 가 code 를 읽는다). */
+  failNext(error: Error): void;
+};
+
+/**
+ * node:fs 의 renameSync 를 세는 감싸개로 바꾼다 — runMain 전에 부른다(afterEach 가 되돌린다). main 이 부르는 settings.cjs 는 사례마다
+ * 나무의 사본을 새로 읽고 rename 을 모듈 객체로 부르므로 감싼 함수가 잡힌다.
+ */
+function countRenames(file: string): RenameLog {
+  const attempts: RenameAttempt[] = [];
+  let failure: Error | null = null;
+  patchFs('renameSync', (from: unknown, to: unknown) => {
+    if (to !== file) return Reflect.apply(realRenameSync, nodeFs, [from, to]);
+    if (failure !== null) {
+      const error = failure;
+      failure = null;
+      attempts.push({ ok: false });
+      throw error;
+    }
+    Reflect.apply(realRenameSync, nodeFs, [from, to]);
+    attempts.push({ ok: true });
+    return undefined;
+  });
+  return {
+    attempts,
+    failNext: (error) => {
+      failure = error;
+    },
+  };
+}
+
 /** 쌓인 마이크로태스크와 setImmediate 를 돌린다 — ready → onReady, window.open 의 setImmediate open, 약속의 catch. */
 async function settle(): Promise<void> {
   for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve));
@@ -169,7 +239,9 @@ async function settle(): Promise<void> {
  * 깔다가 던지면 만든 폴더를 지우고 다시 던진다 — 그 사례의 tree 는 null 로 남으므로 afterEach 는 이 폴더를 모른다.
  */
 function layTree(): Tree {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'tj-main 배선 ')));
+  // 임시 폴더의 실제 경로 아래에 만든다 — windows-latest 러너의 TEMP 는 8.3 짧은 이름(RUNNER~1)이라, main 이 고르는 경로와 견주는
+  // 사례(settings.json 등)가 같은 글자를 보게
+  const base = mkdtempSync(join(realpathSync.native(tmpdir()), 'tj-main 배선 '));
   try {
     const desktop = join(base, 'desktop');
     const copy = (rel: string) => copyFileSync(join(DESKTOP_SRC, rel), join(desktop, rel));
@@ -224,6 +296,8 @@ type RunOptions = {
   devtools?: string;
   /** 스모크 인자를 직접 준다(틀린 인자) — 없으면 스모크 모드는 formatSmokeArgs 로 만든다. */
   smokeArgv?: readonly string[];
+  /** 스모크 인자 뒤에 붙는 명령줄 인자(--hidden 등). */
+  extraArgv?: readonly string[];
   openExternal?: 'resolve' | 'reject';
   /** 갈래 — process.platform 과 가짜(app.dock · setBounds 손잡이의 기본값)가 함께 따른다. 없으면 DEFAULT_PLATFORM. */
   platform?: FakePlatform;
@@ -298,7 +372,7 @@ async function runMain(mode: Mode, options: RunOptions = {}): Promise<Fake> {
   setProcessValue('platform', platform);
   if (options.execPath !== undefined) setProcessValue('execPath', options.execPath);
   const argv = process.argv;
-  process.argv = [process.execPath, currentTree().desktop, ...smokeArgv];
+  process.argv = [process.execPath, currentTree().desktop, ...smokeArgv, ...(options.extraArgv ?? [])];
   const before = { uncaughtException: new Set(processListeners('uncaughtException')), unhandledRejection: new Set(processListeners('unhandledRejection')) };
   nodeModule._load = function (request, parent, isMain) {
     if (request === 'electron') {
@@ -366,6 +440,102 @@ function readResult(): Record<string, unknown> {
 /** 결과의 versions(smokeOut.cjs 의 SmokeVersions) — 결과 파일마다 이 모양이다. IPC 의 AppInfo 와는 다른 계약이다. */
 const expectedVersions = () => ({ electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node, app: APP_VERSION });
 
+/** main 이 만든 트레이 창(하나뿐). */
+function trayWindow(fake: Fake): FakeWindow {
+  expect(fake.windows).toHaveLength(1);
+  const [win] = fake.windows;
+  if (win === undefined) throw new Error('트레이 창이 없다');
+  return win;
+}
+/** 트레이 창의 메인 프레임에서 온 IPC 사건 — createGuardedIpc 의 발신자 검증을 지난다(창이 살아 있을 때). */
+function trustedEvent(fake: Fake): { senderFrame: FakeContents['mainFrame']; sender: FakeContents } {
+  const contents = windowContents(fake);
+  return { senderFrame: contents.mainFrame, sender: contents };
+}
+/** 렌더러의 send — main 이 ipcMain.on 으로 단 그 채널의 첫 처리기(발신자 검증 포함)를 신뢰하는 발신자로 부른다. */
+function rendererSend(fake: Fake, channel: string, ...args: unknown[]): void {
+  const [listener] = listenersOf(fake.calls, 'ipcMain.on', channel);
+  if (listener === undefined) throw new Error(`ipcMain.on ${channel} 처리기가 없다`);
+  listener(trustedEvent(fake), ...args);
+}
+/** 렌더러의 invoke — main 이 ipcMain.handle 로 단 그 채널의 처리기를 신뢰하는 발신자로 부른 값. */
+function rendererInvoke(fake: Fake, channel: string): unknown {
+  const [handler] = listenersOf(fake.calls, 'ipcMain.handle', channel);
+  if (handler === undefined) throw new Error(`ipcMain.handle ${channel} 처리기가 없다`);
+  return handler(trustedEvent(fake));
+}
+const getState = (fake: Fake): unknown => rendererInvoke(fake, 'tj-get-state');
+/** 창이 처음 그릴 준비가 됐다 — 가짜는 이 사건을 스스로 내지 않는다. 트레이 창을 돌려준다. */
+function readyToShow(fake: Fake): FakeWindow {
+  const win = trayWindow(fake);
+  win.emit('ready-to-show', {});
+  return win;
+}
+/** OS 가 포커스를 가져갔다 — 포커스를 잃고(blur()) blur 사건이 온다. 가짜의 emit 은 상태를 바꾸지 않으므로 둘 다 한다. */
+function loseFocus(win: FakeWindow): void {
+  win.blur();
+  win.emit('blur', {});
+}
+/** 트레이 좌클릭(win32 — main 이 tray.on('click') 으로 단 처리기). */
+function trayClick(fake: Fake): void {
+  const [click] = listenersOf(fake.calls, 'tray.on', 'click');
+  if (click === undefined) throw new Error('트레이 click 처리기가 없다');
+  click({}, { x: 0, y: 0, width: 0, height: 0 }, { x: 0, y: 0 });
+}
+/** setContextMenu 로 붙은 트레이 메뉴의 그 항목을 누른다(가짜 Menu.buildFromTemplate 은 { template } 을 돌려준다). */
+function trayMenuClick(fake: Fake, label: string): void {
+  const menu = callsOf(fake, 'tray.setContextMenu').at(-1)?.args[0] as { template: Array<{ label?: string; click?: Fn }> } | undefined;
+  const item = menu?.template.find((candidate) => candidate.label === label);
+  if (item?.click === undefined) throw new Error(`붙은 트레이 메뉴에 '${label}' 이 없다`);
+  item.click({}, undefined, {});
+}
+/** main 의 before-quit 리스너를 부른다(Electron 의 종료 시작). */
+function beforeQuit(fake: Fake): void {
+  for (const listener of listenersOf(fake.calls, 'app.on', 'before-quit')) listener({ preventDefault: () => {} });
+}
+/** main 이 hooks.record 로 넘긴 기록 가운데 그 kind 의 것(스모크 모드 — 엿보기가 hook.record 로 남긴다). */
+function recordsOf(fake: Fake, kind: 'window' | 'sent'): unknown[] {
+  return callsOf(fake, 'hook.record')
+    .map((call) => call.args[0])
+    .filter((entry) => (entry as { kind?: unknown }).kind === kind);
+}
+/** name 호출들의 인자(그 자리 from 뒤의 것만 — 주지 않으면 처음부터). */
+const argsOf = (fake: Fake, name: string, from = 0): unknown[][] => fake.calls.slice(from).filter((call) => call.name === name).map((call) => call.args);
+
+/** 모드마다 main 이 쓰는 설정 파일 — 고른 userData 아래(dev TwelveJanggi-dev · 스모크 프로필 · 패키지는 Electron 기본 TwelveJanggi). */
+function settingsFileOf(mode: Mode): string {
+  const { appData, profile } = currentTree();
+  const userData = mode === 'dev' ? join(appData, 'TwelveJanggi-dev') : isSmokeMode(mode) ? profile : join(appData, 'TwelveJanggi');
+  return join(userData, 'settings.json');
+}
+function readSettingsFile(mode: Mode): Record<string, unknown> {
+  return JSON.parse(readFileSync(settingsFileOf(mode), 'utf8')) as Record<string, unknown>;
+}
+/** 시작 전에 설정 파일을 깐다 — 값이 문자열이면 그대로(깨진 파일), 아니면 JSON. */
+function writeSettingsFileOf(mode: Mode, value: unknown): void {
+  const file = settingsFileOf(mode);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, typeof value === 'string' ? value : `${JSON.stringify(value, null, 2)}\n`);
+}
+/** 첫 실행이 아닌 저장 설정 — 기본값에 덮어쓸 것만 준다. */
+const savedSettings = (patch: Record<string, unknown>) => ({
+  theme: 'dark',
+  opacity: 100,
+  pinned: false,
+  position: null,
+  autostart: false,
+  autostartDefaultApplied: true,
+  ...patch,
+});
+
+/** 디스플레이 둘 — 주 디스플레이 오른쪽에 하나 더(둘 다 작업표시줄 40 은 아래). */
+const TWO_DISPLAYS: readonly FakeDisplay[] = [
+  { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 }, workArea: { x: 0, y: 0, width: 1920, height: 1040 }, scaleFactor: 1 },
+  { id: 2, bounds: { x: 1920, y: 0, width: 1920, height: 1080 }, workArea: { x: 1920, y: 0, width: 1920, height: 1040 }, scaleFactor: 1 },
+];
+/** 작업표시줄 가운데쯤의 아이콘 — 아이콘 쪽 위치가 작업영역 가장자리에 잘리지 않는다(340×400 → { 1342, 632 }). */
+const TRAY_LEFT: Rect = { x: 1500, y: 1040, width: 24, height: 40 };
+
 beforeEach(() => {
   // 지난 사례의 값부터 비운다 — layTree 가 던져도 afterEach 는 지난 사례의 나무 · 기록 · 되돌리기를 쓰지 않는다(폴더는 layTree 가 치웠다)
   tree = null;
@@ -414,8 +584,11 @@ afterEach(async () => {
     await settle();
     process.off('unhandledRejection', onRejection);
     if (!readyFailureAllowed) readyFailureSeen = readyFailure(); // 결과 파일은 나무를 지우기 전에 읽는다
-    // 5. 바꾼 값 되돌리기 — node:fs 멤버(writeSync 포함) · _load · require 캐시 · process 값(갈래 · execPath · versions · env · resourcesPath)
+    // 5. 바꾼 값 되돌리기 — node:fs 멤버(writeSync · renameSync 포함) · process.stderr.write · _load · require 캐시 · process 값(갈래 ·
+    //    execPath · versions · env · resourcesPath)
     restoreFs();
+    restoreStderr();
+    restoreStderr = () => {};
     nodeModule._load = realLoad;
     for (const key of Object.keys(require.cache)) if (!cacheBefore.has(key)) delete require.cache[key];
     restoreProcessValue('platform', REAL_PLATFORM);
@@ -426,6 +599,10 @@ afterEach(async () => {
   }
   expect(rejections, 'unhandledRejection').toStrictEqual([]);
   expect(readyFailureSeen, 'whenReady 실패 — onReady 가 던졌다(가짜에 빠진 멤버?). 일부러면 expectReadyFailure').toBeNull();
+  // 렌더러로 민 채널은 모두 PUSH_CHANNELS 에 있다(스냅샷에 필드가 있다 — 늦게 붙은 화면도 getState 로 같은 상태를 얻는다)
+  const pushChannels: readonly string[] = Object.keys(PUSH_CHANNELS);
+  const strays = fake === null ? [] : callsOf(fake, 'webContents.send').filter((call) => !pushChannels.includes(String(call.args[0])));
+  expect(strays.map((call) => call.args[0]), 'PUSH_CHANNELS 밖의 webContents.send').toStrictEqual([]);
 });
 
 afterAll(() => {
@@ -433,12 +610,24 @@ afterAll(() => {
   expect(nodeModule._load).toBe(realLoad);
   expect(nodeFs.writeSync).toBe(realWriteSync);
   expect(nodeFs.mkdirSync).toBe(realMkdirSync);
+  expect(nodeFs.renameSync).toBe(realRenameSync);
+  expect(process.stderr.write).toBe(realStderrWrite);
   expect(fsOriginals.size).toBe(0);
   expect(Object.getOwnPropertyDescriptor(process, 'platform')).toStrictEqual(REAL_PLATFORM);
   expect(Object.getOwnPropertyDescriptor(process, 'execPath')).toStrictEqual(REAL_EXEC_PATH);
   expect(vi.isFakeTimers()).toBe(false);
   expect(Object.keys(require.cache).filter((key) => key.includes('tj-main 배선'))).toStrictEqual([]);
 });
+
+/** main 이 거는 IPC(설계 §5.3 표 순서) — [등록 함수, 채널]. 스모크는 이 뒤에 hooks.registerIpc 가 tj-smoke-* 를 더한다. */
+const MAIN_IPC: Array<[string, string]> = [
+  ['ipcMain.handle', 'tj-app-info'],
+  ['ipcMain.handle', 'tj-get-state'],
+  ['ipcMain.on', 'tj-set-theme'],
+  ['ipcMain.on', 'tj-set-opacity'],
+  ['ipcMain.on', 'tj-set-layout'],
+  ['ipcMain.on', 'tj-hide'],
+];
 
 const MODES: Mode[] = ['dev', 'smoke', 'packaged'];
 /** [모드, 갈래] 짝 — 세 모드 × 세 갈래. */
@@ -463,7 +652,8 @@ describe('최상위(ready 전)', () => {
     ]);
     expect(head.filter((call) => call.ready).map((call) => call.name)).toStrictEqual([]);
     expect(only(fake, 'app.enableSandbox').ready).toBe(false); // 모든 모드에서 한 번
-    expect(callsOf(fake, 'app.getPath').map((call) => call.args)).toStrictEqual(mode === 'dev' ? [['appData']] : []); // userData 를 읽어 두지 않는다
+    // ready 전에는 userData 를 읽어 두지 않는다(setPath 전에 읽은 값은 낡는다) — ready 뒤의 설정 읽기는 세지 않는다
+    expect(callsOf(fake, 'app.getPath').filter((call) => !call.ready).map((call) => call.args)).toStrictEqual(mode === 'dev' ? [['appData']] : []);
     expect(callsOf(fake, 'app.setPath').map((call) => call.args)).toStrictEqual(userData === null ? [] : [['userData', userData]]);
     if (userData !== null) expect(existsSync(userData)).toBe(true); // setPath 전에 만든다
     expect(head.at(-1)?.args).toStrictEqual([userData]);
@@ -535,7 +725,7 @@ describe('ready 뒤 — 정상 렌더러', () => {
     ['session.on', 'will-download'],
     ['app.on', 'select-client-certificate'],
     ['app.on', 'web-contents-created'],
-    ['ipcMain.handle', 'tj-app-info'],
+    ...MAIN_IPC,
   ];
   /** 창의 webContents 에 loadURL 전에 걸려야 하는 탐색 가드 다섯. */
   const GUARDS: Array<[string, string?]> = [
@@ -644,11 +834,11 @@ describe('ready 뒤 — 정상 렌더러', () => {
     expect(picked).toStrictEqual([[]]); // 인증서를 고르지 않고 잇는다
   });
 
-  it('IPC 는 createGuardedIpc 의 tj-app-info 하나 — 트레이 창의 메인 프레임만 AppInfo { version, electron, chrome, platform } 를 받는다', async () => {
+  it('IPC 는 createGuardedIpc 의 main 채널 여섯(설계 §5.3 순서) — 트레이 창의 메인 프레임만 AppInfo { version, electron, chrome, platform } 를 받는다', async () => {
     const fake = await runMain('dev');
     const ipc = fake.calls.filter((call) => call.name.startsWith('ipcMain.')).map((call) => [call.name, call.args[0]]);
-    expect(ipc).toStrictEqual([['ipcMain.handle', 'tj-app-info']]);
-    const handler = only(fake, 'ipcMain.handle').args[1] as (event: unknown) => unknown;
+    expect(ipc).toStrictEqual(MAIN_IPC);
+    const handler = only(fake, 'ipcMain.handle', 'tj-app-info').args[1] as (event: unknown) => unknown;
     const contents = windowContents(fake);
     expect(handler({ senderFrame: contents.mainFrame, sender: contents })).toStrictEqual({
       version: APP_VERSION,
@@ -694,9 +884,13 @@ const CAUSES: Cause[] = [
 const FAIL_CLOSED_CALLS = ['app.setAppUserModelId', 'Menu.setApplicationMenu', 'dialog.showErrorBox', 'app.quit', 'app.exit'];
 
 describe.each(CAUSES)('fail-closed — $label', ({ renderer, what, where }) => {
-  /** ready 뒤에 FAIL_CLOSED_CALLS 밖의 호출이 없고, [tj] 줄은 '<무엇>: …(<어디>)' 한 줄이다. 그 줄을 돌려준다. */
+  /**
+   * ready 뒤에 FAIL_CLOSED_CALLS 밖의 호출이 없고, 고른 userData 아래에 settings.json 이 없고(설정을 읽지도 쓰지도 않는다), [tj] 줄은
+   * '<무엇>: …(<어디>)' 한 줄이다. 그 줄을 돌려준다.
+   */
   function expectClosed(fake: Fake, mode: Mode): string {
     expect(fake.calls.filter((call) => call.ready && !FAIL_CLOSED_CALLS.includes(call.name)).map((call) => call.name)).toStrictEqual([]);
+    expect(existsSync(settingsFileOf(mode)), settingsFileOf(mode)).toBe(false);
     expect(stderr).toHaveLength(1);
     const line = stderr[0] ?? '';
     expect(line.startsWith(`[tj] ${what}`), line).toBe(true);
@@ -867,10 +1061,11 @@ describe('스모크 실행기 연결(smoke/run.cjs) — main 은 스모크에서
     // guardSession 이 hooks 를 읽을 때 가드가 이미 있었다 — 기본 세션의 onBeforeRequest 하나
     expect(callsOf(fake, 'session.webRequest.onBeforeRequest')).toHaveLength(1);
     expect(indexOf(after, 'session.webRequest.onBeforeRequest')).toBeLessThan(windowAt);
-    // preload 의 send 는 듣는 쪽이 없으면 버려진다 — 수신은 창보다 먼저, 발신자 검증(createGuardedIpc)을 거친다
+    // preload 의 send 는 듣는 쪽이 없으면 버려진다 — 수신은 창보다 먼저, 발신자 검증(createGuardedIpc)을 거친다. main 채널을 모두 건 뒤에
+    // 실행기의 것(hooks.registerIpc)이다.
     const ipc = after.flatMap((call, at) => (call.name.startsWith('ipcMain.') ? [{ call, at }] : []));
     expect(ipc.map(({ call }) => [call.name, call.args[0]])).toStrictEqual([
-      ['ipcMain.handle', 'tj-app-info'],
+      ...MAIN_IPC,
       ['ipcMain.on', 'tj-smoke-preload'],
       ['ipcMain.on', 'tj-smoke-csp'],
     ]);
@@ -894,8 +1089,10 @@ describe('스모크 실행기 연결(smoke/run.cjs) — main 은 스모크에서
     const fake = await runMain(mode);
     expect(Object.keys(require.cache).filter((key) => key.startsWith(join(currentTree().desktop, 'smoke')))).toStrictEqual([]);
     expect(callsOf(fake, 'session.webRequest.onBeforeRequest')).toStrictEqual([]);
-    expect(callsOf(fake, 'ipcMain.on')).toStrictEqual([]);
-    expect(callsOf(fake, 'webContents.on').map((call) => call.args[0])).toStrictEqual(NAVIGATION_EVENTS);
+    // ipcMain.on 은 main 채널 넷뿐이다(tj-smoke-* 없음)
+    expect(callsOf(fake, 'ipcMain.on').map((call) => call.args[0])).toStrictEqual(['tj-set-theme', 'tj-set-opacity', 'tj-set-layout', 'tj-hide']);
+    // webContents.on 은 탐색 가드 넷 — 개발 실행은 그 뒤 콘솔 중계 하나를 더 단다(수집기는 없다)
+    expect(callsOf(fake, 'webContents.on').map((call) => call.args[0])).toStrictEqual(mode === 'dev' ? [...NAVIGATION_EVENTS, 'console-message'] : NAVIGATION_EVENTS);
     expect(listenersOf(fake.calls, 'app.on', 'will-quit')).toStrictEqual([]);
     expect(added).toStrictEqual({ uncaughtException: [], unhandledRejection: [] });
     expect(fake.calls.filter((call) => call.name.startsWith('hook.')).map((call) => call.name)).toStrictEqual([]); // 엿볼 run 이 없다
@@ -1014,17 +1211,27 @@ describe('스모크 실행기 연결(smoke/run.cjs) — main 은 스모크에서
 // 가짜 electron(fakeElectron.ts)의 Electron 흉내 — 창 동작 · 트레이 · 디스플레이 사례가 기대는 규칙을 가짜 자체로 본다. main 이 만든
 // 창을 사례가 직접 부르므로 그 호출도 기록에 남는다.
 describe('가짜 electron — 창 · screen · app 의 Electron 흉내', () => {
-  /** main 이 만든 트레이 창(하나뿐). */
-  function trayWindow(fake: Fake): FakeWindow {
-    expect(fake.windows).toHaveLength(1);
-    const [win] = fake.windows;
-    if (win === undefined) throw new Error('트레이 창이 없다');
-    return win;
+  /** main 없이 만든 가짜와 창(show: false) — main 이 트레이 창에 단 리스너(blur 숨김 · show/hide 전달)가 끼지 않게 가짜의 사건 규칙만 본다. */
+  function bareWindow(): { fake: Fake; win: FakeWindow } {
+    const fake = createFakeElectron({ isPackaged: false, lock: true, appData: currentTree().appData, openExternal: 'reject', platform: 'win32' });
+    const win: FakeWindow = new fake.electron.BrowserWindow({ show: false });
+    return { fake, win };
   }
 
-  it('show · hide 는 보임이 바뀔 때만 사건을 낸다 — 손잡이 blurOnHide 는 보임을 끄기 전에 blur 를 동기로 내고, 그때의 isVisible() 를 기록한다', async () => {
-    const fake = await runMain('dev');
-    const win = trayWindow(fake);
+  it("focus() 는 포커스를 켜고 blur() 는 포커스만 끈다(사건 없음), emit('blur') 는 포커스를 바꾸지 않는다", () => {
+    const { win } = bareWindow();
+    const blurs: boolean[] = [];
+    win.on('blur', () => blurs.push(win.isFocused()));
+    win.focus();
+    win.emit('blur', {}); // Electron 의 emit 처럼 상태는 그대로다
+    expect(win.isFocused()).toBe(true);
+    win.blur();
+    expect(win.isFocused()).toBe(false);
+    expect(blurs).toStrictEqual([true]); // blur() 는 사건을 내지 않는다 — 시험이 따로 낸다
+  });
+
+  it('show · hide 는 보임이 바뀔 때만 사건을 낸다 — 손잡이 blurOnHide 는 보임을 끄기 전에 blur 를 동기로 내고, 그때의 isVisible() 를 기록한다', () => {
+    const { fake, win } = bareWindow();
     const seen: Array<[string, boolean]> = [];
     for (const event of ['show', 'hide', 'blur']) win.on(event, () => seen.push([event, win.isVisible()]));
     win.hide(); // show: false 로 만들었다 — 이미 숨어 있다
@@ -1106,5 +1313,612 @@ describe('가짜 electron — 창 · screen · app 의 Electron 흉내', () => {
     expect(fake.electron.app.dock).toBeUndefined();
     const [icon] = only(fake, 'new Tray').args as [FakeImage];
     expect(icon.isEmpty()).toBe(false); // 기록이 이미지 객체 그 자체다(아이콘 파일을 읽었다)
+  });
+});
+
+/** 첫 실행 뒤의 설정 파일 — 기본값 + 첫 실행 표시(자동 실행 기본값을 적용했다). */
+const FIRST_RUN_FILE = { theme: 'dark', opacity: 100, pinned: false, position: null, autostart: false, autostartDefaultApplied: true };
+/** getState() 의 처음 값 — 기본 설정 · 혼자 하기 · 숨김. */
+const INITIAL_STATE = { theme: 'dark', opacity: 100, mode: 'solo', visible: false };
+/** 잠깐 막힌 rename(백신 · 색인기) — Error 인스턴스라 settings.cjs 가 code 를 읽는다. */
+const eperm = (): Error => Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM', syscall: 'rename' });
+
+describe('설정 — <userData>/settings.json (설계 §5.2 설정 쓰기)', () => {
+  it.each<Mode>(['dev', 'smoke', 'packaged', 'packaged-smoke'])('%s — 파일이 없으면 기본값으로 시작하고, onReady 안에서(동기) 첫 실행 표시를 쓴다 — [tj] 줄 없음', async (mode) => {
+    const fake = await runMain(mode);
+    expect(stderr).toStrictEqual([]);
+    expect(readSettingsFile(mode)).toStrictEqual(FIRST_RUN_FILE); // 가짜 시계를 돌리지 않았다 — 예약이 아니라 그 자리에서 썼다
+    expect(getState(fake)).toStrictEqual(INITIAL_STATE);
+  });
+
+  it('못 읽는 파일 — [tj] settings: 한 줄, 기본값으로 시작하고 그 파일은 그대로 둔다(첫 실행이 아니다 — 첫 실행 표시를 쓰지 않는다)', async () => {
+    const broken = '{ "theme": "light", 깨진';
+    writeSettingsFileOf('dev', broken);
+    const log = countRenames(settingsFileOf('dev'));
+    const fake = await runMain('dev');
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]?.startsWith('[tj] settings: '), stderr[0]).toBe(true);
+    expect(stderr[0]).toContain(settingsFileOf('dev'));
+    expect(getState(fake)).toStrictEqual(INITIAL_STATE);
+    expect(log.attempts).toStrictEqual([]);
+    expect(readFileSync(settingsFileOf('dev'), 'utf8')).toBe(broken);
+  });
+
+  it('저장된 설정으로 시작 — 창 배경 · 투명도 · getState, 첫 표시는 저장 위치, 고정이라 유예 뒤 blur 에도 숨지 않는다, 시작에 쓰지 않는다', async () => {
+    writeSettingsFileOf('dev', savedSettings({ theme: 'light', opacity: 64, pinned: true, position: { x: 100, y: 100 } }));
+    const log = countRenames(settingsFileOf('dev'));
+    const fake = await runMain('dev');
+    expect(only(fake, 'new BrowserWindow').args[0]).toMatchObject({ backgroundColor: '#f5f6f8', opacity: 0.64 });
+    expect(getState(fake)).toStrictEqual({ theme: 'light', opacity: 64, mode: 'solo', visible: false });
+    const win = readyToShow(fake);
+    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[{ x: 100, y: 100 }]]);
+    vi.advanceTimersByTime(301);
+    loseFocus(win);
+    expect(win.isVisible()).toBe(true);
+    expect(callsOf(fake, 'win.hide')).toStrictEqual([]);
+    expect(log.attempts).toStrictEqual([]);
+    expect(stderr).toStrictEqual([]);
+  });
+
+  it('예약 저장 — t0 · t0+100 · t0+200 의 변경은 t0+500 에 한 번(마지막 값)만 쓴다, t0+499 까지는 파일 그대로', async () => {
+    const log = countRenames(settingsFileOf('dev'));
+    const fake = await runMain('dev');
+    expect(log.attempts).toStrictEqual([{ ok: true }]); // 시작의 첫 실행 표시 — 이 뒤로 센다
+    rendererSend(fake, 'tj-set-opacity', 50);
+    vi.advanceTimersByTime(100);
+    rendererSend(fake, 'tj-set-opacity', 60);
+    vi.advanceTimersByTime(100);
+    rendererSend(fake, 'tj-set-opacity', 70);
+    vi.advanceTimersByTime(299); // t0+499
+    expect(log.attempts).toHaveLength(1);
+    expect(readSettingsFile('dev')).toStrictEqual(FIRST_RUN_FILE);
+    vi.advanceTimersByTime(1); // t0+500
+    expect(log.attempts).toStrictEqual([{ ok: true }, { ok: true }]);
+    expect(readSettingsFile('dev')).toStrictEqual({ ...FIRST_RUN_FILE, opacity: 70 });
+    vi.advanceTimersByTime(1000);
+    expect(log.attempts).toHaveLength(2);
+  });
+
+  it('rename 이 EPERM 이면 100ms 뒤 한 번 더 — 성공하면 dirty 를 지운다(before-quit 이 다시 쓰지 않는다), [tj] 줄 없음', async () => {
+    const log = countRenames(settingsFileOf('dev'));
+    const fake = await runMain('dev');
+    log.failNext(eperm());
+    rendererSend(fake, 'tj-set-opacity', 50);
+    vi.advanceTimersByTime(300);
+    expect(log.attempts).toStrictEqual([{ ok: true }, { ok: false }]);
+    expect(readSettingsFile('dev').opacity).toBe(100);
+    vi.advanceTimersByTime(99);
+    expect(log.attempts).toHaveLength(2);
+    vi.advanceTimersByTime(1);
+    expect(log.attempts).toStrictEqual([{ ok: true }, { ok: false }, { ok: true }]);
+    expect(readSettingsFile('dev').opacity).toBe(50);
+    beforeQuit(fake);
+    expect(log.attempts).toHaveLength(3); // 쓴 뒤라 비울 것이 없다
+    expect(vi.getTimerCount()).toBe(0);
+    expect(stderr).toStrictEqual([]);
+  });
+
+  it.each(['예약', '재시도'] as const)('before-quit — 쓰지 않은 변경(%s 대기 중)은 곧바로 쓰고 예약 · 재시도 타이머를 지운다', async (pending) => {
+    const log = countRenames(settingsFileOf('dev'));
+    const fake = await runMain('dev');
+    if (pending === '재시도') log.failNext(eperm());
+    rendererSend(fake, 'tj-set-opacity', 50);
+    vi.advanceTimersByTime(pending === '재시도' ? 300 : 100);
+    expect(vi.getTimerCount()).toBe(1);
+    const before = log.attempts.length;
+    beforeQuit(fake);
+    expect(log.attempts.slice(before)).toStrictEqual([{ ok: true }]);
+    expect(readSettingsFile('dev').opacity).toBe(50);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(1000);
+    expect(log.attempts).toHaveLength(before + 1);
+    expect(stderr).toStrictEqual([]);
+  });
+
+  it('win32 session-end(로그오프 · 종료 — before-quit 이 오지 않는다) — 쓰지 않은 변경을 곧바로 쓰고 예약을 지운다', async () => {
+    const log = countRenames(settingsFileOf('dev'));
+    const fake = await runMain('dev');
+    rendererSend(fake, 'tj-set-opacity', 50);
+    vi.advanceTimersByTime(100);
+    trayWindow(fake).emit('session-end', { reasons: ['logoff'] });
+    expect(log.attempts).toStrictEqual([{ ok: true }, { ok: true }]);
+    expect(readSettingsFile('dev').opacity).toBe(50);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(1000);
+    expect(log.attempts).toHaveLength(2);
+  });
+
+  it('비우기의 쓰기가 실패하면 [tj] settings: 한 줄 — 기다릴 수 없어 다시 해 보지 않는다(타이머 없음)', async () => {
+    const log = countRenames(settingsFileOf('dev'));
+    const fake = await runMain('dev');
+    rendererSend(fake, 'tj-set-opacity', 50);
+    log.failNext(eperm());
+    beforeQuit(fake);
+    expect(log.attempts).toStrictEqual([{ ok: true }, { ok: false }]);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]?.startsWith('[tj] settings: EPERM'), stderr[0]).toBe(true);
+  });
+});
+
+describe('IPC · push — 상태 묻기 · 바꾸기 · 숨기기 · 창 사건 (설계 §5.3)', () => {
+  it('tj-get-state — 처음 { dark · 100 · solo · 숨김 }, ready-to-show 로 보인 뒤 visible true', async () => {
+    const fake = await runMain('dev');
+    expect(getState(fake)).toStrictEqual(INITIAL_STATE);
+    readyToShow(fake);
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, visible: true });
+  });
+
+  it('tj-get-state 의 visible 은 창 getter 가 아니라 main 의 값이다 — 마지막으로 민 tj-shown · tj-hidden 과 늘 같다', async () => {
+    const fake = await runMain('dev');
+    const win = readyToShow(fake);
+    // 'hide' 사건만 온다(가짜의 emit 은 Electron 처럼 상태를 바꾸지 않는다 — isVisible() 는 아직 참이다)
+    win.emit('hide', {});
+    expect(argsOf(fake, 'webContents.send').at(-1)).toStrictEqual(['tj-hidden']);
+    expect(win.isVisible()).toBe(true);
+    expect(getState(fake)).toStrictEqual(INITIAL_STATE);
+  });
+
+  it('tj-set-theme — light: 창 배경 #f5f6f8 → tj-theme, getState 는 곧바로 · settings.json 은 300ms 뒤. 받지 않는 값(purple 등)은 아무것도 하지 않는다', async () => {
+    const fake = await runMain('dev');
+    const mark = fake.calls.length;
+    for (const theme of ['purple', 'Light', '', null, undefined, 1]) rendererSend(fake, 'tj-set-theme', theme);
+    expect(fake.calls.slice(mark).map((call) => call.name)).toStrictEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    rendererSend(fake, 'tj-set-theme', 'light');
+    expect(fake.calls.slice(mark).map((call) => [call.name, ...call.args])).toStrictEqual([
+      ['win.setBackgroundColor', '#f5f6f8'],
+      ['webContents.send', 'tj-theme', 'light'],
+    ]);
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, theme: 'light' });
+    vi.advanceTimersByTime(299);
+    expect(readSettingsFile('dev').theme).toBe('dark');
+    vi.advanceTimersByTime(1);
+    expect(readSettingsFile('dev').theme).toBe('light');
+  });
+
+  it("tj-set-opacity — 150: 자른 값(setOpacity(1) · tj-opacity 100), 64: setOpacity(0.64) → tj-opacity 64. '70' · NaN 등은 아무것도 하지 않는다", async () => {
+    const fake = await runMain('dev');
+    const mark = fake.calls.length;
+    for (const percent of ['70', Number.NaN, Number.POSITIVE_INFINITY, null, undefined, {}]) rendererSend(fake, 'tj-set-opacity', percent);
+    expect(fake.calls.slice(mark).map((call) => call.name)).toStrictEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    rendererSend(fake, 'tj-set-opacity', 150);
+    rendererSend(fake, 'tj-set-opacity', 64);
+    expect(fake.calls.slice(mark).map((call) => [call.name, ...call.args])).toStrictEqual([
+      ['win.setOpacity', 1],
+      ['webContents.send', 'tj-opacity', 100],
+      ['win.setOpacity', 0.64],
+      ['webContents.send', 'tj-opacity', 64],
+    ]);
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, opacity: 64 });
+    vi.advanceTimersByTime(300);
+    expect(readSettingsFile('dev').opacity).toBe(64);
+  });
+
+  it('tj-set-layout — online(나무의 layout.cjs 를 360×480 으로 바꿔 둔다): setContentSize(360, 480) 뒤 그 크기로 다시 배치. 받지 않는 키(x 등)는 아무것도 하지 않는다', async () => {
+    const layoutFile = join(currentTree().desktop, 'lib', 'layout.cjs');
+    const source = readFileSync(layoutFile, 'utf8');
+    const online = 'online: Object.freeze({ width: 340, height: 400 })';
+    expect(source).toContain(online);
+    writeFileSync(layoutFile, source.replace(online, 'online: Object.freeze({ width: 360, height: 480 })'));
+    const fake = await runMain('dev', { trayBounds: TRAY_LEFT });
+    readyToShow(fake);
+    const mark = fake.calls.length;
+    for (const key of ['x', 'Online', 'constructor', null]) rendererSend(fake, 'tj-set-layout', key);
+    expect(fake.calls.slice(mark).map((call) => call.name)).toStrictEqual([]);
+    rendererSend(fake, 'tj-set-layout', 'online');
+    // 아이콘 { 1500, 1040, 24, 40 } 쪽 — 가운데 1512 에서 폭의 절반을 빼고, 아이콘 위로 높이 + 8
+    const sized = fake.calls.slice(mark).filter((call) => call.name === 'win.setContentSize' || call.name === 'win.setBounds');
+    expect(sized.map((call) => [call.name, ...call.args])).toStrictEqual([
+      ['win.setContentSize', 360, 480],
+      ['win.setBounds', { x: 1332, y: 552 }],
+    ]);
+    // 레이아웃은 남는다 — 숨겼다가 다시 보여도 그 크기로 놓는다
+    rendererSend(fake, 'tj-hide');
+    const again = fake.calls.length;
+    trayClick(fake);
+    expect(argsOf(fake, 'win.setBounds', again)).toStrictEqual([[{ x: 1332, y: 552 }]]);
+  });
+
+  it('tj-hide(Esc · ✕) — 숨기고 { window · hide · request } 를 기록한다', async () => {
+    const fake = await runMain('smoke');
+    const win = readyToShow(fake);
+    rendererSend(fake, 'tj-hide');
+    expect(win.isVisible()).toBe(false);
+    expect(getState(fake)).toStrictEqual(INITIAL_STATE);
+    expect(recordsOf(fake, 'window')).toStrictEqual([
+      { kind: 'window', action: 'show', reason: 'start' },
+      { kind: 'window', action: 'hide', reason: 'request' },
+    ]);
+  });
+
+  it.each<Mode>(['dev', 'smoke', 'packaged-smoke'])('%s — 창 show · hide 사건(가짜의 직접 호출 — OS · 스모크가 일으킨 것)도 tj-shown · tj-hidden 을 보낸다(스모크는 sent 로 기록)', async (mode) => {
+    const fake = await runMain(mode);
+    const win = trayWindow(fake);
+    win.show();
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, visible: true });
+    win.hide();
+    expect(getState(fake)).toStrictEqual(INITIAL_STATE);
+    expect(argsOf(fake, 'webContents.send')).toStrictEqual([['tj-shown'], ['tj-hidden']]);
+    const sent = isSmokeMode(mode) ? [{ kind: 'sent', channel: 'tj-shown' }, { kind: 'sent', channel: 'tj-hidden' }] : [];
+    expect(recordsOf(fake, 'sent')).toStrictEqual(sent);
+    expect(recordsOf(fake, 'window')).toStrictEqual([]); // showWindow · hideWindow 를 거치지 않았다
+  });
+});
+
+describe('보이기 · 숨기기 · blur (설계 §5.2 — 가짜 시계)', () => {
+  /** 시작 창을 숨긴 뒤 트레이 좌클릭으로 다시 보인다(showReason 'tray') — 그 뒤 시계는 사례가 돌린다. */
+  function showByTray(fake: Fake): FakeWindow {
+    const win = readyToShow(fake);
+    rendererSend(fake, 'tj-hide');
+    vi.advanceTimersByTime(1000);
+    trayClick(fake);
+    expect(win.isVisible()).toBe(true);
+    return win;
+  }
+
+  it.each<Mode>(['dev', 'smoke', 'packaged', 'packaged-smoke'])("%s — ready-to-show 에 show('start'): 아이콘 쪽 배치(setBounds) → show → focus, getState visible true", async (mode) => {
+    const fake = await runMain(mode, { trayBounds: TRAY_LEFT });
+    const mark = fake.calls.length;
+    const win = readyToShow(fake);
+    const order = fake.calls.slice(mark).filter((call) => ['win.setBounds', 'win.show', 'win.focus'].includes(call.name));
+    expect(order.map((call) => [call.name, ...call.args])).toStrictEqual([['win.setBounds', { x: 1342, y: 632 }], ['win.show'], ['win.focus']]);
+    expect([win.isVisible(), win.isFocused()]).toStrictEqual([true, true]);
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, visible: true });
+    expect(recordsOf(fake, 'window')).toStrictEqual(isSmokeMode(mode) ? [{ kind: 'window', action: 'show', reason: 'start' }] : []);
+  });
+
+  it.each([
+    ['dev', 'win32', false],
+    ['packaged', 'win32', false],
+    ['smoke', 'win32', true],
+    ['packaged-smoke', 'win32', true],
+    ['dev', 'linux', true],
+  ] as const)('%s · %s + 명령줄 --hidden — ready-to-show 에 보인다: %s (로그인 실행은 Windows 의 --hidden, 스모크는 늘 아니다)', async (mode, platform, shown) => {
+    const fake = await runMain(mode, { platform, extraArgv: ['--hidden'] });
+    const win = readyToShow(fake);
+    expect(win.isVisible()).toBe(shown);
+    expect(callsOf(fake, 'win.show')).toHaveLength(shown ? 1 : 0);
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, visible: shown });
+  });
+
+  it.each(PLATFORMS)('%s — showWindow 는 darwin 에서만 app.focus({ steal: true }) 를 show 보다 먼저 부른다', async (platform) => {
+    const fake = await runMain('dev', { platform });
+    readyToShow(fake);
+    expect(argsOf(fake, 'app.focus')).toStrictEqual(platform === 'darwin' ? [[{ steal: true }]] : []);
+    if (platform === 'darwin') expect(indexOf(fake.calls, 'app.focus')).toBeLessThan(indexOf(fake.calls, 'win.show'));
+  });
+
+  it("close(Alt+F4 같은 OS 닫기) — 종료 중이 아니면 막고 hide('close'), before-quit 뒤에는 막지 않는다", async () => {
+    const fake = await runMain('smoke');
+    const win = readyToShow(fake);
+    let prevented = 0;
+    const close = { preventDefault: () => (prevented += 1) };
+    win.emit('close', close);
+    expect(prevented).toBe(1);
+    expect(win.isVisible()).toBe(false);
+    beforeQuit(fake);
+    win.emit('close', close);
+    expect(prevented).toBe(1);
+    expect(recordsOf(fake, 'window')).toStrictEqual([
+      { kind: 'window', action: 'show', reason: 'start' },
+      { kind: 'window', action: 'hide', reason: 'close' },
+    ]);
+  });
+
+  it("트레이 — win32 좌클릭은 show('tray'), 붙은 메뉴의 '열기' 는 show('menu') — 숨긴 창을 보인다", async () => {
+    const fake = await runMain('smoke');
+    const win = readyToShow(fake);
+    rendererSend(fake, 'tj-hide');
+    trayClick(fake);
+    expect(win.isVisible()).toBe(true);
+    rendererSend(fake, 'tj-hide');
+    trayMenuClick(fake, '열기');
+    expect(win.isVisible()).toBe(true);
+    expect(recordsOf(fake, 'window')).toStrictEqual([
+      { kind: 'window', action: 'show', reason: 'start' },
+      { kind: 'window', action: 'hide', reason: 'request' },
+      { kind: 'window', action: 'show', reason: 'tray' },
+      { kind: 'window', action: 'hide', reason: 'request' },
+      { kind: 'window', action: 'show', reason: 'menu' },
+    ]);
+  });
+
+  it("second-instance — 숨긴 창을 보인다(show('second-instance')), 화면 상태는 그대로", async () => {
+    const fake = await runMain('smoke');
+    const win = readyToShow(fake);
+    rendererSend(fake, 'tj-hide');
+    const [secondInstance] = listenersOf(fake.calls, 'app.on', 'second-instance');
+    if (secondInstance === undefined) throw new Error('second-instance 처리기가 없다');
+    secondInstance({}, [process.execPath, currentTree().desktop], currentTree().base, {});
+    expect(win.isVisible()).toBe(true);
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, visible: true });
+    expect(recordsOf(fake, 'window')).toStrictEqual([
+      { kind: 'window', action: 'show', reason: 'start' },
+      { kind: 'window', action: 'hide', reason: 'request' },
+      { kind: 'window', action: 'show', reason: 'second-instance' },
+    ]);
+  });
+
+  it.each([
+    [100, false],
+    [300, false],
+    [301, true],
+  ])('시작 때 보인 창 — 보인 지 %ims 의 blur 로 숨는다: %s (유예 300ms 까지, 시작 표시는 미룬 확인을 하지 않는다)', async (ms, hides) => {
+    const fake = await runMain('smoke');
+    const win = readyToShow(fake);
+    const timers = vi.getTimerCount();
+    vi.advanceTimersByTime(ms);
+    loseFocus(win);
+    expect(vi.getTimerCount()).toBe(timers); // 미룬 확인을 걸지 않았다
+    vi.advanceTimersByTime(1000);
+    expect(win.isVisible()).toBe(!hides);
+    expect(recordsOf(fake, 'window').slice(1)).toStrictEqual(hides ? [{ kind: 'window', action: 'hide', reason: 'blur' }] : []);
+  });
+
+  it.each([
+    ['포커스를 잃은 채', false, true],
+    ['포커스를 되찾음', true, false],
+  ] as const)('트레이로 보인 창 — 100ms 의 blur 는 삼키고, 301ms 에 %s 이면 숨긴다: %s (미룬 확인 한 번)', async (_label, refocus, hides) => {
+    const fake = await runMain('smoke');
+    const win = showByTray(fake);
+    const marks = recordsOf(fake, 'window').length;
+    const timers = vi.getTimerCount();
+    vi.advanceTimersByTime(100);
+    loseFocus(win);
+    expect(win.isVisible()).toBe(true);
+    expect(vi.getTimerCount()).toBe(timers + 1); // 미룬 확인 하나
+    vi.advanceTimersByTime(100);
+    if (refocus) win.focus(); // 팝업 안을 다시 눌렀다
+    vi.advanceTimersByTime(100); // 보인 지 300ms — 아직 확인하지 않는다
+    expect(win.isVisible()).toBe(true);
+    vi.advanceTimersByTime(1); // 301ms
+    expect(win.isVisible()).toBe(!hides);
+    expect(vi.getTimerCount()).toBe(timers);
+    expect(recordsOf(fake, 'window').slice(marks)).toStrictEqual(hides ? [{ kind: 'window', action: 'hide', reason: 'blur' }] : []);
+  });
+
+  it('DevTools 가 열려 있으면 숨기지 않는다 — 유예 안 blur 뒤의 미룬 확인(100–300ms 사이에 연다) · 유예 뒤 blur 모두', async () => {
+    const fake = await runMain('smoke');
+    const win = showByTray(fake);
+    const marks = recordsOf(fake, 'window').length;
+    vi.advanceTimersByTime(100);
+    loseFocus(win);
+    vi.advanceTimersByTime(50);
+    win.webContents.openDevTools({ mode: 'detach' });
+    vi.advanceTimersByTime(151); // 301ms — 미룬 확인
+    expect(win.isVisible()).toBe(true);
+    vi.advanceTimersByTime(100);
+    loseFocus(win); // 유예 뒤의 blur
+    expect(win.isVisible()).toBe(true);
+    expect(recordsOf(fake, 'window').slice(marks)).toStrictEqual([]);
+  });
+
+  it('hide 안의 동기 blur(그때 isVisible() 는 아직 참)는 바깥 클릭이 아니다 — 유예 뒤 tj-hide 는 request 숨김 하나로만 기록된다', async () => {
+    const fake = await runMain('smoke');
+    const win = readyToShow(fake);
+    vi.advanceTimersByTime(301);
+    fake.handles.blurOnHide = true;
+    rendererSend(fake, 'tj-hide');
+    expect(argsOf(fake, 'handle.blurOnHide')).toStrictEqual([[true]]); // 양성 대조 — blur 는 보이는 동안 왔다
+    expect(win.isVisible()).toBe(false);
+    expect(recordsOf(fake, 'window')).toStrictEqual([
+      { kind: 'window', action: 'show', reason: 'start' },
+      { kind: 'window', action: 'hide', reason: 'request' },
+    ]);
+  });
+
+  it('before-quit 은 미룬 blur 확인을 지운다 — 남은 타이머 없음, 그 뒤로 창을 만지지 않는다', async () => {
+    const fake = await runMain('dev');
+    const win = showByTray(fake);
+    vi.advanceTimersByTime(100);
+    loseFocus(win);
+    expect(vi.getTimerCount()).toBe(1);
+    beforeQuit(fake);
+    expect(vi.getTimerCount()).toBe(0);
+    const mark = fake.calls.length;
+    vi.advanceTimersByTime(1000);
+    expect(fake.calls.slice(mark)).toStrictEqual([]);
+    expect(win.isVisible()).toBe(true);
+  });
+});
+
+describe('배치 · 이동 (설계 §5.2 — 아이콘 쪽 배치 · 디스플레이 변경 · 위치 저장)', () => {
+  /** 사용자가 창을 dx 만큼 옮긴다 — 위치를 바꾸고 moved 를 낸다(darwin 갈래의 가짜는 setBounds 안에서 이미 낸다). will-move 는 사례가 낸다. */
+  function drag(fake: Fake, win: FakeWindow, dx: number): void {
+    win.setBounds({ x: win.getBounds().x + dx });
+    if (!fake.handles.moveOnSetBounds) win.emit('moved', {});
+  }
+  /** 사용자가 끌기 시작했다 — will-move(Electron: 손으로 옮길 때만 온다). */
+  function willMove(win: FakeWindow): void {
+    win.emit('will-move', {}, win.getBounds());
+  }
+
+  it.each([
+    ['아이콘이 작업표시줄 가운데쯤 — 아이콘 가운데 위', TWO_DISPLAYS, TRAY_LEFT, { x: 1342, y: 632 }],
+    ['아이콘이 오른쪽 끝 — 작업영역 안으로(여백 8)', TWO_DISPLAYS, { x: 1880, y: 1040, width: 24, height: 40 }, { x: 1572, y: 632 }],
+    ['아이콘 자리를 모름(빈 사각형) — 주 디스플레이(목록의 앞) 오른쪽 아래', [TWO_DISPLAYS[1], TWO_DISPLAYS[0]], { x: 0, y: 0, width: 0, height: 0 }, { x: 3492, y: 632 }],
+  ] as const)('첫 표시는 아이콘 쪽 — %s', async (_label, displays, trayBounds, placed) => {
+    const fake = await runMain('dev', { displays: displays as readonly FakeDisplay[], trayBounds });
+    readyToShow(fake);
+    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[placed]]);
+  });
+
+  it('저장 위치가 주 디스플레이 밖 — 그 디스플레이의 작업영역 안(3700 → 3492). 보이는 중에 그 디스플레이를 떼면 남은 디스플레이 작업영역 안으로', async () => {
+    writeSettingsFileOf('dev', savedSettings({ position: { x: 3700, y: 100 } }));
+    const fake = await runMain('dev', { displays: TWO_DISPLAYS });
+    readyToShow(fake);
+    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[{ x: 3492, y: 100 }]]);
+    fake.removeDisplay(2);
+    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[{ x: 3492, y: 100 }], [{ x: 1572, y: 100 }]]);
+  });
+
+  it('숨긴 중에는 디스플레이를 떼도 · 바뀌어도 배치하지 않는다 — 다음 표시가 남은 디스플레이 안으로 놓는다', async () => {
+    writeSettingsFileOf('dev', savedSettings({ position: { x: 3700, y: 100 } }));
+    const fake = await runMain('dev', { displays: TWO_DISPLAYS });
+    readyToShow(fake);
+    rendererSend(fake, 'tj-hide');
+    const mark = fake.calls.length;
+    fake.electron.screen.emit('display-metrics-changed', {}, fake.displays[0], ['workArea']);
+    fake.removeDisplay(2);
+    expect(argsOf(fake, 'win.setBounds', mark)).toStrictEqual([]);
+    trayClick(fake);
+    expect(argsOf(fake, 'win.setBounds', mark)).toStrictEqual([[{ x: 1572, y: 100 }]]);
+  });
+
+  it('보이는 중 display-metrics-changed(배율 · 작업영역) — 바뀐 작업영역 안으로 다시 배치', async () => {
+    writeSettingsFileOf('dev', savedSettings({ position: { x: 3700, y: 100 } }));
+    const fake = await runMain('dev', { displays: TWO_DISPLAYS });
+    readyToShow(fake);
+    const second = fake.displays[1];
+    if (second === undefined) throw new Error('둘째 디스플레이가 없다');
+    second.workArea = { x: 1920, y: 0, width: 1800, height: 1040 }; // 그 디스플레이 오른쪽에 작업표시줄이 섰다
+    fake.electron.screen.emit('display-metrics-changed', {}, structuredClone(second), ['workArea']);
+    expect(argsOf(fake, 'win.setBounds')).toStrictEqual([[{ x: 3492, y: 100 }], [{ x: 3372, y: 100 }]]);
+  });
+
+  it.each(['win32', 'darwin'] as const)('%s — 이동 저장: will-move 없는 moved 는 저장하지 않고, will-move 뒤의 moved 는 300ms 뒤 저장한다. 다시 보이면(배치) 게이트가 닫힌다', async (platform) => {
+    const log = countRenames(settingsFileOf('dev'));
+    const fake = await runMain('dev', { platform, trayBounds: TRAY_LEFT });
+    const win = readyToShow(fake);
+    const placed = { x: 1342, y: 632 };
+    expect(win.getBounds()).toMatchObject(placed);
+    const base = log.attempts.length;
+    // 1. will-move 없이 옮겨졌다(프로그램 · OS) — 300ms 가 지나도 저장하지 않는다
+    drag(fake, win, 50);
+    vi.advanceTimersByTime(400);
+    expect(readSettingsFile('dev').position).toBeNull();
+    expect(log.attempts).toHaveLength(base);
+    // 2. 사용자가 끌었다(will-move → moved) — 300ms 뒤 그 자리를 저장한다
+    willMove(win);
+    drag(fake, win, 50);
+    vi.advanceTimersByTime(299);
+    expect(log.attempts).toHaveLength(base);
+    vi.advanceTimersByTime(1);
+    const saved = { x: placed.x + 100, y: placed.y };
+    expect(readSettingsFile('dev').position).toStrictEqual(saved);
+    expect(log.attempts).toHaveLength(base + 1);
+    // 2b. 기준이 저장한 자리로 옮겨 갔다 — 허용 오차(2px) 안의 moved 는 다시 쓰지 않는다
+    drag(fake, win, 1);
+    vi.advanceTimersByTime(400);
+    expect(log.attempts).toHaveLength(base + 1);
+    // 3. 숨겼다가 다시 보인다(win32 트레이 좌클릭 · darwin 은 붙은 메뉴의 '열기') — 그 배치가 게이트를 닫는다
+    rendererSend(fake, 'tj-hide');
+    if (platform === 'win32') trayClick(fake);
+    else trayMenuClick(fake, '열기');
+    expect(win.isVisible()).toBe(true);
+    expect(win.getBounds()).toMatchObject(saved);
+    drag(fake, win, 50);
+    vi.advanceTimersByTime(400);
+    expect(readSettingsFile('dev').position).toStrictEqual(saved);
+    expect(log.attempts).toHaveLength(base + 1);
+  });
+
+  it('darwin — will-move 뒤에 다시 배치되면 그 setBounds 안의 동기 moved 는 저장하지 않는다(배치 중)', async () => {
+    const log = countRenames(settingsFileOf('dev'));
+    const fake = await runMain('dev', { platform: 'darwin', trayBounds: TRAY_LEFT });
+    readyToShow(fake);
+    const base = log.attempts.length;
+    willMove(trayWindow(fake)); // 사용자가 끌기 시작했다
+    fake.handles.trayBounds = { x: 1000, y: 1040, width: 24, height: 40 }; // 그사이 아이콘 자리가 바뀌었다
+    const moved = (): number => callsOf(fake, 'win.emit').filter((call) => call.args[0] === 'moved').length;
+    const before = moved();
+    fake.electron.screen.emit('display-metrics-changed', {}, fake.displays[0], ['workArea']);
+    expect(argsOf(fake, 'win.setBounds').at(-1)).toStrictEqual([{ x: 842, y: 632 }]); // 새 아이콘 쪽으로 다시 놓았다
+    expect(moved()).toBe(before + 1); // 양성 대조 — 그 setBounds 안에서 moved 가 왔다
+    vi.advanceTimersByTime(400);
+    expect(readSettingsFile('dev').position).toBeNull();
+    expect(log.attempts).toHaveLength(base);
+  });
+});
+
+describe('콘솔 중계 — 개발 실행에서만, consoleLine 한 줄로 (설계 §5.2)', () => {
+  /** 페이지가 보낸 콘솔 한 줄(새 모양 — 첫 인자 객체). 터미널을 건드리는 글자(ESC · OSC 52 · BEL)와 가짜 '[tj]' 줄을 담았다. */
+  const MESSAGE = { level: 'error', message: 'a\u001b]52;c;eA==\u0007\n[tj] x', sourceId: 'app://twelvejanggi/assets/a.js', lineNumber: 3 };
+
+  it('dev — 탐색 가드 뒤 · loadURL 전에 단 console-message 리스너가 consoleLine 한 줄만 stderr 로 옮긴다(제어 문자 · 가짜 [tj] 줄 없음)', async () => {
+    const relay = captureRelay();
+    const fake = await runMain('dev');
+    const listeners = listenersOf(fake.calls, 'webContents.on', 'console-message');
+    expect(listeners).toHaveLength(1);
+    const at = indexOf(fake.calls, 'webContents.on', 'console-message');
+    expect(at).toBeGreaterThan(indexOf(fake.calls, 'webContents.on', 'will-attach-webview'));
+    expect(at).toBeLessThan(indexOf(fake.calls, 'win.loadURL'));
+    expect(relay).toStrictEqual([]);
+    listeners[0]?.(structuredClone(MESSAGE));
+    expect(relay).toStrictEqual([`${consoleLine(MESSAGE)}\n`]);
+    expect(relay.join('')).not.toMatch(/[\u001b\u0007]/);
+    expect(stderr).toStrictEqual([]);
+  });
+
+  it.each(['smoke', 'packaged-smoke'] as const)('%s — console-message 리스너는 실행기의 수집기 하나뿐이다(불러도 stderr 로 옮기지 않는다)', async (mode) => {
+    const relay = captureRelay();
+    const fake = await runMain(mode);
+    const listeners = listenersOf(fake.calls, 'webContents.on', 'console-message');
+    expect(listeners).toHaveLength(1);
+    listeners[0]?.(structuredClone(MESSAGE));
+    expect(relay).toStrictEqual([]);
+    expect(stderr).toStrictEqual([]);
+  });
+
+  it('packaged — console-message 리스너가 없고 아무것도 옮기지 않는다', async () => {
+    const relay = captureRelay();
+    const fake = await runMain('packaged');
+    expect(listenersOf(fake.calls, 'webContents.on', 'console-message')).toStrictEqual([]);
+    expect(relay).toStrictEqual([]);
+  });
+});
+
+describe('파괴 · 종료 — 창은 liveWindow() 로만 만진다 (설계 §5.2)', () => {
+  type Condition = 'destroy' | 'before-quit' | '그대로';
+  type Fired = 'display-removed' | 'blur';
+  const CASES: Array<[Condition, Fired]> = (['destroy', 'before-quit', '그대로'] as const).flatMap((condition) =>
+    (['display-removed', 'blur'] as const).map((fired): [Condition, Fired] => [condition, fired]),
+  );
+  /** 창 · webContents 호출(그 자리 뒤) — [이름, ...인자]. */
+  const touchedSince = (fake: Fake, mark: number): unknown[][] =>
+    fake.calls
+      .slice(mark)
+      .filter((call) => /^(win|webContents)\./.test(call.name))
+      .map((call) => [call.name, ...call.args]);
+
+  it.each(CASES)("%s 뒤 %s — 파괴 · 종료 뒤에는 던지지 않고 창 · webContents 를 부르지 않는다(대조 '그대로': 남은 디스플레이 안으로 setBounds · hide('blur'))", async (condition, fired) => {
+    writeSettingsFileOf('dev', savedSettings({ position: { x: 3700, y: 100 } }));
+    const fake = await runMain('dev', { displays: TWO_DISPLAYS });
+    const win = readyToShow(fake);
+    vi.advanceTimersByTime(301); // 유예가 지난 보이는 창
+    if (condition === 'destroy') win.destroy();
+    if (condition === 'before-quit') beforeQuit(fake);
+    const mark = fake.calls.length;
+    // blur 는 main 의 리스너를 바로 부른다 — 파괴한 창은 emit 도 던진다(이미 줄에 선 사건이 파괴 뒤에 닿은 경우를 흉내 낸다)
+    const fire = (): void => {
+      if (fired === 'display-removed') fake.removeDisplay(2);
+      else for (const listener of listenersOf(fake.calls, 'win.on', 'blur')) listener({});
+    };
+    expect(fire).not.toThrow();
+    const touched = touchedSince(fake, mark);
+    if (condition !== '그대로') expect(touched).toStrictEqual([]);
+    else if (fired === 'display-removed') expect(touched.filter(([name]) => name === 'win.setBounds')).toStrictEqual([['win.setBounds', { x: 1572, y: 100 }]]);
+    else expect(touched.filter(([name]) => name === 'win.hide')).toStrictEqual([['win.hide']]);
+  });
+
+  it.each([
+    ['파괴한 뒤', true],
+    ['파괴하기 전(대조)', false],
+  ] as const)('tj-set-theme · tj-set-opacity · tj-hide — %s: 파괴 뒤에는 발신자 검증이 막음(처리기 안 불림) — 던지지 않음 · 호출 0', async (_label, destroyed) => {
+    const fake = await runMain('dev');
+    const win = readyToShow(fake);
+    if (destroyed) win.destroy();
+    const mark = fake.calls.length;
+    expect(() => {
+      rendererSend(fake, 'tj-set-theme', 'light');
+      rendererSend(fake, 'tj-set-opacity', 64);
+      rendererSend(fake, 'tj-hide');
+    }).not.toThrow();
+    const names = touchedSince(fake, mark).map(([name]) => name);
+    const handled = ['win.setBackgroundColor', 'webContents.send', 'win.setOpacity', 'webContents.send', 'win.hide', 'win.emit', 'webContents.send'];
+    expect(names).toStrictEqual(destroyed ? [] : handled);
+    expect(vi.getTimerCount()).toBe(destroyed ? 0 : 1); // 파괴 뒤에는 저장 예약도 없다
   });
 });

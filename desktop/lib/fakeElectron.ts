@@ -5,6 +5,7 @@
 // - 호출은 모두 기록(calls)에 남는다 — 게터까지, ready · turn 과 함께. 처리기 · 리스너는 시험이 기록에서 꺼내 직접 부른다.
 // - 창 · screen 은 Electron 처럼 상태를 갖고 사건을 낸다: show() · hide() 는 보임이 바뀔 때 'show' · 'hide' 를 내고, 파괴한 창은 멤버마다
 //   던진다. 포커스 사건(blur)은 시험이 emit 으로 내거나 손잡이(handles.blurOnHide)가 낸다 — OS 의 포커스 규칙(전경 잠금 등)은 사례가 정한다.
+//   emit 은 상태를 바꾸지 않으므로 OS 가 포커스를 가져간 것은 blur()(포커스만 끈다) 뒤 emit('blur') 로 흉내 낸다.
 // - 디스플레이 · 아이콘 자리 · 손잡이(handles)는 사례가 정하고, 가짜가 부를 때마다 읽으므로 실행 도중에 바꿔도 된다.
 import { existsSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
@@ -51,6 +52,7 @@ export type FakeWindow = {
   show(): void;
   hide(): void;
   focus(): void;
+  blur(): void;
   isFocused(): boolean;
   isVisible(): boolean;
   getBounds(): Rect;
@@ -356,6 +358,14 @@ export function createFakeElectron({ isPackaged, lock, appData, openExternal, pl
     readonly focus = (): void => {
       this.#use('win.focus');
       this.#focused = true;
+    };
+    /**
+     * 포커스를 잃는다(Electron 의 win.blur() 흉내) — 포커스만 끄고 사건은 내지 않는다. 시험이 OS 가 포커스를 가져간 것을 흉내 낼 때
+     * 이것 뒤에 emit('blur') 를 따로 낸다(emit 은 상태를 바꾸지 않는다).
+     */
+    readonly blur = (): void => {
+      this.#use('win.blur');
+      this.#focused = false;
     };
     readonly isFocused = (): boolean => {
       this.#use('win.isFocused');
