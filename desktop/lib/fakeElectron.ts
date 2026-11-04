@@ -7,6 +7,11 @@
 //   던진다. 포커스 사건(blur)은 시험이 emit 으로 내거나 손잡이(handles.blurOnHide)가 낸다 — OS 의 포커스 규칙(전경 잠금 등)은 사례가 정한다.
 //   emit 은 상태를 바꾸지 않으므로 OS 가 포커스를 가져간 것은 blur()(포커스만 끈다) 뒤 emit('blur') 로 흉내 낸다.
 // - 디스플레이 · 아이콘 자리 · 손잡이(handles)는 사례가 정하고, 가짜가 부를 때마다 읽으므로 실행 도중에 바꿔도 된다.
+// - 트레이 · 메뉴도 Electron 처럼 사건을 낸다: tray.emit 은 tray.on 으로 단 리스너를, menu.emit 은 menu.on 으로 단 리스너를 부른다.
+//   Menu.buildFromTemplate 이 만든 메뉴는 fake.menus 에 쌓이고, 그 항목의 click() 은 Electron 의 MenuItem 처럼 checkbox 의 checked 를
+//   먼저 뒤집은 뒤 템플릿의 click 을 부른다(낡은 메뉴의 항목도 그대로 누를 수 있다).
+// - 로그인 항목은 Windows 를 흉내 낸다(fake.loginItems — 사례가 approved 를 바꿀 수 있다): openAtLogin 은 AUMID 이름 · 경로 · 인자가 글자까지
+//   같은 항목, executableWillLaunchAtLogin 은 경로만 같고 작업 관리자에서 켜진(approved) 항목이다.
 import { existsSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 
@@ -63,6 +68,35 @@ export type FakeWindow = {
   setAlwaysOnTop(flag: boolean, level?: string): void;
 };
 export type FakeImage = { isEmpty(): boolean; resize(size: unknown): FakeImage };
+/** 가짜 Tray — main 이 new 로 만든다(fake.trays 에 쌓인다). emit 은 on 으로 단 리스너를 부른다(Electron 의 EventEmitter 처럼). */
+export type FakeTray = {
+  on(event: string, listener: Fn): void;
+  emit(event: string, ...args: unknown[]): boolean;
+  setToolTip(text: string): void;
+  setContextMenu(menu: unknown): void;
+  popUpContextMenu(menu?: unknown): void;
+  getBounds(): Rect;
+};
+/** 메뉴 템플릿의 항목 중 가짜가 읽는 부분(Electron 의 MenuItemConstructorOptions). */
+type MenuTemplateEntry = { label?: string; type?: string; checked?: boolean; enabled?: boolean; click?: Fn };
+/**
+ * 가짜 MenuItem — Electron 처럼 checked · enabled 는 바꿀 수 있는 값이고, click() 은 checkbox 면 checked 를 먼저 뒤집은 뒤 템플릿의
+ * click(항목, 창, 사건)을 부른다. enabled 는 보지 않는다 — Electron 의 MenuItem.click 도 보지 않는다(꺼진 항목을 못 누르게 하는 것은
+ * 네이티브 메뉴다).
+ */
+export type FakeMenuItem = { label: string | undefined; type: string; checked: boolean; enabled: boolean; click(): void };
+/** 가짜 Menu — Menu.buildFromTemplate 이 만든다(fake.menus 에 쌓인다). */
+export type FakeMenu = {
+  readonly template: readonly unknown[];
+  readonly items: FakeMenuItem[];
+  on(event: string, listener: Fn): void;
+  emit(event: string, ...args: unknown[]): boolean;
+};
+/**
+ * 가짜 로그인 항목 한 줄 — Windows 의 HKCU Run 값 하나와 그 StartupApproved(approved — 작업 관리자에서 켜져 있다). name 은 값 이름(AUMID),
+ * path · args 는 명령줄이다.
+ */
+export type FakeLoginItem = { name: string | null; path: string; args: string[]; approved: boolean };
 /** 사례가 실행 도중에도 바꾸는 손잡이 — 가짜가 부를 때마다 읽는다. */
 export type FakeHandles = {
   /**
@@ -87,6 +121,10 @@ export type FakeOptions = {
   trayBounds?: Rect;
   /** 이 이름의 호출은 기록한 뒤 error 를 던진다 — onReady 안에서 던지는 사례(whenReady 실패)를 만든다. */
   throwOn?: { name: string; error: unknown };
+  /** 시작 때 이미 있는 로그인 항목 — 가짜는 사본을 쓴다(fake.loginItems). 없으면 비었다. */
+  loginItems?: readonly FakeLoginItem[];
+  /** getLoginItemSettings() 의 wasOpenedAtLogin(macOS — 로그인으로 열렸다). 없으면 false. */
+  wasOpenedAtLogin?: boolean;
 };
 
 /** 디스플레이를 정하지 않은 사례의 화면 — 1920×1080 하나, 작업표시줄(높이 40)은 아래. */
@@ -108,6 +146,11 @@ function overlapArea(a: Rect, b: Rect): number {
   return width > 0 && height > 0 ? width * height : 0;
 }
 
+/** 두 인자 목록이 차례까지 글자 그대로 같다. */
+function sameArgs(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((arg, at) => arg === b[at]);
+}
+
 /** 점에서 사각형까지의 맨해튼 거리 — 사각형 안(변 포함)이면 0. */
 function distanceTo(rect: Rect, point: Point): number {
   const dx = Math.max(rect.x - point.x, 0, point.x - (rect.x + rect.width));
@@ -121,11 +164,32 @@ function distanceTo(rect: Rect, point: Point): number {
  * screen 은 ready 전이면 던진다 · app.dock 은 darwin 에만 있다 · BrowserWindow 는 만들면서 'web-contents-created' 를 부르고, 위치를
  * 주지 않으면 주 디스플레이 작업영역 가운데에 놓인다 · 파괴한 창은 창 · webContents 의 멤버마다 TypeError('Object has been destroyed')
  * 를 던진다(isDestroyed 만 답한다). ipcMain 은 어느 멤버를 불러도(계산된 키 · 구조 분해 포함) 기록된다. app 의 속성 쓰기는
- * 'app.set' 으로 기록하고 값은 그대로 둔다(쓴 값이 그대로 남는다 — 동일성).
+ * 'app.set' 으로 기록하고 값은 그대로 둔다(쓴 값이 그대로 남는다 — 동일성 — 바꿔 끼운 메서드는 그 뒤로 원래 메서드 대신 불린다).
+ * 로그인 항목(Windows 흉내 — Electron 44.9.3): getLoginItemSettings({ path, args }) 의 openAtLogin 은 값 이름이 AUMID(setAppUserModelId 로
+ * 정한 값)이고 경로(path · 없으면 process.execPath) · 인자(args · 없으면 [])가 글자까지 같은 항목이 있다(approved 는 보지 않는다),
+ * executableWillLaunchAtLogin 은 경로가 같고 approved 인 항목이 있다(인자는 보지 않는다). setLoginItemSettings({ openAtLogin: true, … }) 는
+ * 그 이름(name · 없으면 AUMID)의 항목을 쓰고 approved = enabled !== false 다. openAtLogin 이 아니면 그 이름의 항목을 지운다.
  */
-export function createFakeElectron({ isPackaged, lock, appData, openExternal, platform, displays: shownDisplays = DEFAULT_DISPLAYS, trayBounds = DEFAULT_TRAY_BOUNDS, throwOn }: FakeOptions) {
+export function createFakeElectron({
+  isPackaged,
+  lock,
+  appData,
+  openExternal,
+  platform,
+  displays: shownDisplays = DEFAULT_DISPLAYS,
+  trayBounds = DEFAULT_TRAY_BOUNDS,
+  throwOn,
+  loginItems: startLoginItems = [],
+  wasOpenedAtLogin = false,
+}: FakeOptions) {
   const calls: Call[] = [];
   const windows: FakeWindow[] = [];
+  const trays: FakeTray[] = [];
+  const menus: FakeMenu[] = [];
+  /** 지금 있는 로그인 항목 — 사례가 approved 를 바꿀 수 있다(작업 관리자에서 끈 것을 흉내 낸다). */
+  const loginItems: FakeLoginItem[] = structuredClone([...startLoginItems]);
+  /** setAppUserModelId 로 정한 AUMID — 로그인 항목의 기본 값 이름이다(Electron). */
+  let appUserModelId: string | null = null;
   /** 지금 붙어 있는 디스플레이 — 앞이 주 디스플레이다. removeDisplay 가 줄인다. */
   const displays: FakeDisplay[] = structuredClone([...shownDisplays]);
   const handles: FakeHandles = { blurOnHide: false, moveOnSetBounds: platform === 'darwin', trayBounds: { ...trayBounds } };
@@ -178,8 +242,34 @@ export function createFakeElectron({ isPackaged, lock, appData, openExternal, pl
       on: (event: string, listener: Fn) => rec('app.on', event, listener),
       exit: (code: number) => rec('app.exit', code),
       quit: () => rec('app.quit'),
-      setAppUserModelId: (id: string) => rec('app.setAppUserModelId', id),
+      setAppUserModelId: (id: string) => {
+        rec('app.setAppUserModelId', id);
+        appUserModelId = id;
+      },
       getVersion: () => APP_VERSION,
+      /** 부를 때의 process.execPath 를 기본 경로로 쓴다(사례가 runMain 의 execPath 로 정한다). */
+      getLoginItemSettings(
+        ...args: [options?: { path?: string; args?: string[] }]
+      ): { openAtLogin: boolean; executableWillLaunchAtLogin: boolean; wasOpenedAtLogin: boolean } {
+        rec('app.getLoginItemSettings', ...args);
+        const [options] = args;
+        const exe = options?.path ?? process.execPath;
+        const argv = options?.args ?? [];
+        return {
+          openAtLogin: loginItems.some((item) => item.name === appUserModelId && item.path === exe && sameArgs(item.args, argv)),
+          executableWillLaunchAtLogin: loginItems.some((item) => item.path === exe && item.approved),
+          wasOpenedAtLogin,
+        };
+      },
+      setLoginItemSettings(settings: { openAtLogin?: boolean; name?: string; path?: string; args?: string[]; enabled?: boolean }): void {
+        rec('app.setLoginItemSettings', settings);
+        const name = settings.name ?? appUserModelId;
+        const at = loginItems.findIndex((item) => item.name === name);
+        if (at !== -1) loginItems.splice(at, 1);
+        if (settings.openAtLogin === true) {
+          loginItems.push({ name, path: settings.path ?? process.execPath, args: [...(settings.args ?? [])], approved: settings.enabled !== false });
+        }
+      },
       /** macOS 에만 있다 — 그 밖의 갈래는 undefined 다(Electron 과 같다). */
       get dock(): typeof dock | undefined {
         rec('app.dock');
@@ -421,10 +511,34 @@ export function createFakeElectron({ isPackaged, lock, appData, openExternal, pl
       return entries.length > 0;
     }
   }
-  class Tray {
+  /** 사건 이름별 리스너 — 트레이 · 메뉴가 쓴다. emit 은 등록 순서대로 부르고, 리스너가 있었는지 돌려준다. */
+  class Listeners {
+    readonly #byEvent = new Map<string, Fn[]>();
+    add(event: string, listener: Fn): void {
+      this.#byEvent.set(event, [...(this.#byEvent.get(event) ?? []), listener]);
+    }
+    fire(event: string, args: unknown[]): boolean {
+      const listeners = this.#byEvent.get(event) ?? [];
+      for (const listener of listeners) listener(...args);
+      return listeners.length > 0;
+    }
+  }
+  class Tray implements FakeTray {
+    readonly #listeners = new Listeners();
     readonly setToolTip = (text: string) => rec('tray.setToolTip', text);
+    /** 붙인 메뉴를 그대로 기록한다 — 사례가 기록에서 붙은 메뉴를 꺼낸다. */
     readonly setContextMenu = (menu: unknown) => rec('tray.setContextMenu', menu);
-    readonly on = (event: string, listener: Fn) => rec('tray.on', event, listener);
+    /** 띄운 메뉴를 그대로 기록한다(인자 없이 부르면 붙은 메뉴를 띄우는 것이다 — Electron). 네이티브 메뉴 루프는 흉내 내지 않는다. */
+    readonly popUpContextMenu = (...args: [menu?: unknown]) => rec('tray.popUpContextMenu', ...args);
+    readonly on = (event: string, listener: Fn): void => {
+      rec('tray.on', event, listener);
+      this.#listeners.add(event, listener);
+    };
+    /** 사건을 낸다(시험 · 스모크가 부른다) — Electron 의 인자 모양 그대로 넘긴다(click 은 event, bounds, position). */
+    readonly emit = (event: string, ...args: unknown[]): boolean => {
+      rec('tray.emit', event, ...args);
+      return this.#listeners.fire(event, args);
+    };
     readonly getBounds = (): Rect => {
       rec('tray.getBounds');
       return { ...handles.trayBounds };
@@ -432,6 +546,7 @@ export function createFakeElectron({ isPackaged, lock, appData, openExternal, pl
     /** 받은 이미지 객체를 그대로 기록한다 — 스모크에 넘긴 아이콘이 붙인 것과 같은 객체인지 본다. */
     constructor(image: FakeImage) {
       rec('new Tray', image);
+      trays.push(this);
     }
   }
   const nativeImage = {
@@ -441,9 +556,46 @@ export function createFakeElectron({ isPackaged, lock, appData, openExternal, pl
       return image;
     },
   };
+  /** 만든 메뉴 하나(Electron 의 Menu 인스턴스) — 템플릿에서 항목을 만든다. */
+  class MenuInstance implements FakeMenu {
+    readonly #listeners = new Listeners();
+    readonly template: readonly unknown[];
+    readonly items: FakeMenuItem[];
+    constructor(template: readonly unknown[]) {
+      this.template = template;
+      this.items = template.map((raw) => {
+        const entry = raw as MenuTemplateEntry;
+        const item: FakeMenuItem = {
+          label: entry.label,
+          type: entry.type ?? 'normal',
+          checked: entry.checked === true,
+          enabled: entry.enabled !== false,
+          click: () => {
+            if (item.type === 'checkbox' || item.type === 'radio') item.checked = !item.checked; // Electron 도 click 전에 뒤집는다
+            entry.click?.(item, undefined, {});
+          },
+        };
+        return item;
+      });
+    }
+    readonly on = (event: string, listener: Fn): void => {
+      rec('menu.on', event, listener);
+      this.#listeners.add(event, listener);
+    };
+    /** 사건을 낸다(시험이 부른다) — macOS 의 menu-will-show · menu-will-close 를 흉내 낸다. */
+    readonly emit = (event: string, ...args: unknown[]): boolean => {
+      rec('menu.emit', event, ...args);
+      return this.#listeners.fire(event, args);
+    };
+  }
   const Menu = {
     setApplicationMenu: (menu: unknown) => rec('Menu.setApplicationMenu', menu),
-    buildFromTemplate: (template: unknown) => ({ template }),
+    buildFromTemplate: (template: readonly unknown[]): FakeMenu => {
+      rec('Menu.buildFromTemplate', template);
+      const menu = new MenuInstance(template);
+      menus.push(menu);
+      return menu;
+    },
   };
   const dialog = { showErrorBox: (title: string, content: string) => rec('dialog.showErrorBox', title, content) };
   const ipcMain = new Proxy(
@@ -478,6 +630,10 @@ export function createFakeElectron({ isPackaged, lock, appData, openExternal, pl
     electron: { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, net, protocol, screen, session, shell },
     calls,
     windows,
+    trays,
+    /** Menu.buildFromTemplate 이 만든 메뉴(만든 차례) — 맨 뒤가 최신 메뉴다. */
+    menus,
+    loginItems,
     /** 기록기 — 시험 장치(mainWiring 의 hooks 엿보기)도 같은 기록에 남긴다. */
     rec,
     handles,

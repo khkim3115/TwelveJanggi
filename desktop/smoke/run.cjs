@@ -1,12 +1,17 @@
 'use strict';
 // 앱 안 스모크 실행기(설계 §5.10 '앱 안 실행기') — 스모크의 안쪽 절반이다. 런처(desktop/scripts/smoke.cjs)가 스모크 인자로 띄운 실제 앱
 // (같은 main.js · 고정한 electron)에서 main 이 이 파일을 require 해 createSmokeRun 의 결과를 hooks 에 꽂는다(비스모크는 require 하지
-// 않는다). 앱은 평소와 같은 길로 돈다 — 실행기는 처리기를 바꿔 끼우지 않고 감싸서 기록만 하고, 창 · 트레이 · 페이지에서 사실을 모아
-// 판정한 뒤 결과를 <outDir>/result.json 에 쓰고 실제 트레이 메뉴의 '종료' 를 눌러 끝낸다. 판정 규칙은 lib/smokeChecks.cjs 에 있고
-// (같은 값을 보는 검사는 그 평가기를 쓴다), 여기는 사실을 모아 넘기는 일과 비교 몇 줄뿐이다.
+// 않는다). 앱은 평소와 같은 길로 돈다 — 실행기는 처리기를 바꿔 끼우지 않고 감싸서 기록만 하고(예외 하나 — D1: 로그인 항목 쓰기는 대체
+// 함수로 막는다, 아래), 창 · 트레이 · 페이지에서 사실을 모아 판정한 뒤 결과를 <outDir>/result.json 에 쓰고 실제 트레이 메뉴(main 이 마지막에
+// 넘긴 최신 메뉴)의 '종료' 를 눌러 끝낸다. 판정 규칙은 lib/smokeChecks.cjs 에 있고(같은 값을 보는 검사는 그 평가기를 쓴다), 여기는 사실을
+// 모아 넘기는 일과 비교 몇 줄뿐이다.
 // - 연결점(main.js 의 MainHooks): networkGuard(기본 세션 onBeforeRequest — 원격 요청 기록 · 취소) · registerIpc(창 전 — tj-smoke-preload ·
-//   tj-smoke-csp 수신. Electron 은 듣는 쪽이 없는 send 를 버린다) · beforeLoad(창과 loadURL 사이, 동기 — 수집기) · setTray(붙은 메뉴) ·
-//   record(권한 · 탐색 결정) · open(허용 목록 주소 — 열지 않고 기록).
+//   tj-smoke-csp 수신. Electron 은 듣는 쪽이 없는 send 를 버린다) · beforeLoad(창과 loadURL 사이, 동기 — 수집기) · setTray(최신 메뉴 —
+//   main 이 메뉴를 만들 때마다 넘긴다. Windows 는 메뉴를 트레이에 붙이지 않고 우클릭 때 띄운다, D4) · record(권한 · 탐색 결정) ·
+//   open(허용 목록 주소 — 열지 않고 기록).
+// - D1: createSmokeRun 이 맨 먼저 app.setLoginItemSettings 를 대체 함수로 바꿔 끼운다(평범한 대입 — 끼우지 못하면 던져서 실행이 실패한다).
+//   대체 함수는 받은 인자를 쌓기만 하고 앞으로 보내지 않는다 — 로그인 항목(HKCU Run)은 격리 프로필 밖이라 main 의 가드에 버그가 있어도
+//   스모크가 이 PC 에 개발용 electron.exe 를 로그인 항목으로 남기지 않는다(기록만 하면 늦게 알 뿐 막지 못한다).
 // - 단계(첫 did-finish-load 뒤): 장벽(페이지가 getAppInfo 왕복 뒤 표식을 콘솔에 찍고, 수집기가 그 표식을 받는다) → 수동 검사(boot ·
 //   webPreferences · sandboxEffective · bridge · ipc · mime · securityWarnings · tray · screenshot) → 능동 검사(active.cjs — cspMeta ·
 //   cspHeader · protocol · ai · navigation · permissions · .invalid 빌드의 connectAllowed · --net 의 net) → 장벽 → cspViolations ·
@@ -100,8 +105,13 @@ const SCREENSHOT_FILE = 'screenshot.png';
  *   기본 세션의 onBeforeRequest — http · https · ws · wss 는 기록하고, 원격 요청 계획이 통과시키는 것(--net 의 두 요청) 말고는 취소한다
  * @property {(ipc: import('../lib/ipcGuard.cjs').GuardedIpc) => void} registerIpc preload 의 스모크 send 를 받는다(창 전)
  * @property {(win: import('electron').BrowserWindow) => void} beforeLoad 수집기를 붙인다(창과 loadURL 사이, 동기)
- * @property {(tray: import('electron').Tray, menu: import('electron').Menu) => void} setTray 붙은 트레이 메뉴를 받는다
+ * @property {(tray: import('electron').Tray, menu: import('electron').Menu, icon: import('electron').NativeImage) => void} setTray
+ *   최신 트레이 메뉴를 받는다 — main 이 메뉴를 만들 때마다(시작 때 한 번 포함) 그 메뉴와 붙인 아이콘을 넘긴다(Windows 의 메뉴는 붙지 않았다, D4)
  * @property {(stage: string, error: unknown) => void} fail 실패 결과를 한 번 쓰고 app.exit(1) — 처음 실패가 이긴다. 던지지 않는다
+ */
+/**
+ * D1 의 대체 함수 — app.setLoginItemSettings 자리에 끼운다. calls 는 받은 인자(차례대로)다. 앞으로 보내지 않는다.
+ * @typedef {((settings: import('electron').Settings) => void) & { calls: import('electron').Settings[] }} LoginItemBlocker
  */
 /** @typedef {import('../main.js').MainRecord} MainRecord */
 /** @typedef {import('./support.cjs').ConsoleEntry} ConsoleEntry */
@@ -173,12 +183,32 @@ function securityWarningsArming({ platform, execPath, env }) {
 }
 
 /**
- * 스모크 실행기를 만든다 — 만들 때 감시 타이머를 켜고(will-quit 까지), 로그인 항목의 시작 값을 읽고, 이번 실행의 필수 검사와 원격 요청
- * 계획을 정한다. 나머지는 main 이 hooks 로 부른다.
+ * D1 의 대체 함수를 만든다 — 받은 인자를 calls 에 쌓고 아무것도 하지 않는다(로그인 항목은 바뀌지 않는다).
+ * @returns {LoginItemBlocker}
+ */
+function loginItemBlocker() {
+  /** @type {import('electron').Settings[]} */
+  const calls = [];
+  return Object.assign(
+    (/** @type {import('electron').Settings} */ settings) => {
+      calls.push(settings);
+    },
+    { calls },
+  );
+}
+
+/**
+ * 스모크 실행기를 만든다 — 맨 먼저 로그인 항목 쓰기를 막고(D1), 감시 타이머를 켜고(will-quit 까지), 로그인 항목의 시작 값을 읽고, 이번
+ * 실행의 필수 검사와 원격 요청 계획을 정한다. 나머지는 main 이 hooks 로 부른다.
  * @param {SmokeRunInput} input
  * @returns {SmokeRun}
  */
 function createSmokeRun({ args, app, session, net, nativeImage, trayBuild, rendererRoot, appRoot, index }) {
+  // D1 — main 의 설정 읽기 · 첫 실행 기본값(setLoginItem)보다 먼저, 감시 타이머보다도 먼저 끼운다. 평범한 대입이라 끼우지 못하면 여기서
+  // 던지고(main 의 whenReady catch 가 stage 'ready' 로 끝낸다) 남는 타이머가 없다. 대체 함수의 calls 가 이번 실행이 로그인 항목을 쓰려 한
+  // 기록이다(가드가 지키면 비어 있다).
+  const blockLoginItemWrite = loginItemBlocker();
+  app.setLoginItemSettings = blockLoginItemWrite;
   /** @type {SmokeCheck[]} */
   const checks = [];
   /** @type {SmokeFacts} 수집한 사실 — 수집기 · IPC · 가드 · 연결점이 채우고, 검사가 읽는다 */
@@ -393,6 +423,7 @@ function createSmokeRun({ args, app, session, net, nativeImage, trayBuild, rende
   }
 
   /**
+   * 최신 트레이 메뉴를 받는다(main 이 메뉴를 만들 때마다) — 마지막에 받은 메뉴의 '종료' 로 끝낸다. 아이콘(셋째 인자)은 아직 보지 않는다.
    * @param {import('electron').Tray} tray
    * @param {import('electron').Menu} menu
    */

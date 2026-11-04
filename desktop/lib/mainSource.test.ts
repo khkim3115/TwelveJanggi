@@ -1,6 +1,6 @@
 // desktop/main.js 소스 시험(설계 §5.5 · §5.7 · §5.3). 소스를 글자로 읽어, 실행하지 않는 갈래까지 포함한 파일 전체에 대한 배선 규칙을
 // 본다 — IPC 등록 창구 · 최상위 호출 순서 · 스킴 특권 · webPreferences 공장 · 애플리케이션 메뉴 · AUMID 상수 · DevTools 조건 ·
-// 렌더러로 미는 창구(sendToTray).
+// 렌더러로 미는 창구(sendToTray) · 로그인 항목 쓰기 창구(setLoginItem).
 // 글자로는 조건 · 콜백 · 계산된 키를 보지 못한다. 실제 실행 순서 · 조건 · fail-closed 는 mainWiring.test.ts 가 가짜 electron 위에서
 // main.js 를 돌려 본다.
 // 주석을 지운 소스만 본다: 설명 글에 적힌 호출이 규칙에 걸리거나 빠진 호출을 대신 채우지 않게. electron 은 import 하지 않는다.
@@ -131,6 +131,13 @@ describe('main.js', () => {
     const body = functionBody(SOURCE, 'sendToTray');
     expect(count(body, 'webContents.send(')).toBeGreaterThan(0);
     expect(count(SOURCE, 'webContents.send(')).toBe(count(body, 'webContents.send('));
+  });
+
+  it('setLoginItemSettings 는 setLoginItem 본문 안에 한 번만 나온다 — 로그인 항목 쓰기는 한 함수로만, 관리할 수 있는 실행에서만 한다(설계 §5.2 자동 실행)', () => {
+    // 이름이 나오는 자리를 센다 — 호출 글자 'app.setLoginItemSettings(' 만 세면 별칭 · 구조 분해로 꺼내 둔 것을 놓친다
+    expect(count(SOURCE, 'function setLoginItem(')).toBe(1);
+    expect(SOURCE.match(/\bsetLoginItemSettings\b/g) ?? []).toHaveLength(1);
+    expect(functionBody(SOURCE, 'setLoginItem').match(/\bsetLoginItemSettings\b/g) ?? []).toHaveLength(1);
   });
 
   it("sendToTray('…' 의 채널은 모두 PUSH_CHANNELS 에 있다 — 부르는 곳은 모두 글자 채널이다(변수로 넘기지 않는다)", () => {

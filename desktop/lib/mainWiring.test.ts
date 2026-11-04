@@ -23,7 +23,10 @@
 // - 스모크 모드(smoke · packaged-smoke)는 main 이 스모크 실행기(smoke/run.cjs)를 hooks 에 꽂는다. 실행기의 검사는 첫 did-finish-load
 //   뒤에 돌므로(가짜는 그 사건을 내지 않는다) 여기서는 연결점 · 수집기 · 실패 경로만 본다 — 검사 자체는 실제 바이너리의 스모크가 본다.
 //   hooks 엿보기: 훅은 main 이 부르는 실행기 모듈을 진짜로 읽은 뒤(진짜는 require.cache 에 남는다), 만든 run 의 record · setTray ·
-//   open 을 감싸 가짜의 기록(hook.record · hook.setTray · hook.open)에도 남기고 진짜에 넘긴다.
+//   open 을 감싸 가짜의 기록(hook.record · hook.setTray · hook.open)에도 남기고 진짜에 넘긴다. 실행기가 app.setLoginItemSettings 에 끼운
+//   D1 의 대체 함수는 감싸지 않는다 — 가짜 app 의 속성 쓰기 기록(app.set)에서 그 함수를 꺼내 calls 를 읽는다(동일성이 남는다).
+// - 트레이 · 메뉴: 가짜 Tray 의 emit 이 main 이 단 click · right-click 처리기를 부르고, 메뉴 항목은 가짜 MenuItem 의 click() 으로 누른다
+//   (Electron 처럼 checkbox 를 먼저 뒤집는다). 사용자가 보는 메뉴는 main 이 마지막에 만든 메뉴다(fake.menus 의 끝).
 // - 창 동작(설계 §5.2): 가짜는 ready-to-show 를 스스로 내지 않는다 — 보이는 창이 필요한 사례는 readyToShow 로 낸다. 렌더러의 IPC 는
 //   main 이 단 처리기를 신뢰하는 발신자(트레이 창의 메인 프레임)로 직접 부른다(rendererSend · rendererInvoke). 보이기 · 숨기기 이유와
 //   sent 기록은 스모크 모드의 hook.record 로 보고, dev · packaged 는 동작(창 상태 · 호출)만 본다. 설정 쓰기는 node:fs 의 renameSync 를
@@ -46,7 +49,11 @@ import {
   type FakeContents,
   type FakeDisplay,
   type FakeImage,
+  type FakeLoginItem,
+  type FakeMenu,
+  type FakeMenuItem,
   type FakePlatform,
+  type FakeTray,
   type FakeWindow,
   type Fn,
   type Rect,
@@ -57,6 +64,8 @@ const { formatSmokeArgs, parseSmokeArgs } = require('./smokeArgs.cjs') as typeof
 const { RESULT_FILE } = require('./smokeOut.cjs') as typeof import('./smokeOut.cjs');
 const { PUSH_CHANNELS } = require('./pushChannels.cjs') as typeof import('./pushChannels.cjs');
 const { consoleLine } = require('./consoleLine.cjs') as typeof import('./consoleLine.cjs');
+const { loginItemSettings } = require('./autostart.cjs') as typeof import('./autostart.cjs');
+const { FEEDBACK_URL, WEB_URL } = require('./links.cjs') as typeof import('./links.cjs');
 
 // 바꿔 끼우는 자리 — main.js 가 require 로 받는 것과 같은 객체다(main · lib 은 바꾼 node:fs 멤버를 그대로 부른다).
 type LoadFn = (this: unknown, request: string, parent: { filename?: string | null } | null | undefined, isMain: boolean) => unknown;
@@ -310,6 +319,9 @@ type RunOptions = {
   throwOn?: { name: string; error: unknown };
   /** whenReady 실패('[tj] ready:' 줄 · 결과 stage 'ready')를 이 사례에서만 허락한다 — afterEach 의 실패 감시가 넘어간다. */
   expectReadyFailure?: boolean;
+  /** 시작 때 이미 있는 로그인 항목(Windows 흉내) · macOS 의 wasOpenedAtLogin — 없으면 비었다 · false. */
+  loginItems?: readonly FakeLoginItem[];
+  wasOpenedAtLogin?: boolean;
 };
 
 /** 실행기 모듈과 그 run 중 hooks 엿보기가 감싸는 멤버 — run.cjs 의 JSDoc 타입(electron 타입)을 끌어오지 않게 구조 타입으로 적는다. */
@@ -362,6 +374,8 @@ async function runMain(mode: Mode, options: RunOptions = {}): Promise<Fake> {
     displays: options.displays,
     trayBounds: options.trayBounds,
     throwOn: options.throwOn,
+    loginItems: options.loginItems,
+    wasOpenedAtLogin: options.wasOpenedAtLogin,
   });
   const smokeArgv =
     options.smokeArgv ?? (isSmokeMode(mode) ? formatSmokeArgs({ outDir: currentTree().outDir, profile: currentTree().profile, net: false, nonce: NONCE }) : []);
@@ -476,28 +490,74 @@ function loseFocus(win: FakeWindow): void {
   win.blur();
   win.emit('blur', {});
 }
-/** 트레이 좌클릭(win32 — main 이 tray.on('click') 으로 단 처리기). */
+/** main 이 만든 트레이(하나뿐). */
+function trayOf(fake: Fake): FakeTray {
+  expect(fake.trays).toHaveLength(1);
+  const [tray] = fake.trays;
+  if (tray === undefined) throw new Error('트레이가 없다');
+  return tray;
+}
+/** 트레이 좌클릭(win32 — main 이 tray.on('click') 으로 단 처리기). 처리기가 없으면 던진다(그 밖의 갈래에는 없다). */
 function trayClick(fake: Fake): void {
-  const [click] = listenersOf(fake.calls, 'tray.on', 'click');
-  if (click === undefined) throw new Error('트레이 click 처리기가 없다');
-  click({}, { x: 0, y: 0, width: 0, height: 0 }, { x: 0, y: 0 });
+  if (!trayOf(fake).emit('click', {}, { x: 0, y: 0, width: 0, height: 0 }, { x: 0, y: 0 })) throw new Error('트레이 click 처리기가 없다');
 }
-/** setContextMenu 로 붙은 트레이 메뉴의 그 항목을 누른다(가짜 Menu.buildFromTemplate 은 { template } 을 돌려준다). */
-function trayMenuClick(fake: Fake, label: string): void {
-  const menu = callsOf(fake, 'tray.setContextMenu').at(-1)?.args[0] as { template: Array<{ label?: string; click?: Fn }> } | undefined;
-  const item = menu?.template.find((candidate) => candidate.label === label);
-  if (item?.click === undefined) throw new Error(`붙은 트레이 메뉴에 '${label}' 이 없다`);
-  item.click({}, undefined, {});
+/** 트레이 우클릭(win32 — main 이 tray.on('right-click') 으로 단 처리기). 처리기가 없으면 던진다. */
+function trayRightClick(fake: Fake): void {
+  if (!trayOf(fake).emit('right-click', {}, { x: 0, y: 0, width: 0, height: 0 })) throw new Error('트레이 right-click 처리기가 없다');
 }
+/** main 이 가장 최근에 만든 트레이 메뉴 — 사용자가 보는 메뉴다(Windows 는 우클릭 때 띄운 것, 그 밖은 트레이에 붙은 것). */
+function latestMenu(fake: Fake): FakeMenu {
+  const menu = fake.menus.at(-1);
+  if (menu === undefined) throw new Error('main 이 만든 트레이 메뉴가 없다');
+  return menu;
+}
+/** 메뉴의 그 라벨 항목. */
+function menuItem(menu: FakeMenu, label: string): FakeMenuItem {
+  const item = menu.items.find((candidate) => candidate.label === label);
+  if (item === undefined) throw new Error(`트레이 메뉴에 '${label}' 이 없다`);
+  return item;
+}
+/** 최신 트레이 메뉴(주면 그 메뉴 — 낡은 메뉴)의 그 항목을 누른다 — 가짜 MenuItem 은 Electron 처럼 checkbox 의 checked 를 먼저 뒤집는다. */
+function trayMenuClick(fake: Fake, label: string, menu: FakeMenu = latestMenu(fake)): void {
+  menuItem(menu, label).click();
+}
+/** 메뉴의 라벨 차례 — 구분선은 '─'. */
+const menuLabels = (menu: FakeMenu): Array<string | undefined> => menu.items.map((item) => (item.type === 'separator' ? '─' : item.label));
+/** main 이 지금까지 만든 트레이 메뉴 수(Menu.buildFromTemplate 기록). */
+const builtMenus = (fake: Fake): number => callsOf(fake, 'Menu.buildFromTemplate').length;
 /** main 의 before-quit 리스너를 부른다(Electron 의 종료 시작). */
 function beforeQuit(fake: Fake): void {
   for (const listener of listenersOf(fake.calls, 'app.on', 'before-quit')) listener({ preventDefault: () => {} });
 }
-/** main 이 hooks.record 로 넘긴 기록 가운데 그 kind 의 것(스모크 모드 — 엿보기가 hook.record 로 남긴다). */
-function recordsOf(fake: Fake, kind: 'window' | 'sent'): unknown[] {
-  return callsOf(fake, 'hook.record')
+/** 두 번째 실행 — main 이 app.on('second-instance') 로 단 처리기를 그 명령줄로 부른다(Electron 의 인자 모양). */
+function secondInstance(fake: Fake, argv: readonly string[]): void {
+  const [listener] = listenersOf(fake.calls, 'app.on', 'second-instance');
+  if (listener === undefined) throw new Error('second-instance 처리기가 없다');
+  listener({}, [...argv], currentTree().base, {});
+}
+/** macOS 의 activate(Finder · Spotlight 로 다시 실행) — main 이 단 처리기를 부른다. 처리기가 없으면 던진다. */
+function activate(fake: Fake): void {
+  const [listener] = listenersOf(fake.calls, 'app.on', 'activate');
+  if (listener === undefined) throw new Error('activate 처리기가 없다');
+  listener({}, false);
+}
+/** main 이 hooks.record 로 넘긴 기록 가운데 그 kind 의 것(스모크 모드 — 엿보기가 hook.record 로 남긴다). from 을 주면 그 자리 뒤의 것만. */
+function recordsOf(fake: Fake, kind: 'window' | 'sent' | 'login-item', from = 0): unknown[] {
+  return fake.calls
+    .slice(from)
+    .filter((call) => call.name === 'hook.record')
     .map((call) => call.args[0])
     .filter((entry) => (entry as { kind?: unknown }).kind === kind);
+}
+/**
+ * D1 — 스모크 실행기가 app.setLoginItemSettings 자리에 끼운 대체 함수(가짜 app 의 속성 쓰기 기록에서 꺼낸다 — 쓰기는 정확히 하나).
+ * 대체 함수는 받은 인자를 calls 에 쌓는다. 가짜 app 에 그 함수가 그대로 남아 있다(바꿔 끼우거나 감싸지 않았다 — 동일성).
+ */
+function loginItemStub(fake: Fake): Fn & { calls: unknown[] } {
+  const stub = only(fake, 'app.set', 'setLoginItemSettings').args[1] as Fn & { calls: unknown[] };
+  expect((fake.electron.app as unknown as Record<string, unknown>).setLoginItemSettings).toBe(stub);
+  expect(Array.isArray(stub.calls), '대체 함수는 받은 인자를 calls 에 쌓는다').toBe(true);
+  return stub;
 }
 /** name 호출들의 인자(그 자리 from 뒤의 것만 — 주지 않으면 처음부터). */
 const argsOf = (fake: Fake, name: string, from = 0): unknown[][] => fake.calls.slice(from).filter((call) => call.name === name).map((call) => call.args);
@@ -1102,14 +1162,17 @@ describe('스모크 실행기 연결(smoke/run.cjs) — main 은 스모크에서
 
   it('hooks 엿보기 — main 이 꽂은 run 의 record 가 받은 결정을 가짜의 기록(hook.record)에서 본다: 막힌 will-navigate 하나', async () => {
     const fake = await runMain('smoke');
+    // 시작에는 첫 실행 기본값의 로그인 항목 요청 하나(win32 — 스모크는 관리하지 않는다)
+    expect(callsOf(fake, 'hook.record').map((call) => call.args)).toStrictEqual([[{ kind: 'login-item', on: true, managed: false }]]);
+    const mark = fake.calls.length;
     const url = 'https://example.invalid/밖';
     let prevented = 0;
     const [willNavigate] = listenersOf(fake.calls, 'webContents.on', 'will-navigate');
     willNavigate?.({ url, preventDefault: () => (prevented += 1) });
     expect(prevented).toBe(1);
-    expect(callsOf(fake, 'hook.record').map((call) => call.args)).toStrictEqual([[{ kind: 'will-navigate', url, blocked: true, href: null }]]);
+    expect(argsOf(fake, 'hook.record', mark)).toStrictEqual([[{ kind: 'will-navigate', url, blocked: true, href: null }]]);
     expect(callsOf(fake, 'hook.open')).toStrictEqual([]); // 허용 목록 밖 — 열지 않는다
-    expect(callsOf(fake, 'hook.setTray')).toHaveLength(1); // 트레이 메뉴를 붙일 때 한 번 — 감싼 setTray 도 진짜에 넘어간다
+    expect(callsOf(fake, 'hook.setTray')).toHaveLength(1); // 시작 메뉴를 만들 때 한 번 — 감싼 setTray 도 진짜에 넘어간다
   });
 
   it('네트워크 가드 — http · https · ws · wss 는 취소하고, app:// 와 그 밖의 스킴은 그대로 둔다(요청마다 콜백 한 번)', async () => {
@@ -1461,16 +1524,19 @@ describe('IPC · push — 상태 묻기 · 바꾸기 · 숨기기 · 창 사건 
     expect(getState(fake)).toStrictEqual(INITIAL_STATE);
   });
 
-  it('tj-set-theme — light: 창 배경 #f5f6f8 → tj-theme, getState 는 곧바로 · settings.json 은 300ms 뒤. 받지 않는 값(purple 등)은 아무것도 하지 않는다', async () => {
+  it('tj-set-theme — light: 창 배경 #f5f6f8 → tj-theme(→ 메뉴 다시 만들기), getState 는 곧바로 · settings.json 은 300ms 뒤. 받지 않는 값(purple 등)은 아무것도 하지 않는다', async () => {
     const fake = await runMain('dev');
     const mark = fake.calls.length;
     for (const theme of ['purple', 'Light', '', null, undefined, 1]) rendererSend(fake, 'tj-set-theme', theme);
     expect(fake.calls.slice(mark).map((call) => call.name)).toStrictEqual([]);
     expect(vi.getTimerCount()).toBe(0);
     rendererSend(fake, 'tj-set-theme', 'light');
-    expect(fake.calls.slice(mark).map((call) => [call.name, ...call.args])).toStrictEqual([
+    // 창 · 렌더러 쪽 차례 — 메뉴 다시 만들기(아래 '트레이 메뉴' 사례들)는 그 뒤다
+    const touched = fake.calls.slice(mark).filter((call) => /^(win|webContents)\./.test(call.name) || call.name === 'Menu.buildFromTemplate');
+    expect(touched.map((call) => [call.name, ...(call.name === 'Menu.buildFromTemplate' ? [] : call.args)])).toStrictEqual([
       ['win.setBackgroundColor', '#f5f6f8'],
       ['webContents.send', 'tj-theme', 'light'],
+      ['Menu.buildFromTemplate'],
     ]);
     expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, theme: 'light' });
     vi.advanceTimersByTime(299);
@@ -1609,21 +1675,21 @@ describe('보이기 · 숨기기 · blur (설계 §5.2 — 가짜 시계)', () =
     ]);
   });
 
-  it("트레이 — win32 좌클릭은 show('tray'), 붙은 메뉴의 '열기' 는 show('menu') — 숨긴 창을 보인다", async () => {
-    const fake = await runMain('smoke');
+  it.each([
+    ['win32', 'tray'],
+    ['darwin', 'menu'],
+    ['linux', 'menu'],
+  ] as const)("트레이 — %s: 숨긴 창을 보인다(show('%s') — win32 는 좌클릭, 그 밖은 붙은 메뉴의 '열기')", async (platform, reason) => {
+    const fake = await runMain('smoke', { platform });
     const win = readyToShow(fake);
     rendererSend(fake, 'tj-hide');
-    trayClick(fake);
-    expect(win.isVisible()).toBe(true);
-    rendererSend(fake, 'tj-hide');
-    trayMenuClick(fake, '열기');
+    if (platform === 'win32') trayClick(fake);
+    else trayMenuClick(fake, '열기');
     expect(win.isVisible()).toBe(true);
     expect(recordsOf(fake, 'window')).toStrictEqual([
       { kind: 'window', action: 'show', reason: 'start' },
       { kind: 'window', action: 'hide', reason: 'request' },
-      { kind: 'window', action: 'show', reason: 'tray' },
-      { kind: 'window', action: 'hide', reason: 'request' },
-      { kind: 'window', action: 'show', reason: 'menu' },
+      { kind: 'window', action: 'show', reason },
     ]);
   });
 
@@ -1726,17 +1792,17 @@ describe('보이기 · 숨기기 · blur (설계 §5.2 — 가짜 시계)', () =
   });
 });
 
-describe('배치 · 이동 (설계 §5.2 — 아이콘 쪽 배치 · 디스플레이 변경 · 위치 저장)', () => {
-  /** 사용자가 창을 dx 만큼 옮긴다 — 위치를 바꾸고 moved 를 낸다(darwin 갈래의 가짜는 setBounds 안에서 이미 낸다). will-move 는 사례가 낸다. */
-  function drag(fake: Fake, win: FakeWindow, dx: number): void {
-    win.setBounds({ x: win.getBounds().x + dx });
-    if (!fake.handles.moveOnSetBounds) win.emit('moved', {});
-  }
-  /** 사용자가 끌기 시작했다 — will-move(Electron: 손으로 옮길 때만 온다). */
-  function willMove(win: FakeWindow): void {
-    win.emit('will-move', {}, win.getBounds());
-  }
+/** 사용자가 창을 dx 만큼 옮긴다 — 위치를 바꾸고 moved 를 낸다(darwin 갈래의 가짜는 setBounds 안에서 이미 낸다). will-move 는 사례가 낸다. */
+function drag(fake: Fake, win: FakeWindow, dx: number): void {
+  win.setBounds({ x: win.getBounds().x + dx });
+  if (!fake.handles.moveOnSetBounds) win.emit('moved', {});
+}
+/** 사용자가 끌기 시작했다 — will-move(Electron: 손으로 옮길 때만 온다). */
+function willMove(win: FakeWindow): void {
+  win.emit('will-move', {}, win.getBounds());
+}
 
+describe('배치 · 이동 (설계 §5.2 — 아이콘 쪽 배치 · 디스플레이 변경 · 위치 저장)', () => {
   it.each([
     ['아이콘이 작업표시줄 가운데쯤 — 아이콘 가운데 위', TWO_DISPLAYS, TRAY_LEFT, { x: 1342, y: 632 }],
     ['아이콘이 오른쪽 끝 — 작업영역 안으로(여백 8)', TWO_DISPLAYS, { x: 1880, y: 1040, width: 24, height: 40 }, { x: 1572, y: 632 }],
@@ -1849,6 +1915,657 @@ describe('배치 · 이동 (설계 §5.2 — 아이콘 쪽 배치 · 디스플�
   });
 });
 
+/** 자동 실행 이름(= AUMID) — 동결 값이라 글자로 적는다(main.js 는 AUTOSTART_NAME 상수로만 쓴다). */
+const AUMID = 'com.khkim.twelvejanggi';
+/** 설치한 앱의 실행 파일(Windows 꼴 — ubuntu 에서도 같은 판정이다). 패키지 사례가 process.execPath 로 쓴다. */
+const INSTALLED_EXE = 'C:\\Users\\홍 길동\\AppData\\Local\\Programs\\TwelveJanggi\\TwelveJanggi.exe';
+/** 개발 바이너리(Windows 꼴) — ELECTRON_FORCE_IS_PACKAGED 로 패키지인 척해도 로그인 항목을 관리하지 않는다. */
+const DEV_ELECTRON_EXE = 'C:\\Users\\홍 길동\\TwelveJanggi\\desktop\\node_modules\\electron\\dist\\electron.exe';
+/** 설계 §5.1 표의 Windows 메뉴(구분선 '─') — macOS · linux 는 버전 줄 바로 아래에 '열기'. */
+const WIN32_LABELS = [`십이장기 ${APP_VERSION}`, '─', '혼자 하기', '온라인 대전', '─', '자동 실행', '라이트 모드', '창 고정', '위치 초기화', '─', '웹에서 열기', '의견 보내기', '─', '종료'];
+const OTHER_LABELS = [WIN32_LABELS[0], '열기', ...WIN32_LABELS.slice(1)];
+
+describe('트레이 메뉴 — 시작 메뉴 · Windows 우클릭 · macOS D6 (설계 §5.2 트레이 · D4)', () => {
+  it.each(PLATFORMS)("%s — 시작 메뉴는 createTray 끝에서 한 번: win32 는 붙이지도 띄우지도 않고(D4) 그 밖은 setContextMenu 한 번, setTray(스모크) 한 번 — 그 메뉴 · new Tray 에 넘긴 아이콘", async (platform) => {
+    const fake = await runMain('smoke', { platform });
+    expect(builtMenus(fake)).toBe(1);
+    const menu = latestMenu(fake);
+    expect(indexOf(fake.calls, 'Menu.buildFromTemplate')).toBeGreaterThan(indexOf(fake.calls, 'new Tray'));
+    expect(argsOf(fake, 'tray.setContextMenu')).toStrictEqual(platform === 'win32' ? [] : [[menu]]);
+    expect(callsOf(fake, 'tray.popUpContextMenu')).toStrictEqual([]);
+    const delivered = argsOf(fake, 'hook.setTray');
+    expect(delivered).toHaveLength(1);
+    const [tray, sentMenu, icon] = delivered[0] ?? [];
+    expect(tray).toBe(trayOf(fake));
+    expect(sentMenu).toBe(menu);
+    expect(icon).toBe(only(fake, 'new Tray').args[0]); // 붙인 아이콘 그 객체
+    // 클릭 처리기는 win32 에만 — 그 밖은 메뉴가 클릭을 받는다(click 을 함께 달면 토글이 겹친다)
+    expect(callsOf(fake, 'tray.on').map((call) => call.args[0])).toStrictEqual(platform === 'win32' ? ['click', 'right-click'] : []);
+  });
+
+  it.each(PLATFORMS)('%s — 라벨은 설계 §5.1 의 플랫폼별 목록 그대로 · 새 프로필은 체크 셋 모두 꺼짐 · 버전 줄 · 위치 초기화 꺼짐', async (platform) => {
+    const fake = await runMain('dev', { platform });
+    const menu = latestMenu(fake);
+    expect(menuLabels(menu)).toStrictEqual(platform === 'win32' ? WIN32_LABELS : OTHER_LABELS);
+    expect(menu.items.filter((item) => item.type === 'checkbox').map((item) => [item.label, item.checked])).toStrictEqual([
+      ['자동 실행', false],
+      ['라이트 모드', false],
+      ['창 고정', false],
+    ]);
+    expect(menu.items.filter((item) => !item.enabled).map((item) => item.label)).toStrictEqual([`십이장기 ${APP_VERSION}`, '자동 실행', '위치 초기화']);
+  });
+
+  it('저장된 설정의 메뉴 — 라이트 모드 · 창 고정 체크, 저장 위치가 있으면 위치 초기화 켜짐', async () => {
+    writeSettingsFileOf('dev', savedSettings({ theme: 'light', pinned: true, position: { x: 100, y: 100 } }));
+    const fake = await runMain('dev');
+    const menu = latestMenu(fake);
+    expect([menuItem(menu, '라이트 모드').checked, menuItem(menu, '창 고정').checked, menuItem(menu, '위치 초기화').enabled]).toStrictEqual([true, true, true]);
+  });
+
+  it.each([
+    ['고정 안 함 — 작업표시줄이 활성화를 가져가 blur 로 숨는다', false],
+    ['고정 — 보인 채', true],
+  ] as const)('win32 우클릭(%s) — 그 순간의 로그인 항목을 다시 읽어(loginItemQuery) 새 메뉴를 만들고 popUpContextMenu 로 띄운다 · 같은 메뉴가 setTray 로 간다', async (_label, pinned) => {
+    writeSettingsFileOf('smoke', savedSettings({ pinned }));
+    const fake = await runMain('smoke');
+    const win = readyToShow(fake);
+    vi.advanceTimersByTime(301);
+    const mark = fake.calls.length;
+    loseFocus(win); // 우클릭을 누를 때 작업표시줄이 활성화를 가져간다(가짜 — OS 의 차례대로 클릭보다 먼저)
+    trayRightClick(fake);
+    const menu = latestMenu(fake);
+    expect(builtMenus(fake)).toBe(2);
+    const after = fake.calls.slice(mark);
+    expect(argsOf(fake, 'app.getLoginItemSettings', mark)).toStrictEqual([[{ args: ['--hidden'] }]]);
+    expect(argsOf(fake, 'tray.popUpContextMenu', mark)).toStrictEqual([[menu]]);
+    expect(argsOf(fake, 'hook.setTray', mark).map((args) => args[1])).toStrictEqual([menu]);
+    expect(callsOf(fake, 'tray.setContextMenu')).toStrictEqual([]); // 붙이면 우클릭을 OS 가 받아 right-click 이 오지 않는다
+    // 읽기 → 만들기 → 띄우기
+    expect(indexOf(after, 'app.getLoginItemSettings')).toBeLessThan(indexOf(after, 'Menu.buildFromTemplate'));
+    expect(indexOf(after, 'Menu.buildFromTemplate')).toBeLessThan(indexOf(after, 'tray.popUpContextMenu'));
+    expect(win.isVisible()).toBe(pinned);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual(pinned ? [] : [{ kind: 'window', action: 'hide', reason: 'blur' }]);
+  });
+
+  it.each([
+    ["고정 안 함 — hide('menu')(blur 숨김이 아니다)", false],
+    ["고정 — 메뉴가 열린 동안 'floating' 으로 내린다", true],
+  ] as const)('darwin(D6) — 메뉴를 만들 때마다 붙이고, 그 메뉴의 menu-will-show: %s · menu-will-close 는 screen-saver 로 되돌린다', async (_label, pinned) => {
+    writeSettingsFileOf('smoke', savedSettings({ pinned }));
+    const fake = await runMain('smoke', { platform: 'darwin' });
+    const win = readyToShow(fake);
+    rendererSend(fake, 'tj-set-theme', 'light'); // 메뉴를 다시 만든다 — 새 메뉴에도 D6 처리기가 붙는다
+    const menu = latestMenu(fake);
+    expect(argsOf(fake, 'tray.setContextMenu').map((args) => args[0])).toStrictEqual([fake.menus[0], menu]);
+    const mark = fake.calls.length;
+    menu.emit('menu-will-show', {});
+    expect(win.isVisible()).toBe(pinned);
+    expect(argsOf(fake, 'win.setAlwaysOnTop', mark)).toStrictEqual(pinned ? [[true, 'floating']] : []);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual(pinned ? [] : [{ kind: 'window', action: 'hide', reason: 'menu' }]);
+    const closing = fake.calls.length;
+    menu.emit('menu-will-close', {});
+    expect(argsOf(fake, 'win.setAlwaysOnTop', closing)).toStrictEqual([[true, 'screen-saver']]);
+  });
+
+  it('linux — D6 없음: 메뉴는 붙이기만 하고 menu-will-show 처리기가 없다(창 그대로)', async () => {
+    const fake = await runMain('smoke', { platform: 'linux' });
+    const win = readyToShow(fake);
+    expect(argsOf(fake, 'tray.setContextMenu')).toStrictEqual([[latestMenu(fake)]]);
+    expect(callsOf(fake, 'menu.on')).toStrictEqual([]);
+    expect(latestMenu(fake).emit('menu-will-show', {})).toBe(false);
+    expect(win.isVisible()).toBe(true);
+  });
+});
+
+describe('트레이 메뉴 항목 (설계 §5.2 — 설정 바꾸기는 메뉴와 팝업이 같은 함수)', () => {
+  it.each([
+    ['혼자 하기', 'solo'],
+    ['온라인 대전', 'online'],
+  ] as const)("'%s' — 숨긴 팝업: tj-mode(%s) 가 tj-shown 보다 먼저 · show('menu') · getState().mode", async (label, mode) => {
+    const fake = await runMain('smoke');
+    readyToShow(fake);
+    rendererSend(fake, 'tj-hide');
+    const mark = fake.calls.length;
+    trayMenuClick(fake, label);
+    expect(trayWindow(fake).isVisible()).toBe(true);
+    expect(argsOf(fake, 'webContents.send', mark)).toStrictEqual([['tj-mode', mode], ['tj-shown']]);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([{ kind: 'window', action: 'show', reason: 'menu' }]);
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, mode, visible: true });
+  });
+
+  it("'온라인 대전' — 보이는(고정) 팝업: tj-mode 와 show('menu') 기록뿐, 보임이 바뀌지 않아 tj-shown 은 없다", async () => {
+    writeSettingsFileOf('smoke', savedSettings({ pinned: true }));
+    const fake = await runMain('smoke');
+    readyToShow(fake);
+    const mark = fake.calls.length;
+    trayMenuClick(fake, '온라인 대전');
+    expect(argsOf(fake, 'webContents.send', mark)).toStrictEqual([['tj-mode', 'online']]);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([{ kind: 'window', action: 'show', reason: 'menu' }]);
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, mode: 'online', visible: true });
+  });
+
+  it("'창 고정' — settings.pinned(300ms 뒤 저장) · 메뉴 다시 만들기(체크) — 그 뒤 유예 지난 blur 에도 숨지 않는다", async () => {
+    const fake = await runMain('smoke');
+    const win = readyToShow(fake);
+    trayMenuClick(fake, '창 고정');
+    expect(builtMenus(fake)).toBe(2);
+    expect(menuItem(latestMenu(fake), '창 고정').checked).toBe(true);
+    vi.advanceTimersByTime(299);
+    expect(readSettingsFile('smoke').pinned).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(readSettingsFile('smoke').pinned).toBe(true);
+    vi.advanceTimersByTime(100); // 보인 지 400ms
+    loseFocus(win);
+    expect(win.isVisible()).toBe(true);
+    expect(recordsOf(fake, 'window').slice(1)).toStrictEqual([]);
+  });
+
+  it.each([
+    ['보이는 중(고정) — 곧바로 아이콘 쪽에 다시 놓는다(위치 · 크기)', true, [[{ x: 1342, y: 632, ...SOLO_SIZE }]]],
+    ['숨긴 중 — 놓지 않는다(다음 표시가 놓는다)', false, []],
+  ] as const)("'위치 초기화' — position null(300ms 뒤 저장) · 메뉴 다시 만들기(꺼짐) · %s", async (_label, shown, placed) => {
+    writeSettingsFileOf('dev', savedSettings({ pinned: true, position: { x: 100, y: 100 } }));
+    const fake = await runMain('dev', { trayBounds: TRAY_LEFT });
+    readyToShow(fake);
+    expect(menuItem(latestMenu(fake), '위치 초기화').enabled).toBe(true);
+    if (!shown) rendererSend(fake, 'tj-hide');
+    const mark = fake.calls.length;
+    trayMenuClick(fake, '위치 초기화');
+    expect(argsOf(fake, 'win.setBounds', mark)).toStrictEqual(placed);
+    expect(builtMenus(fake)).toBe(2);
+    expect(menuItem(latestMenu(fake), '위치 초기화').enabled).toBe(false);
+    vi.advanceTimersByTime(299);
+    expect(readSettingsFile('dev').position).toStrictEqual({ x: 100, y: 100 });
+    vi.advanceTimersByTime(1);
+    expect(readSettingsFile('dev').position).toBeNull();
+  });
+
+  it.each(['dev', 'smoke'] as const)("'웹에서 열기' — %s: WEB_URL 을 연다(개발 실행은 shell.openExternal, 스모크는 hooks.open — 시스템 브라우저 없음)", async (mode) => {
+    const fake = await runMain(mode, { openExternal: 'resolve' });
+    trayMenuClick(fake, '웹에서 열기');
+    await settle();
+    expect(argsOf(fake, 'shell.openExternal')).toStrictEqual(mode === 'dev' ? [[WEB_URL]] : []);
+    expect(argsOf(fake, 'hook.open')).toStrictEqual(mode === 'smoke' ? [[WEB_URL]] : []);
+    expect(stderr).toStrictEqual([]);
+  });
+
+  it("'의견 보내기' — 브라우저를 띄우지 못하면(openExternal 거부) [tj] openExternal: 한 줄 · 처리되지 않은 거부 없음", async () => {
+    const fake = await runMain('dev', { openExternal: 'reject' });
+    trayMenuClick(fake, '의견 보내기');
+    await settle();
+    expect(argsOf(fake, 'shell.openExternal')).toStrictEqual([[FEEDBACK_URL]]);
+    expect(stderr).toStrictEqual([`[tj] openExternal: ${OPEN_ERROR}`]);
+    expect(rejections).toStrictEqual([]);
+  });
+
+  it("'종료' — app.quit() 하나만 부른다(메뉴를 다시 만들지 않는다 · 창은 그대로 — isQuitting 은 before-quit 이 켠다)", async () => {
+    const fake = await runMain('smoke');
+    readyToShow(fake);
+    const mark = fake.calls.length;
+    trayMenuClick(fake, '종료');
+    expect(fake.calls.slice(mark).map((call) => call.name)).toStrictEqual(['app.quit']);
+  });
+
+  it.each([
+    ['창 고정을 누른다 — 숨기지 않는다', true],
+    ['누르지 않는다(대조) — 숨긴다', false],
+  ] as const)('win32 — 트레이로 보인 창(t0) · t0+100 blur(유예 안) · t0+200 %s: t0+301 의 미룬 확인은 그때의 고정을 읽는다', async (_label, pin) => {
+    const fake = await runMain('smoke');
+    const win = readyToShow(fake);
+    rendererSend(fake, 'tj-hide');
+    vi.advanceTimersByTime(1000);
+    trayClick(fake); // t0 — show('tray')
+    const mark = fake.calls.length;
+    vi.advanceTimersByTime(100);
+    loseFocus(win);
+    vi.advanceTimersByTime(100);
+    if (pin) trayMenuClick(fake, '창 고정'); // 가짜 Menu 가 checked 를 true 로 뒤집는다
+    vi.advanceTimersByTime(100);
+    expect(win.isVisible()).toBe(true); // t0+300 — 아직 확인 전
+    vi.advanceTimersByTime(1);
+    expect(win.isVisible()).toBe(pin);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual(pin ? [] : [{ kind: 'window', action: 'hide', reason: 'blur' }]);
+  });
+});
+
+describe('트레이 메뉴 다시 만들기 · 낡은 메뉴 (설계 §5.1 trayMenu · §5.2)', () => {
+  it.each(['win32', 'darwin'] as const)("%s — 메뉴를 누를 때마다 정확히 한 번 다시 만든다(바뀐 것이 없어도 — 스모크는 setTray, darwin 은 setContextMenu 도). '종료' 는 만들지 않는다", async (platform) => {
+    const fake = await runMain('smoke', { platform });
+    readyToShow(fake);
+    const labels = (platform === 'win32' ? WIN32_LABELS : OTHER_LABELS).filter((label) => label !== '─' && label !== WIN32_LABELS[0] && label !== '종료');
+    const counts = (): number[] => [builtMenus(fake), callsOf(fake, 'hook.setTray').length, callsOf(fake, 'tray.setContextMenu').length];
+    for (const label of labels) {
+      const [built = 0, delivered = 0, attached = 0] = counts();
+      trayMenuClick(fake, label);
+      expect(counts(), label).toStrictEqual([built + 1, delivered + 1, attached + (platform === 'darwin' ? 1 : 0)]);
+    }
+    const before = counts();
+    trayMenuClick(fake, '종료');
+    expect(counts()).toStrictEqual(before);
+  });
+
+  it.each(['win32', 'darwin'] as const)("%s — tj-set-theme 'light' 는 메뉴를 다시 만든다('라이트 모드' 체크 · darwin 은 붙인다), 받지 않는 값('purple')은 만들지 않는다", async (platform) => {
+    const fake = await runMain('smoke', { platform });
+    rendererSend(fake, 'tj-set-theme', 'purple');
+    expect(builtMenus(fake)).toBe(1);
+    rendererSend(fake, 'tj-set-theme', 'light');
+    expect(builtMenus(fake)).toBe(2);
+    const menu = latestMenu(fake);
+    expect(menuItem(menu, '라이트 모드').checked).toBe(true);
+    expect(argsOf(fake, 'hook.setTray').at(-1)?.[1]).toBe(menu);
+    expect(argsOf(fake, 'tray.setContextMenu').map((args) => args[0])).toStrictEqual(platform === 'darwin' ? [fake.menus[0], menu] : []);
+  });
+
+  it("위치 저장 — 첫 사용자 이동 저장만 메뉴를 다시 만든다('위치 초기화' 켜짐), 다른 자리의 두 번째 저장은 만들지 않는다. '위치 초기화' 는 만든다(꺼짐)", async () => {
+    const fake = await runMain('dev', { trayBounds: TRAY_LEFT });
+    const win = readyToShow(fake);
+    expect(menuItem(latestMenu(fake), '위치 초기화').enabled).toBe(false);
+    willMove(win);
+    drag(fake, win, 50);
+    expect(builtMenus(fake)).toBe(2);
+    expect(menuItem(latestMenu(fake), '위치 초기화').enabled).toBe(true);
+    willMove(win);
+    drag(fake, win, 50);
+    expect(builtMenus(fake)).toBe(2);
+    vi.advanceTimersByTime(300);
+    expect(readSettingsFile('dev').position).toStrictEqual({ x: 1442, y: 632 });
+    trayMenuClick(fake, '위치 초기화');
+    expect(builtMenus(fake)).toBe(3);
+    expect(menuItem(latestMenu(fake), '위치 초기화').enabled).toBe(false);
+  });
+
+  it("will-move → moved 저장 → '위치 초기화'(보이는 중 — 다시 놓아 게이트를 닫는다) → will-move 없는 moved: position null 그대로 · '위치 초기화' 꺼짐 그대로", async () => {
+    const fake = await runMain('dev', { trayBounds: TRAY_LEFT });
+    const win = readyToShow(fake);
+    willMove(win);
+    drag(fake, win, 50);
+    trayMenuClick(fake, '위치 초기화');
+    const before = builtMenus(fake);
+    drag(fake, win, 50); // will-move 없이 옮겨졌다(프로그램 · OS)
+    vi.advanceTimersByTime(400);
+    expect(readSettingsFile('dev').position).toBeNull();
+    expect(builtMenus(fake)).toBe(before);
+    expect(menuItem(latestMenu(fake), '위치 초기화').enabled).toBe(false);
+  });
+
+  it("낡은 메뉴 — 테마: dark 때 만든 M1 → tj-set-theme 'light' → M1 의 '라이트 모드'(꺼진 상자 — 누르면 켜기) → light 그대로 · 새 메뉴", async () => {
+    const fake = await runMain('dev');
+    const m1 = latestMenu(fake);
+    expect(menuItem(m1, '라이트 모드').checked).toBe(false);
+    rendererSend(fake, 'tj-set-theme', 'light');
+    const before = builtMenus(fake);
+    trayMenuClick(fake, '라이트 모드', m1);
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, theme: 'light' });
+    expect(builtMenus(fake)).toBe(before + 1);
+    expect(menuItem(latestMenu(fake), '라이트 모드').checked).toBe(true);
+    vi.advanceTimersByTime(300);
+    expect(readSettingsFile('dev').theme).toBe('light');
+  });
+
+  it.each([
+    ['고정 전에 만든 메뉴를 고정 뒤에 누른다 — 고정 그대로', false],
+    ['고정 때 만든 메뉴를 고정 해제 뒤에 누른다 — 해제 그대로', true],
+  ] as const)('낡은 메뉴 — 창 고정: %s', async (_label, startPinned) => {
+    writeSettingsFileOf('dev', savedSettings({ pinned: startPinned }));
+    const fake = await runMain('dev');
+    readyToShow(fake);
+    const stale = latestMenu(fake); // 시작 상태의 메뉴 — 상자 = startPinned
+    trayRightClick(fake); // 같은 상태의 메뉴를 하나 더 만든다(우클릭)
+    trayMenuClick(fake, '창 고정'); // 그 메뉴로 바꾼다 → !startPinned
+    expect(menuItem(latestMenu(fake), '창 고정').checked).toBe(!startPinned);
+    trayMenuClick(fake, '창 고정', stale); // 낡은 상자(startPinned)를 누르면 !startPinned — 사용자가 본 것의 반대로 가지 않는다
+    expect(menuItem(stale, '창 고정').checked).toBe(!startPinned); // 양성 대조 — 가짜가 click 전에 뒤집었다
+    expect(menuItem(latestMenu(fake), '창 고정').checked).toBe(!startPinned);
+    vi.advanceTimersByTime(300);
+    expect(readSettingsFile('dev').pinned).toBe(!startPinned);
+  });
+
+  it("낡은 메뉴 — 자동 실행(패키지 win32): 등록 · 승인일 때 만든 M1(체크) → 작업 관리자에서 끔(approved false) → M1 의 '자동 실행'(켜진 상자 — 누르면 끄기) → setLoginItemSettings 정확히 한 번 = loginItemSettings(win32, false) · 다시 읽고 새 메뉴", async () => {
+    const fake = await runMain('packaged', { execPath: INSTALLED_EXE });
+    readyToShow(fake);
+    const m1 = latestMenu(fake);
+    expect(menuItem(m1, '자동 실행').checked).toBe(true);
+    const [entry] = fake.loginItems;
+    if (entry === undefined) throw new Error('첫 실행이 로그인 항목을 쓰지 않았다');
+    entry.approved = false; // 사용자가 작업 관리자에서 껐다 — 메뉴는 아직 체크로 보인다
+    const mark = fake.calls.length;
+    const before = builtMenus(fake);
+    trayMenuClick(fake, '자동 실행', m1);
+    // 켜기(openAtLogin true · enabled true)로 되살리지 않는다 — 끄기 한 번뿐이다
+    expect(argsOf(fake, 'app.setLoginItemSettings', mark)).toStrictEqual([[loginItemSettings('win32', false)]]);
+    expect(argsOf(fake, 'app.getLoginItemSettings', mark)).toStrictEqual([[{ args: ['--hidden'] }]]);
+    expect(indexOf(fake.calls.slice(mark), 'app.setLoginItemSettings')).toBeLessThan(indexOf(fake.calls.slice(mark), 'app.getLoginItemSettings'));
+    expect(builtMenus(fake)).toBe(before + 1);
+    expect(menuItem(latestMenu(fake), '자동 실행').checked).toBe(false);
+    expect(fake.loginItems).toStrictEqual([]);
+  });
+});
+
+describe('트레이 좌클릭 — 토글 · 경합 가드 (설계 §5.1 trayClickAction · §5.2 — 가짜 시계, hide 안의 동기 blur 손잡이 켬)', () => {
+  /** 시작 창이 보인 지 유예(300ms)를 넘겼고 hide 안의 동기 blur 손잡이를 켰다 — 그 뒤 기록의 자리(mark)와 함께. */
+  async function shownPastGrace(): Promise<{ fake: Fake; win: FakeWindow; mark: number }> {
+    const fake = await runMain('smoke');
+    const win = readyToShow(fake);
+    vi.advanceTimersByTime(301);
+    fake.handles.blurOnHide = true;
+    return { fake, win, mark: fake.calls.length };
+  }
+
+  it("보이면 hide('toggle'), 숨어 있으면 show('tray')", async () => {
+    const { fake, win, mark } = await shownPastGrace();
+    trayClick(fake);
+    expect(win.isVisible()).toBe(false);
+    trayClick(fake);
+    expect(win.isVisible()).toBe(true);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([
+      { kind: 'window', action: 'hide', reason: 'toggle' },
+      { kind: 'window', action: 'show', reason: 'tray' },
+    ]);
+  });
+
+  it('blur 로 숨은 뒤 249ms 의 클릭은 무시하고(같은 누름이 낳은 click), 250ms 의 클릭은 보인다', async () => {
+    const { fake, win, mark } = await shownPastGrace();
+    loseFocus(win);
+    expect(win.isVisible()).toBe(false);
+    vi.advanceTimersByTime(249);
+    trayClick(fake);
+    expect(win.isVisible()).toBe(false);
+    vi.advanceTimersByTime(1);
+    trayClick(fake);
+    expect(win.isVisible()).toBe(true);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([
+      { kind: 'window', action: 'hide', reason: 'blur' },
+      { kind: 'window', action: 'show', reason: 'tray' },
+    ]);
+  });
+
+  it('click 이 blur 보다 먼저 오면(보이는 창) 토글로 숨기고 뒤의 blur 는 무시한다 — 곧바로(Δt 0) 다음 클릭은 보인다', async () => {
+    const { fake, win, mark } = await shownPastGrace();
+    trayClick(fake);
+    loseFocus(win); // 뒤늦게 온 blur — 이미 숨었다
+    trayClick(fake);
+    expect(win.isVisible()).toBe(true);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([
+      { kind: 'window', action: 'hide', reason: 'toggle' },
+      { kind: 'window', action: 'show', reason: 'tray' },
+    ]);
+  });
+
+  it.each(['request', 'close', 'toggle'] as const)("blur 가 아닌 숨김(%s) — 그 이유의 숨김 하나 · blur 숨김 0 · 곧바로(Δt 0) 다음 클릭은 show('tray')", async (reason) => {
+    const { fake, win, mark } = await shownPastGrace();
+    if (reason === 'request') rendererSend(fake, 'tj-hide');
+    else if (reason === 'close') win.emit('close', { preventDefault: () => {} });
+    else trayClick(fake);
+    expect(win.isVisible()).toBe(false);
+    // 양성 대조 — hide 안의 blur 는 isVisible() 가 참일 때 왔다: blur 숨김 0 은 보이려는 상태(shownIntent)가 막은 것이다
+    expect(argsOf(fake, 'handle.blurOnHide', mark)).toStrictEqual([[true]]);
+    trayClick(fake);
+    expect(win.isVisible()).toBe(true);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([
+      { kind: 'window', action: 'hide', reason },
+      { kind: 'window', action: 'show', reason: 'tray' },
+    ]);
+  });
+
+  it.each([
+    ['win32', '혼자 하기', true],
+    ['win32', '온라인 대전', true],
+    ['win32', 'second-instance', true],
+    ['darwin', '열기', true],
+    ['linux', '열기', true],
+    ['win32', '좌클릭(대조)', false],
+  ] as const)('%s — blur 로 숨은 지 100ms 뒤 %s → 보인다: %s (경합 가드는 트레이 좌클릭에만 건다)', async (platform, how, shows) => {
+    const fake = await runMain('smoke', { platform });
+    const win = readyToShow(fake);
+    vi.advanceTimersByTime(301);
+    loseFocus(win);
+    expect(win.isVisible()).toBe(false);
+    vi.advanceTimersByTime(100);
+    if (how === 'second-instance') secondInstance(fake, [process.execPath, currentTree().desktop]);
+    else if (how === '좌클릭(대조)') trayClick(fake);
+    else trayMenuClick(fake, how);
+    expect(win.isVisible()).toBe(shows);
+  });
+});
+
+describe('자동 실행 — 설치본만 로그인 항목을 쓴다 (설계 §5.1 autostart · §5.2 자동 실행)', () => {
+  it('패키지 win32 첫 실행 — setLoginItemSettings 정확히 한 번 { openAtLogin: true, name: AUMID, args: [--hidden], enabled: true } · 첫 실행 표시 저장 · 시작 메뉴의 자동 실행은 켜짐 · 체크', async () => {
+    const fake = await runMain('packaged', { execPath: INSTALLED_EXE });
+    expect(argsOf(fake, 'app.setLoginItemSettings')).toStrictEqual([[{ openAtLogin: true, name: AUMID, args: ['--hidden'], enabled: true }]]);
+    expect(indexOf(fake.calls, 'app.setAppUserModelId')).toBeLessThan(indexOf(fake.calls, 'app.setLoginItemSettings'));
+    expect(readSettingsFile('packaged')).toStrictEqual(FIRST_RUN_FILE);
+    expect(fake.loginItems).toStrictEqual([{ name: AUMID, path: INSTALLED_EXE, args: ['--hidden'], approved: true }]);
+    expect(menuItem(latestMenu(fake), '자동 실행')).toMatchObject({ enabled: true, checked: true });
+  });
+
+  it('패키지 win32 두 번째 실행(첫 실행 표시가 있다) — 0회', async () => {
+    writeSettingsFileOf('packaged', FIRST_RUN_FILE);
+    const fake = await runMain('packaged', { execPath: INSTALLED_EXE });
+    expect(callsOf(fake, 'app.setLoginItemSettings')).toStrictEqual([]);
+    expect(menuItem(latestMenu(fake), '자동 실행')).toMatchObject({ enabled: true, checked: false });
+  });
+
+  it('패키지 darwin 첫 실행 — 부르지 않고 autostart: false 로 둔다(첫 실행 표시와 함께 저장)', async () => {
+    writeSettingsFileOf('packaged', { autostart: true }); // 첫 실행 표시가 없는 파일 — 첫 실행 갈래를 탄다(그대로 두면 true 가 남는다)
+    const fake = await runMain('packaged', { platform: 'darwin', execPath: INSTALLED_EXE });
+    expect(callsOf(fake, 'app.setLoginItemSettings')).toStrictEqual([]);
+    expect(readSettingsFile('packaged')).toStrictEqual(FIRST_RUN_FILE);
+  });
+
+  it.each([
+    ['dev', 'win32'],
+    ['dev', 'darwin'],
+    ['dev', 'linux'],
+    ['smoke', 'win32'],
+    ['smoke', 'darwin'],
+    ['smoke', 'linux'],
+    ['packaged-smoke', 'win32'],
+    ['packaged-smoke', 'darwin'],
+    ['packaged-smoke', 'linux'],
+  ] as const)("%s · %s 첫 실행 — 가짜의 원래 setLoginItemSettings 0회 · 첫 실행 표시 저장, 스모크는 win32 에서만 { login-item · on true · managed false } 하나", async (mode, platform) => {
+    const fake = await runMain(mode, { platform, execPath: isPackagedMode(mode) ? INSTALLED_EXE : undefined });
+    expect(callsOf(fake, 'app.setLoginItemSettings')).toStrictEqual([]);
+    expect(readSettingsFile(mode)).toStrictEqual(FIRST_RUN_FILE);
+    expect(recordsOf(fake, 'login-item')).toStrictEqual(isSmokeMode(mode) && platform === 'win32' ? [{ kind: 'login-item', on: true, managed: false }] : []);
+  });
+
+  it('패키지 win32 의 못 읽는 설정 파일 — 첫 실행이 아니다: 0회(자동 실행이 되살아나지 않는다)', async () => {
+    writeSettingsFileOf('packaged', '{ 깨진');
+    const fake = await runMain('packaged', { execPath: INSTALLED_EXE });
+    expect(callsOf(fake, 'app.setLoginItemSettings')).toStrictEqual([]);
+    expect(stderr).toHaveLength(1); // [tj] settings: 읽지 못해 …
+  });
+
+  it('패키지인데 실행 파일이 개발 바이너리(C:\\…\\electron.exe — Windows 꼴, ubuntu 에서도) — 0회 · 메뉴의 자동 실행은 꺼짐', async () => {
+    const fake = await runMain('packaged', { execPath: DEV_ELECTRON_EXE });
+    expect(callsOf(fake, 'app.setLoginItemSettings')).toStrictEqual([]);
+    expect(menuItem(latestMenu(fake), '자동 실행').enabled).toBe(false);
+  });
+
+  it.each([
+    ['dev', 'win32', false],
+    ['dev', 'darwin', false],
+    ['dev', 'linux', false],
+    ['smoke', 'win32', false],
+    ['packaged-smoke', 'win32', false],
+    ['packaged', 'win32', true],
+    ['packaged', 'darwin', true],
+    ['packaged', 'linux', false],
+  ] as const)('%s · %s — 메뉴의 자동 실행 enabled: %s (로그인 항목을 관리하는 실행 — 설치본 win32 · darwin — 만)', async (mode, platform, enabled) => {
+    const fake = await runMain(mode, { platform, execPath: isPackagedMode(mode) ? INSTALLED_EXE : undefined });
+    expect(menuItem(latestMenu(fake), '자동 실행').enabled).toBe(enabled);
+  });
+
+  it('패키지 win32 메뉴 — 체크는 executableWillLaunchAtLogin: 작업 관리자에서 끄면(approved false) 다음 우클릭의 메뉴는 체크 해제', async () => {
+    const fake = await runMain('packaged', { execPath: INSTALLED_EXE });
+    readyToShow(fake);
+    expect(menuItem(latestMenu(fake), '자동 실행').checked).toBe(true);
+    const [entry] = fake.loginItems;
+    if (entry === undefined) throw new Error('첫 실행이 로그인 항목을 쓰지 않았다');
+    entry.approved = false;
+    trayRightClick(fake);
+    expect(menuItem(latestMenu(fake), '자동 실행')).toMatchObject({ enabled: true, checked: false });
+  });
+
+  it('패키지 win32 메뉴 — 인자 없이([]) 등록된 항목도 체크(경로만 본다 — openAtLogin 은 거짓이다)', async () => {
+    writeSettingsFileOf('packaged', FIRST_RUN_FILE);
+    const fake = await runMain('packaged', { execPath: INSTALLED_EXE, loginItems: [{ name: AUMID, path: INSTALLED_EXE, args: [], approved: true }] });
+    expect(menuItem(latestMenu(fake), '자동 실행')).toMatchObject({ enabled: true, checked: true });
+    // 대조 — 등록할 때의 인자로 물으면 openAtLogin 은 거짓이다(체크가 openAtLogin 이었다면 꺼져 보였다)
+    expect(fake.electron.app.getLoginItemSettings({ args: ['--hidden'] }).openAtLogin).toBe(false);
+  });
+
+  it("패키지 win32 메뉴 — 꺼진 상자의 '자동 실행' 을 누르면 loginItemSettings(win32, true) 로 한 번 쓴 뒤 다시 읽어 메뉴를 만든다(체크)", async () => {
+    writeSettingsFileOf('packaged', FIRST_RUN_FILE);
+    const fake = await runMain('packaged', { execPath: INSTALLED_EXE });
+    readyToShow(fake);
+    expect(menuItem(latestMenu(fake), '자동 실행').checked).toBe(false);
+    const mark = fake.calls.length;
+    trayMenuClick(fake, '자동 실행');
+    const after = fake.calls.slice(mark);
+    expect(argsOf(fake, 'app.setLoginItemSettings', mark)).toStrictEqual([[loginItemSettings('win32', true)]]);
+    expect(indexOf(after, 'app.setLoginItemSettings')).toBeLessThan(indexOf(after, 'app.getLoginItemSettings'));
+    expect(indexOf(after, 'app.getLoginItemSettings')).toBeLessThan(indexOf(after, 'Menu.buildFromTemplate'));
+    expect(callsOf(fake, 'Menu.buildFromTemplate').filter((call) => after.includes(call))).toHaveLength(1);
+    expect(menuItem(latestMenu(fake), '자동 실행').checked).toBe(true);
+  });
+
+  it("패키지 darwin 메뉴 — '자동 실행' 을 켜면 { openAtLogin: true } 한 번 + settings.autostart true(300ms 뒤 저장) → 메뉴(체크)", async () => {
+    writeSettingsFileOf('packaged', FIRST_RUN_FILE);
+    const fake = await runMain('packaged', { platform: 'darwin', execPath: INSTALLED_EXE });
+    readyToShow(fake);
+    trayMenuClick(fake, '자동 실행');
+    expect(argsOf(fake, 'app.setLoginItemSettings')).toStrictEqual([[{ openAtLogin: true }]]);
+    expect(menuItem(latestMenu(fake), '자동 실행').checked).toBe(true);
+    vi.advanceTimersByTime(300);
+    expect(readSettingsFile('packaged').autostart).toBe(true);
+  });
+});
+
+describe('D1 — 스모크는 로그인 항목 쓰기를 대체 함수로 막는다 (설계 §5.5 loginItem · 진짜 run.cjs)', () => {
+  /** ready 뒤 첫 app.getPath('userData')(main 의 설정 읽기) · 첫 login-item 기록(첫 실행 기본값)의 자리 — 없으면 -1. */
+  const userDataReadAt = (fake: Fake): number => fake.calls.findIndex((call) => call.ready && call.name === 'app.getPath' && call.args[0] === 'userData');
+  const loginItemRecordAt = (fake: Fake): number =>
+    fake.calls.findIndex((call) => call.name === 'hook.record' && (call.args[0] as { kind?: unknown }).kind === 'login-item');
+
+  it.each([
+    ['smoke', 'win32'],
+    ['smoke', 'darwin'],
+    ['packaged-smoke', 'win32'],
+    ['packaged-smoke', 'darwin'],
+  ] as const)('%s · %s — 실행기가 app.setLoginItemSettings 를 정확히 한 번 바꿔 끼운다(ready 뒤, 첫 getPath(userData) · login-item 기록보다 앞), 대체 함수 호출 0 · 원래 메서드 0', async (mode, platform) => {
+    const fake = await runMain(mode, { platform, execPath: isPackagedMode(mode) ? INSTALLED_EXE : undefined });
+    const stub = loginItemStub(fake);
+    const writeAt = indexOf(fake.calls, 'app.set', 'setLoginItemSettings');
+    expect(fake.calls[writeAt]?.ready).toBe(true);
+    expect(userDataReadAt(fake)).toBeGreaterThan(writeAt);
+    if (platform === 'win32') expect(loginItemRecordAt(fake)).toBeGreaterThan(writeAt);
+    else expect(loginItemRecordAt(fake)).toBe(-1);
+    expect(stub.calls).toStrictEqual([]); // 가드가 거절했다 — 대체 함수에도 닿지 않았다
+    expect(callsOf(fake, 'app.setLoginItemSettings')).toStrictEqual([]);
+    expect(recordsOf(fake, 'login-item')).toStrictEqual(platform === 'win32' ? [{ kind: 'login-item', on: true, managed: false }] : []);
+  });
+
+  it.each(['dev', 'packaged'] as const)('%s — 바꿔 끼우지 않는다(실행기가 없다 — 속성 쓰기 0)', async (mode) => {
+    const fake = await runMain(mode, { execPath: mode === 'packaged' ? INSTALLED_EXE : undefined });
+    expect(callsOf(fake, 'app.set')).toStrictEqual([]);
+  });
+
+  it('양성 대조 — 나무의 main.js 사본에서 setLoginItem 의 판정을 늘 참으로 바꾸면(packaged-smoke · win32): 기록 managed true 하나 · 대체 함수 호출 정확히 1회(loginItemSettings(win32, true)) · 원래 메서드 0회(대체 함수가 막았다)', async () => {
+    const source = readFileSync(currentTree().main, 'utf8');
+    const judgement = 'const managed = managesLoginItems();';
+    expect(source.split(judgement), '판정 글은 정확히 한 번 — 치환이 한 번 일어난다').toHaveLength(2);
+    writeFileSync(currentTree().main, source.replace(judgement, 'const managed = true;'));
+    const fake = await runMain('packaged-smoke', { execPath: INSTALLED_EXE });
+    expect(recordsOf(fake, 'login-item')).toStrictEqual([{ kind: 'login-item', on: true, managed: true }]);
+    expect(loginItemStub(fake).calls).toStrictEqual([loginItemSettings('win32', true)]);
+    expect(callsOf(fake, 'app.setLoginItemSettings')).toStrictEqual([]);
+    expect(fake.loginItems).toStrictEqual([]);
+  });
+
+  it('대체 함수를 끼우지 못하면(속성 쓰기가 던진다) 실행이 실패한다 — 결과 stage ready · exit(1), 창 · 트레이를 만들지 않는다', async () => {
+    const refused = new TypeError("Cannot assign to read only property 'setLoginItemSettings' of object");
+    const fake = await runMain('smoke', { throwOn: { name: 'app.set', error: refused }, expectReadyFailure: true });
+    expect(readResult()).toStrictEqual({ nonce: NONCE, stage: 'ready', error: refused.message, checks: [], versions: expectedVersions() });
+    expect(callsOf(fake, 'app.exit').map((call) => call.args)).toStrictEqual([[1]]);
+    expect([...callsOf(fake, 'new BrowserWindow'), ...callsOf(fake, 'new Tray')]).toStrictEqual([]);
+  });
+});
+
+describe('두 번째 실행 · activate (설계 §5.2)', () => {
+  it("second-instance(--hidden 없음) — '온라인 대전' 뒤 숨긴 창을 보인다: mode online 그대로 · tj-mode 를 다시 보내지 않는다 · show('second-instance')", async () => {
+    const fake = await runMain('smoke');
+    readyToShow(fake);
+    trayMenuClick(fake, '온라인 대전');
+    rendererSend(fake, 'tj-hide');
+    const mark = fake.calls.length;
+    secondInstance(fake, [process.execPath, currentTree().desktop]);
+    expect(trayWindow(fake).isVisible()).toBe(true);
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, mode: 'online', visible: true });
+    expect(argsOf(fake, 'webContents.send', mark)).toStrictEqual([['tj-shown']]);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([{ kind: 'window', action: 'show', reason: 'second-instance' }]);
+  });
+
+  it('second-instance 의 명령줄에 --hidden(로그인 항목이 떠 있는 앱을 한 번 더 띄웠다) — 아무것도 하지 않는다', async () => {
+    const fake = await runMain('smoke');
+    readyToShow(fake);
+    rendererSend(fake, 'tj-hide');
+    const mark = fake.calls.length;
+    secondInstance(fake, [process.execPath, '--hidden']);
+    expect(fake.calls.slice(mark)).toStrictEqual([]);
+    expect(trayWindow(fake).isVisible()).toBe(false);
+  });
+
+  it('second-instance 가 첫 ready-to-show 전에 와도 보인다 — 로그인으로 시작한(win32 --hidden) 창도, 그 뒤의 ready-to-show 가 숨기지 않는다', async () => {
+    const fake = await runMain('dev', { extraArgv: ['--hidden'] });
+    const win = trayWindow(fake);
+    secondInstance(fake, [process.execPath]);
+    expect(win.isVisible()).toBe(true);
+    readyToShow(fake);
+    expect(win.isVisible()).toBe(true);
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, visible: true });
+  });
+
+  it("darwin activate — 보이기만 한다: mode 그대로 · show('activate')", async () => {
+    const fake = await runMain('smoke', { platform: 'darwin' });
+    readyToShow(fake);
+    trayMenuClick(fake, '온라인 대전');
+    rendererSend(fake, 'tj-hide');
+    const mark = fake.calls.length;
+    activate(fake);
+    expect(trayWindow(fake).isVisible()).toBe(true);
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, mode: 'online', visible: true });
+    expect(argsOf(fake, 'webContents.send', mark)).toStrictEqual([['tj-shown']]);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([{ kind: 'window', action: 'show', reason: 'activate' }]);
+  });
+
+  it('darwin activate 가 첫 판단(ready-to-show) 전에 오면 기억했다가 그때 보인다 — 로그인으로 열렸어도(wasOpenedAtLogin)', async () => {
+    const fake = await runMain('packaged', { platform: 'darwin', execPath: INSTALLED_EXE, wasOpenedAtLogin: true });
+    activate(fake);
+    expect(callsOf(fake, 'win.show')).toStrictEqual([]); // 아직 그리지 않은 창은 보이지 않는다
+    const win = readyToShow(fake);
+    expect(win.isVisible()).toBe(true);
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, visible: true });
+  });
+
+  it.each([
+    ['packaged', true, false],
+    ['dev', true, false],
+    ['smoke', true, true],
+    ['packaged', false, true],
+  ] as const)('darwin %s · wasOpenedAtLogin %s — ready-to-show 에 보인다: %s (로그인 실행이면 숨긴 채 — 스모크는 늘 로그인 실행이 아니다)', async (mode, wasOpenedAtLogin, shown) => {
+    const fake = await runMain(mode, { platform: 'darwin', execPath: isPackagedMode(mode) ? INSTALLED_EXE : undefined, wasOpenedAtLogin });
+    const win = readyToShow(fake);
+    expect(win.isVisible()).toBe(shown);
+    expect(getState(fake)).toStrictEqual({ ...INITIAL_STATE, visible: shown });
+  });
+
+  it.each(PLATFORMS)('%s — activate 처리기는 darwin 에만 단다', async (platform) => {
+    const fake = await runMain('dev', { platform });
+    expect(listenersOf(fake.calls, 'app.on', 'activate')).toHaveLength(platform === 'darwin' ? 1 : 0);
+  });
+});
+
 describe('콘솔 중계 — 개발 실행에서만, consoleLine 한 줄로 (설계 §5.2)', () => {
   /** 페이지가 보낸 콘솔 한 줄(새 모양 — 첫 인자 객체). 터미널을 건드리는 글자(ESC · OSC 52 · BEL)와 가짜 '[tj]' 줄을 담았다. */
   const MESSAGE = { level: 'error', message: 'a\u001b]52;c;eA==\u0007\n[tj] x', sourceId: 'app://twelvejanggi/assets/a.js', lineNumber: 3 };
@@ -1936,5 +2653,38 @@ describe('파괴 · 종료 — 창은 liveWindow() 로만 만진다 (설계 §5.
     const handled = ['win.setBackgroundColor', 'webContents.send', 'win.setOpacity', 'webContents.send', 'win.hide', 'win.emit', 'webContents.send'];
     expect(names).toStrictEqual(destroyed ? [] : handled);
     expect(vi.getTimerCount()).toBe(destroyed ? 0 : 1); // 파괴 뒤에는 저장 예약도 없다
+  });
+
+  it.each(['win32', 'darwin'] as const)("%s — 창을 파괴한 뒤 트레이 클릭 · 모든 메뉴 항목(darwin 은 menu-will-show · close 도)은 던지지 않고 창 · webContents 를 부르지 않는다('종료' 는 그래도 app.quit)", async (platform) => {
+    const fake = await runMain('dev', { platform, openExternal: 'resolve' });
+    const win = readyToShow(fake);
+    const menu = latestMenu(fake);
+    win.destroy();
+    const mark = fake.calls.length;
+    expect(() => {
+      if (platform === 'win32') {
+        trayClick(fake);
+        trayRightClick(fake);
+      } else {
+        menu.emit('menu-will-show', {});
+        menu.emit('menu-will-close', {});
+      }
+      for (const item of menu.items) item.click();
+    }).not.toThrow();
+    expect(touchedSince(fake, mark)).toStrictEqual([]);
+    expect(callsOf(fake, 'app.quit')).toHaveLength(1);
+  });
+
+  it.each([
+    ['좌클릭', trayClick],
+    ['우클릭', trayRightClick],
+  ] as const)('win32 before-quit 뒤 트레이 %s — 창을 부르지 않고 메뉴를 만들거나 띄우지 않는다', async (_label, press) => {
+    const fake = await runMain('dev');
+    readyToShow(fake);
+    beforeQuit(fake);
+    const mark = fake.calls.length;
+    expect(() => press(fake)).not.toThrow();
+    expect(touchedSince(fake, mark)).toStrictEqual([]);
+    expect(fake.calls.slice(mark).filter((call) => call.name === 'Menu.buildFromTemplate' || call.name === 'tray.popUpContextMenu')).toStrictEqual([]);
   });
 });

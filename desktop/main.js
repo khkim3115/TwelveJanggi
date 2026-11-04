@@ -15,15 +15,29 @@
 //   창은 liveWindow() 로만 만진다 — 없거나 파괴됐거나 종료 중이면 아무것도 하지 않는다. 렌더러로는 sendToTray 로만 민다.
 //   설정(<userData>/settings.json)은 ready 뒤 한 번 동기로 읽고, 바뀌면 묶어서(300ms) 쓰고, 종료 · 세션 끝에 남은 것을 비운다.
 //   시각은 모두 performance.now() 한 시계로 잰다(부를 때마다 읽는다).
+// - 트레이 메뉴는 refreshTrayMenu 한 곳에서 만든다 — 시작 때 한 번, 메뉴를 누를 때마다, 메뉴에 보이는 상태가 바뀔 때마다. Windows 는 메뉴를
+//   트레이에 붙이지 않고 우클릭마다 새로 만들어 띄운다(D4 — 자동 실행 체크가 그 순간의 OS 상태다). 로그인 항목은 setLoginItem 한 곳에서만
+//   쓰고, 로그인 항목을 관리하는 실행(설치본)에서만 OS 를 부른다.
 
 const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, net, protocol, screen, session, shell } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { APP_SCHEME, ENTRY_FILE, ENTRY_URL, SCHEME_PRIVILEGES, buildFileIndex, resolveAppRequest } = require('./lib/appProtocol.cjs');
-const { AUTOSTART_NAME, HIDDEN_ARG, hasHiddenArg, launchedAtLogin } = require('./lib/autostart.cjs');
+const {
+  AUTOSTART_NAME,
+  HIDDEN_ARG,
+  autostartChecked,
+  canManageLoginItems,
+  firstRunAutostart,
+  hasHiddenArg,
+  launchedAtLogin,
+  loginItemQuery,
+  loginItemSettings,
+} = require('./lib/autostart.cjs');
 const { consoleLine } = require('./lib/consoleLine.cjs');
 const { createGuardedIpc } = require('./lib/ipcGuard.cjs');
 const { layoutSize, normalizeLayout } = require('./lib/layout.cjs');
+const { FEEDBACK_URL, WEB_URL, externalHref } = require('./lib/links.cjs');
 const { createNavigationGuards } = require('./lib/navigation.cjs');
 const { normalizeOpacity } = require('./lib/opacity.cjs');
 const { denyDownload, isPermissionAllowed, selectNoCertificate } = require('./lib/permissions.cjs');
@@ -34,7 +48,8 @@ const { parseSmokeArgs } = require('./lib/smokeArgs.cjs');
 const { failureResult, writeResultAtomic } = require('./lib/smokeOut.cjs');
 const { THEME_BACKGROUND, normalizeTheme } = require('./lib/theme.cjs');
 const { parseTrayBuild } = require('./lib/trayBuildInfo.cjs');
-const { BLUR_GRACE_MS, deferredBlurAction, shouldHideOnBlur } = require('./lib/windowPolicy.cjs');
+const { buildTrayMenuTemplate } = require('./lib/trayMenu.cjs');
+const { BLUR_GRACE_MS, deferredBlurAction, shouldHideOnBlur, trayClickAction } = require('./lib/windowPolicy.cjs');
 const { trayWindowPreferences } = require('./lib/windowPrefs.cjs');
 
 /** @typedef {import('./lib/navigation.cjs').NavigationRecord} NavigationRecord */
@@ -82,7 +97,9 @@ const { trayWindowPreferences } = require('./lib/windowPrefs.cjs');
  */
 /**
  * 스모크 실행기의 연결점. 값이 있을 때만 부르고, 결정은 늘 실제 처리기가 내린다 — 바꿔 끼우지 않고 감싸서 기록만 하게 해서
- * 스모크가 실제 코드와 같게 한다(설계 §5.10).
+ * 스모크가 실제 코드와 같게 한다(설계 §5.10). 예외는 하나다(D1): 실행기는 app.setLoginItemSettings 를 기록만 하고 앞으로 보내지 않는
+ * 대체 함수로 바꿔 끼운다 — 로그인 항목(HKCU Run)은 격리 프로필 밖이라, setLoginItem 의 가드에 버그가 있으면 기록만으로는 이 PC 에
+ * 남는 것을 막지 못한다. 트레이 메뉴는 '붙은' 메뉴가 아니라 최신 메뉴를 넘긴다(D4 — Windows 는 메뉴를 트레이에 붙이지 않는다).
  * @typedef {object} MainHooks
  * @property {((entry: MainRecord) => void) | null} record 기록기 — 탐색 · 권한 결정, 창 보이기 · 숨기기, 렌더러로 민 채널, 로그인 항목 요청
  * @property {((href: string) => unknown) | null} open 허용 목록 주소를 여는 함수 — 없으면 시스템 브라우저
@@ -90,7 +107,8 @@ const { trayWindowPreferences } = require('./lib/windowPrefs.cjs');
  * @property {((ipc: import('./lib/ipcGuard.cjs').GuardedIpc) => void) | null} registerIpc tj-app-info 다음에 IPC 를 더 등록한다
  * @property {((details: import('electron').OnBeforeRequestListenerDetails, callback: (response: import('electron').CallbackResponse) => void) => void) | null} networkGuard
  *   기본 세션의 webRequest.onBeforeRequest 처리기(원격 요청 기록 · 취소)
- * @property {((tray: import('electron').Tray, menu: import('electron').Menu) => void) | null} setTray 트레이에 메뉴를 붙일 때마다 부른다
+ * @property {((tray: import('electron').Tray, menu: import('electron').Menu, icon: import('electron').NativeImage) => void) | null} setTray
+ *   트레이 메뉴를 만들 때마다(시작 때 한 번 포함) 부른다 — 그 메뉴와 new Tray 에 넘긴 아이콘 그 객체(Windows 의 메뉴는 붙지 않은 메뉴다)
  */
 
 /** 개발 실행의 userData 폴더(%APPDATA% 아래) — 설치한 앱(%APPDATA%/TwelveJanggi)과 저장소 · 단일 인스턴스 잠금을 나눈다. */
@@ -185,6 +203,20 @@ let mode = 'solo';
 let layout = 'solo';
 /** 로그인으로 시작했다 — 첫 ready-to-show 에서 창을 숨긴 채 둔다(렌더러는 getState().visible 로 안다). onReady 가 정한다. */
 let loginLaunch = false;
+/** 첫 ready-to-show 의 판단(보일지 숨긴 채 둘지)을 했다 — 그 전의 macOS activate 는 pendingActivate 로 미룬다. */
+let startupDecided = false;
+/** 첫 판단 전에 macOS activate 가 왔다 — ready-to-show 에서 로그인 실행이어도 보인다. */
+let pendingActivate = false;
+/**
+ * 트레이 아이콘 — new Tray 에 넘긴 그 객체. 스모크에 메뉴와 함께 넘긴다(hooks.setTray).
+ * @type {import('electron').NativeImage | null}
+ */
+let trayIcon = null;
+/**
+ * 최신 트레이 메뉴 — refreshTrayMenu 가 만들 때마다 바꾼다. Windows 는 트레이에 붙이지 않고 우클릭 때 이것을 띄운다.
+ * @type {import('electron').Menu | null}
+ */
+let trayMenu = null;
 
 // ── 최상위(ready 전, 동기) — 순서가 의미를 가진다 ──
 // 1. 스모크 인자 — userData · 진입 URL 을 정하므로 맨 먼저 읽는다. 틀렸으면(error 는 스모크를 요청했을 때만 있다) 아무것도 하지
@@ -230,7 +262,7 @@ if (smoke.error !== null) {
         app.quit();
       }
     } else {
-      app.on('second-instance', () => showWindow('second-instance')); // 보이기 · 포커스만 — 화면 상태는 바꾸지 않는다
+      app.on('second-instance', (_event, argv) => onSecondInstance(argv)); // 보이기 · 포커스만 — 화면 상태는 바꾸지 않는다
       app.on('window-all-closed', () => {}); // 트레이 앱 — 창이 없어도 끝나지 않는다
       // 종료 — 이 뒤로는 창을 만지지 않는다(liveWindow 가 null). 미룬 blur 확인을 지우고, 쓰지 않은 설정을 곧바로 쓴다(예약 · 재시도는 지운다).
       app.on('before-quit', () => {
@@ -244,9 +276,10 @@ if (smoke.error !== null) {
 }
 
 /**
- * ready 뒤 — 렌더러 루트 검증 · 색인 → 설정 읽기 · 로그인 실행 판별 → (macOS) Dock 숨기기 → app:// 처리기 → 세션(권한 · 장치 ·
- * 다운로드) → 클라이언트 인증서 → 탐색 가드 → IPC → 창 → 트레이 → 디스플레이 사건. 모두 동기다: 처리기는 창보다 먼저, 사이에
- * await 없이 서서 첫 요청 · 첫 탐색 · 첫 IPC 를 받는다. 던지면 whenReady 의 catch(failReady)가 받는다.
+ * ready 뒤 — 렌더러 루트 검증 · 색인 → (스모크) 실행기 → 설정 읽기(첫 실행이면 자동 실행 기본값) · 로그인 실행 판별 → (macOS) Dock
+ * 숨기기 → app:// 처리기 → 세션(권한 · 장치 · 다운로드) → 클라이언트 인증서 → 탐색 가드 → IPC → 창 → 트레이(시작 메뉴) → 디스플레이
+ * 사건 → (macOS) activate. 모두 동기다: 처리기는 창보다 먼저, 사이에 await 없이 서서 첫 요청 · 첫 탐색 · 첫 IPC 를 받는다. 던지면
+ * whenReady 의 catch(failReady)가 받는다.
  * @param {SmokeMode} smoke
  */
 function onReady(smoke) {
@@ -262,11 +295,13 @@ function onReady(smoke) {
   }
 
   const { index, cspHeader } = renderer;
-  if (smoke.enabled) plugSmokeRun(smoke, root, renderer); // 아래 처리기 · 창 · 트레이가 hooks 를 읽기 전에
+  // 아래 설정 읽기 · 처리기 · 창 · 트레이가 hooks 를 읽기 전에 — D1 의 대체 함수도 여기서 선다(첫 실행의 자동 실행 기본값보다 먼저)
+  if (smoke.enabled) plugSmokeRun(smoke, root, renderer);
   loadSettings(); // 창 옵션(배경 · 투명도)이 읽는다 — 창보다 먼저
   // 로그인으로 시작했는가(첫 ready-to-show 의 판단) — Windows 는 명령줄의 --hidden 이다(명령줄은 최상위에서만 읽는다 — hiddenArg,
-  // 스모크는 늘 거짓). macOS 의 wasOpenedAtLogin 은 아직 묻지 않는다(늘 아니다), linux 는 늘 아니다.
-  loginLaunch = launchedAtLogin({ platform: process.platform, argv: hiddenArg ? [HIDDEN_ARG] : [], loginItem: {} });
+  // 스모크는 늘 거짓). macOS 는 wasOpenedAtLogin 이다(macOS 미확인 — 스모크는 묻지 않는다: 늘 로그인 실행이 아니다), linux 는 늘 아니다.
+  const loginItem = process.platform === 'darwin' && !smoke.enabled ? app.getLoginItemSettings() : {};
+  loginLaunch = launchedAtLogin({ platform: process.platform, argv: hiddenArg ? [HIDDEN_ARG] : [], loginItem });
   // macOS — 메뉴 막대 앱이라 Dock 아이콘을 두지 않는다. 창을 만들기 전에 숨긴다: 만든 뒤에 숨기면 Dock 이 깜빡인다.
   if (process.platform === 'darwin') app.dock?.hide();
   protocol.handle(APP_SCHEME, (request) => serveApp(request, index, cspHeader));
@@ -279,12 +314,16 @@ function onReady(smoke) {
   // 보이는 중에 모니터를 떼거나 배율 · 작업영역이 바뀌면 다시 배치한다 — 창이 보이는 디스플레이의 작업영역 안에 남게.
   screen.on('display-removed', () => placeIfShown());
   screen.on('display-metrics-changed', () => placeIfShown());
+  // macOS — Finder · Spotlight 로 다시 실행하면 두 번째 프로세스가 아니라 activate 가 온다(Electron 문서). macOS 미확인
+  if (process.platform === 'darwin') app.on('activate', () => onActivate());
 }
 
 /**
  * 설정을 동기로 읽는다(<userData>/settings.json). 없으면 기본값(첫 실행), 못 읽으면 '[tj] settings: …' 한 줄을 남기고 기본값이다
  * — 못 읽은 파일은 첫 실행이 아니다(settings.cjs 가 autostartDefaultApplied 를 참으로 준다 — 자동 실행 기본값이 되살아나지 않는다).
- * 첫 실행이면 자동 실행 기본값을 적용했다고 표시하고 곧바로 쓴다 — 로그인 항목은 아직 건드리지 않는다.
+ * 첫 실행이면 자동 실행 기본값을 적용한다 — Windows 는 켠다(setLoginItem — 로그인 항목을 관리하지 않는 실행이면 기록만 남고 OS 는
+ * 부르지 않는다), macOS · 그 밖은 부르지 않고 끈 채 둔다. 그 뒤 적용했다고 표시하고 곧바로 쓴다(개발 · 스모크 프로필에도 — 그 프로필은
+ * 로그인 항목을 관리하지 않으므로 해가 없다).
  */
 function loadSettings() {
   const file = path.join(app.getPath('userData'), SETTINGS_FILE);
@@ -293,6 +332,8 @@ function loadSettings() {
   settings = loaded.settings;
   if (loaded.status === 'unreadable') logError(`settings: 읽지 못해 기본값으로 시작한다 (${file})`);
   if (!settings.autostartDefaultApplied) {
+    if (firstRunAutostart(process.platform)) setLoginItem(true);
+    else settings.autostart = false;
     settings.autostartDefaultApplied = true;
     settingsDirty = true;
     saveSettingsNow();
@@ -459,9 +500,9 @@ function guardSession() {
 }
 
 /**
- * 기록 한 건을 hooks.record 에 넘긴다(스모크만 단다) — 권한 결정, 창 보이기 · 숨기기, 렌더러로 민 채널. 일을 먼저 하고 그 뒤에
- * 부른다. 기록기가 던지면 다음 tick 에 다시 던진다 — 이미 한 일은 그대로이고 오류는 묻히지 않는다(navigation.cjs 의 탐색 결정과
- * 같은 규칙).
+ * 기록 한 건을 hooks.record 에 넘긴다(스모크만 단다) — 권한 결정, 창 보이기 · 숨기기, 렌더러로 민 채널, 로그인 항목 요청. 일을 먼저
+ * 하고 그 뒤에 부른다. 기록기가 던지면 다음 tick 에 다시 던진다 — 이미 한 일은 그대로이고 오류는 묻히지 않는다(navigation.cjs 의 탐색
+ * 결정과 같은 규칙).
  * @param {MainRecord} entry
  */
 function recordEntry(entry) {
@@ -478,15 +519,11 @@ function recordEntry(entry) {
 
 /**
  * 모든 webContents(트레이 창 · DevTools 등)에 탐색 가드를 건다 — app://twelvejanggi 밖으로 가는 탐색 · 새 창 · webview 를 막고,
- * 허용 목록 주소만 시스템 브라우저로 연다(navigation.cjs). 여는 함수의 실패는 받아서 '[tj] openExternal: …' 한 줄로 남긴다 —
- * 받지 않으면 unhandledRejection 이고, 버리면 링크가 왜 열리지 않았는지 흔적이 없다.
+ * 허용 목록 주소만 시스템 브라우저로 연다(navigation.cjs — 여는 함수는 트레이 메뉴와 같은 openExternal 이다).
  * @param {import('electron').WebContents} contents
  */
 function guardWebContents(contents) {
-  const guards = createNavigationGuards({
-    open: hooks.open ?? ((href) => shell.openExternal(href).catch((err) => logError(`openExternal: ${errorText(err)}`))),
-    record: hooks.record ?? undefined,
-  });
+  const guards = createNavigationGuards({ open: openExternal, record: hooks.record ?? undefined });
   contents.on('will-frame-navigate', guards.willFrameNavigate);
   contents.on('will-navigate', guards.willNavigate);
   contents.on('will-redirect', guards.willRedirect);
@@ -511,8 +548,8 @@ function registerIpc() {
 }
 
 /**
- * 트레이 창 — 프레임 없는 팝업이다. 숨긴 채 만들고 ready-to-show 에 보인다(로그인으로 시작했으면 숨긴 채 둔다). 닫기는 숨김이다
- * (종료 중이 아닐 때).
+ * 트레이 창 — 프레임 없는 팝업이다. 숨긴 채 만들고 ready-to-show 에 보인다(로그인으로 시작했으면 숨긴 채 둔다 — 그 전에 macOS 의
+ * 다시 실행(activate)이 왔으면 보인다). 닫기는 숨김이다(종료 중이 아닐 때).
  * - 크기는 레이아웃 'solo' 의 콘텐츠 크기, 크기 조절 · 최대화 · 최소화 · 전체 화면 불가(작업표시줄 단추가 없어 최소화하면 되찾을 길이
  *   트레이뿐이다), 작업표시줄에 없고 늘 위다. 투명은 쓰지 않는다 — 투명도는 opacity 로만 한다.
  * - 첫 페인트 전 배경과 투명도는 설정(테마 · opacity)에서 온다. webPreferences 는 공장 하나에서만 온다(스모크와 바이트까지 같다).
@@ -542,8 +579,10 @@ function createWindow(smoke) {
   });
   if (process.platform === 'darwin') win.setAlwaysOnTop(true, 'screen-saver');
   trayWindow = win;
+  // 첫 판단 — 로그인 실행이면 숨긴 채 둔다. 그 전에 온 macOS activate(다시 실행)는 로그인 실행이어도 보인다.
   win.once('ready-to-show', () => {
-    if (!loginLaunch) showWindow('start');
+    startupDecided = true;
+    if (!loginLaunch || pendingActivate) showWindow('start');
   });
   win.on('show', () => {
     shownIntent = true;
@@ -571,31 +610,191 @@ function createWindow(smoke) {
   win.loadURL(ENTRY_URL + (smoke.enabled ? '?smoke' : '')).catch((err) => logError(`loadURL: ${errorText(err)}`));
 }
 
-/** 트레이 — 아이콘(16×16) · 툴팁 · 메뉴('열기' · '종료'). Windows 에서는 좌클릭도 열기다. */
+/**
+ * 트레이 — 아이콘(16×16) · 툴팁 · 시작 메뉴(refreshTrayMenu). Windows 는 좌클릭이 팝업 토글이고 우클릭마다 메뉴를 새로 만들어 띄운다
+ * (D4 — 메뉴를 붙이면 우클릭을 OS 가 받아 right-click 이 오지 않는다). macOS · 그 밖은 메뉴를 붙이고 click 처리기를 달지 않는다(메뉴가
+ * 있어도 click 이 함께 와서 토글이 겹친다 — Electron 소스).
+ */
 function createTray() {
   const iconPath = path.join(__dirname, 'assets', 'tray.png');
   const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
   if (icon.isEmpty()) logError(`tray icon: 빈 이미지다 — 아이콘을 읽지 못했다 (${iconPath})`);
+  trayIcon = icon;
   tray = new Tray(icon);
   tray.setToolTip('십이장기');
-  attachTrayMenu(tray, [
-    { label: '열기', click: () => showWindow('menu') },
-    // isQuitting 은 before-quit 이 켠다 — 여기서 미리 켜지 않는다(스모크가 그 종료 경로를 그대로 탄다).
-    { label: '종료', click: () => app.quit() },
-  ]);
-  if (process.platform === 'win32') tray.on('click', () => showWindow('tray'));
+  if (process.platform === 'win32') {
+    tray.on('click', () => onTrayClick());
+    tray.on('right-click', () => onTrayRightClick());
+  }
+  refreshTrayMenu();
 }
 
 /**
- * 트레이에 메뉴를 붙이고, 붙인 메뉴를 hooks.setTray 로 알린다. 트레이 메뉴는 이 도우미로만 붙인다 — 스모크는 여기서 받은
- * '실제로 붙은' 메뉴의 항목을 누른다.
- * @param {import('electron').Tray} target
- * @param {import('electron').MenuItemConstructorOptions[]} template
+ * 트레이 메뉴를 만든다 — 메뉴는 이 함수에서만 만든다. 지금 상태(설정 · 로그인 항목)로 템플릿을 만들어(trayMenu.cjs) Menu 로 바꾸고 최신
+ * 메뉴로 둔다. Windows 는 붙이지 않고(우클릭 때 띄운다 — D4) 자동 실행 체크를 그 순간의 OS 상태로 그린다(등록할 때와 같은 인자로 묻는다).
+ * macOS · 그 밖은 트레이에 붙이고, macOS 는 메뉴가 열리고 닫힐 때 팝업을 맞춘다(D6). 만든 메뉴는 hooks.setTray 로 알린다(스모크가 최신
+ * 메뉴와 아이콘을 본다). 종료 중에는 만들지 않는다.
  */
-function attachTrayMenu(target, template) {
-  const menu = Menu.buildFromTemplate(template);
-  target.setContextMenu(menu);
-  hooks.setTray?.(target, menu);
+function refreshTrayMenu() {
+  if (tray === null || trayIcon === null || isQuitting) return;
+  const platform = process.platform;
+  const loginItem = platform === 'win32' ? app.getLoginItemSettings(loginItemQuery(platform)) : {};
+  const template = buildTrayMenuTemplate(
+    {
+      platform,
+      version: app.getVersion(),
+      autostart: { checked: autostartChecked({ platform, loginItem, settings }), enabled: managesLoginItems() },
+      light: settings.theme === 'light',
+      pinned: settings.pinned,
+      hasCustomPosition: settings.position !== null,
+    },
+    {
+      open: () => menuThenRefresh(() => showWindow('menu')),
+      solo: () => menuThenRefresh(() => setMode('solo')),
+      online: () => menuThenRefresh(() => setMode('online')),
+      setAutostart: (on) => menuThenRefresh(() => setAutostart(on)),
+      setLight: (on) => applyTheme(on ? 'light' : 'dark'), // applyTheme · setPinned · resetPosition 은 끝에서 스스로 다시 만든다
+      setPinned: (on) => setPinned(on),
+      resetPosition: () => resetPosition(),
+      openWeb: () => menuThenRefresh(() => openExternal(WEB_URL)),
+      sendFeedback: () => menuThenRefresh(() => openExternal(FEEDBACK_URL)),
+      // '종료' 는 app.quit() 만 — 메뉴를 다시 만들지 않고, isQuitting 은 before-quit 이 켠다(스모크가 그 종료 경로를 그대로 탄다).
+      quit: () => app.quit(),
+    },
+  );
+  const menu = Menu.buildFromTemplate(/** @type {import('electron').MenuItemConstructorOptions[]} */ (/** @type {unknown} */ (template)));
+  if (platform === 'darwin') {
+    menu.on('menu-will-show', () => onMenuWillShow());
+    menu.on('menu-will-close', () => onMenuWillClose());
+  }
+  trayMenu = menu;
+  if (platform !== 'win32') tray.setContextMenu(menu);
+  hooks.setTray?.(tray, menu, trayIcon);
+}
+
+/**
+ * 메뉴 항목 하나의 동작 뒤에 메뉴를 다시 만든다 — 메뉴를 누를 때마다(바뀐 것이 없어도) 정확히 한 번이다(설계 §5.1). 스스로 다시 만드는
+ * applyTheme · setPinned · resetPosition 은 이것을 거치지 않는다.
+ * @param {() => void} action
+ */
+function menuThenRefresh(action) {
+  action();
+  refreshTrayMenu();
+}
+
+/**
+ * Windows 좌클릭 — 보이면 숨기고(토글), 바깥 클릭(blur)으로 숨긴 지 CLICK_RACE_MS 안이면 무시하고(그 클릭이 낳은 blur 가 먼저 숨겼다),
+ * 그 밖은 보인다(windowPolicy 의 trayClickAction). 경합 가드는 좌클릭에만 건다 — 메뉴 · 두 번째 실행은 늘 보인다.
+ */
+function onTrayClick() {
+  const win = liveWindow();
+  if (win === null) return;
+  const action = trayClickAction({ now: performance.now(), visible: shownIntent && win.isVisible(), lastBlurHideAt });
+  if (action === 'hide') hideWindow('toggle');
+  else if (action === 'show') showWindow('tray');
+}
+
+/**
+ * Windows 우클릭 — 메뉴를 그 순간의 상태(자동 실행은 OS 상태)로 새로 만들어 띄운다. 고정 안 한 팝업은 그 전에 blur 로 숨는다(작업표시줄이
+ * 활성화를 가져가고 PopUpContextMenu 가 SetForegroundWindow 를 부른다) — 고정한 팝업은 보인 채다. 종료 중에는 띄우지 않는다.
+ */
+function onTrayRightClick() {
+  if (tray === null || isQuitting) return;
+  refreshTrayMenu();
+  if (trayMenu !== null) tray.popUpContextMenu(trayMenu);
+}
+
+/**
+ * macOS 의 메뉴가 열린다(D6 — macOS 미확인) — 'screen-saver' 단계의 팝업은 메뉴 막대 메뉴보다 위라 메뉴를 덮는다. 고정 안 한 팝업은
+ * 숨기고(이유 'menu' — 바깥 클릭이 아니다), 고정한 팝업은 메뉴가 열린 동안 'floating' 으로 내린다.
+ */
+function onMenuWillShow() {
+  const win = liveWindow();
+  if (win === null) return;
+  if (settings.pinned) win.setAlwaysOnTop(true, 'floating');
+  else hideWindow('menu');
+}
+
+/** macOS 의 메뉴가 닫혔다(D6) — 팝업을 'screen-saver' 단계로 되돌린다. */
+function onMenuWillClose() {
+  const win = liveWindow();
+  if (win === null) return;
+  win.setAlwaysOnTop(true, 'screen-saver');
+}
+
+/**
+ * 두 번째 실행 — 명령줄에 --hidden 이 있으면(로그인 항목이 이미 떠 있는 앱을 한 번 더 띄웠다) 아무것도 하지 않고, 아니면 창을 보인다.
+ * 화면 모드는 바꾸지 않는다. 첫 ready-to-show 전에 와도 곧바로 보인다(로그인으로 시작한 창도).
+ * @param {string[]} argv 두 번째 프로세스의 명령줄
+ */
+function onSecondInstance(argv) {
+  if (hasHiddenArg(argv)) return;
+  showWindow('second-instance');
+}
+
+/**
+ * macOS activate(Finder · Spotlight 로 다시 실행) — 창을 보이기만 한다(모드는 그대로). 첫 판단(ready-to-show) 전이면 기억했다가 그때
+ * 보인다 — 그리기 전의 창은 보이지 않는다. macOS 미확인
+ */
+function onActivate() {
+  if (!startupDecided) {
+    pendingActivate = true;
+    return;
+  }
+  showWindow('activate');
+}
+
+// ── 바깥 · OS 에 닿는 것 — 외부 주소 · 로그인 항목 ──
+
+/**
+ * 허용 목록 주소를 시스템 브라우저로 연다 — 탐색 가드와 트레이 메뉴('웹에서 열기' · '의견 보내기')가 이 함수 하나를 쓴다. externalHref 로
+ * 거른 값만 연다(밖이면 아무것도 하지 않는다). 스모크는 hooks.open(열지 않고 기록)이고, 아니면 shell.openExternal — 그 실패는 받아서
+ * '[tj] openExternal: …' 한 줄로 남긴다: 받지 않으면 unhandledRejection 이고, 버리면 왜 열리지 않았는지 흔적이 없다.
+ * @param {string} href
+ */
+function openExternal(href) {
+  const safe = externalHref(href);
+  if (safe === null) return;
+  if (hooks.open !== null) {
+    hooks.open(safe);
+    return;
+  }
+  shell.openExternal(safe).catch((err) => logError(`openExternal: ${errorText(err)}`));
+}
+
+/**
+ * 이 실행이 로그인 항목을 관리하는가 — 설치본(패키지 · 스모크 아님 · win32 · darwin · 개발 바이너리 아님)만이다(autostart.cjs).
+ * 개발 실행 · 스모크는 이 PC 의 로그인 항목을 바꾸지 않는다. 메뉴의 '자동 실행' 도 관리할 때만 켜진 항목이다.
+ * @returns {boolean}
+ */
+function managesLoginItems() {
+  return canManageLoginItems({ isPackaged: app.isPackaged, smoke: smoke.enabled, platform: process.platform, execPath: process.execPath });
+}
+
+/**
+ * 로그인 항목(자동 실행)을 켜거나 끈다 — app.setLoginItemSettings 는 이 함수에서만 부른다(mainSource 시험). 관리하지 않는 실행이면
+ * 부르지 않는다. 그 뒤 { kind: 'login-item', on, managed } 를 기록한다(스모크의 양성 대조 — 비스모크는 기록기가 없다).
+ * @param {boolean} on
+ */
+function setLoginItem(on) {
+  const managed = managesLoginItems();
+  if (managed) {
+    const options = loginItemSettings(process.platform, on);
+    if (options !== null) app.setLoginItemSettings(options);
+  }
+  recordEntry({ kind: 'login-item', on, managed });
+}
+
+/**
+ * 메뉴의 '자동 실행' — on 은 사용자가 본 상자를 누른 결과(원하는 값)다. 로그인 항목을 그 값으로 하고, macOS 는 체크 상태를 설정에 적는다
+ * (macOS 미확인 — 시스템 설정에서 지운 것은 모른다). Windows 는 OS 가 원본이라 적지 않는다 — 다시 만드는 메뉴가 OS 상태를 다시 읽는다.
+ * @param {boolean} on
+ */
+function setAutostart(on) {
+  setLoginItem(on);
+  if (process.platform !== 'darwin') return;
+  settings.autostart = on;
+  saveSettingsSoon();
 }
 
 // ── 트레이 창 — 창은 liveWindow() 로만 만진다 ──
@@ -721,15 +920,18 @@ function placeIfShown() {
 /**
  * moved — 마지막 배치 뒤 will-move 를 받았고(사용자가 끈 이동) 기준에서 허용 오차보다 벗어났으면, 그 위치를 저장 위치로 삼고
  * 기준을 그 자리로 옮긴 뒤 저장을 예약한다. macOS 의 moved 는 move 의 별칭이라 끄는 동안 계속 온다 — 저장 예약이 쓰기를 묶는다.
+ * 메뉴는 '위치 초기화' 의 켜짐이 바뀔 때(저장 위치가 처음 생길 때)만 다시 만든다 — 끄는 동안 메뉴를 거듭 만들지 않게.
  */
 function onMoved() {
   const win = liveWindow();
   if (win === null) return;
   const current = win.getBounds();
   if (!shouldSaveMove({ placing, manualMoveSeen, current, baseline: moveBaseline })) return;
+  const hadCustomPosition = settings.position !== null;
   settings.position = { x: current.x, y: current.y };
   moveBaseline = current;
   saveSettingsSoon();
+  if (!hadCustomPosition) refreshTrayMenu();
 }
 
 /**
@@ -751,7 +953,8 @@ function sendToTray(channel, value) {
 // ── 설정 바꾸기 — 메뉴와 팝업이 같은 함수를 부른다. 받지 않는 값은 무시한다(정규화는 여기 한 곳) ──
 
 /**
- * 테마 — 설정 · 저장 예약 → 창 배경(첫 페인트 전 색과 같은 표) → 렌더러에 tj-theme.
+ * 테마 — 설정 · 저장 예약 → 창 배경(첫 페인트 전 색과 같은 표) → 렌더러에 tj-theme → 메뉴 다시 만들기('라이트 모드' 체크). 같은 값이어도
+ * 한다(낡은 메뉴의 클릭도 메뉴를 새로 만든다).
  * @param {unknown} theme
  */
 function applyTheme(theme) {
@@ -763,6 +966,7 @@ function applyTheme(theme) {
   saveSettingsSoon();
   win.setBackgroundColor(THEME_BACKGROUND[value]);
   sendToTray('tj-theme', value);
+  refreshTrayMenu();
 }
 
 /**
@@ -807,21 +1011,27 @@ function setMode(next) {
 }
 
 /**
- * 창 고정(바깥을 눌러도 숨지 않는다) — 설정 · 저장 예약.
+ * 창 고정(바깥을 눌러도 숨지 않는다) — 설정 · 저장 예약 → 메뉴 다시 만들기('창 고정' 체크). 유예 안에서 삼킨 blur 의 미룬 확인은 그때의
+ * 고정을 읽는다.
  * @param {boolean} on
  */
 function setPinned(on) {
   if (liveWindow() === null) return;
   settings.pinned = on;
   saveSettingsSoon();
+  refreshTrayMenu();
 }
 
-/** 위치 초기화 — 저장 위치를 지우고 저장을 예약한다. 보이는 중이면 곧바로 아이콘 쪽에 다시 놓는다(다음 표시는 늘 다시 배치한다). */
+/**
+ * 위치 초기화 — 저장 위치를 지우고 저장을 예약한다. 보이는 중이면 곧바로 아이콘 쪽에 다시 놓는다(다음 표시는 늘 다시 배치한다). 그 뒤
+ * 메뉴를 다시 만든다('위치 초기화' 꺼짐).
+ */
 function resetPosition() {
   if (liveWindow() === null) return;
   settings.position = null;
   saveSettingsSoon();
   placeIfShown();
+  refreshTrayMenu();
 }
 
 /**
