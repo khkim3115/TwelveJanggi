@@ -1,24 +1,33 @@
 'use strict';
-// 창 검사(#21 설계 §5.5 '새 필수 검사') — 실행기(run.cjs)가 screenshot 바로 뒤에 theme → opacity 차례로 부른다(escHide · visibility 는 그
-// 뒤에 Task 13 이 더한다). 페이지의 브리지 send 와 main 의 길(트레이 메뉴 클릭)로 창 상태를 바꾸고, 메모리(getState 스냅샷) · 페이지 · 창 ·
-// 설정 파일 · 실행기의 기록(main 이 넘긴 메뉴 · 민 채널 · 수신 기록)으로 판정한다.
+// 창 검사(#21 설계 §5.5 '새 필수 검사') — 실행기(run.cjs)가 screenshot 바로 뒤에 theme → opacity → escHide → visibility 차례로 부른다.
+// 페이지의 브리지 send · 키 이벤트 · 단추 클릭과 main 의 길(트레이 클릭 · 메뉴 클릭 · win.close())로 창 상태를 바꾸고, 메모리(getState
+// 스냅샷) · 페이지 · 창 · 설정 파일 · 실행기의 기록(main 이 넘긴 메뉴 · 창 보이기 · 숨기기와 이유 · 민 채널 · 수신 기록 · 트레이 클릭)으로
+// 판정한다.
 // - 순서 장벽은 페이지의 `await tjDesktop.getState()` 다 — 같은 프레임의 IPC 라 앞의 send 와 main 이 민 push 가 응답보다 먼저 처리된다
 //   (설계 §5.3 의 추론 — theme ① 이 실제 앱에서 처음 증명한다). 저장 예약(300ms)을 기다리지 않는 판정은 메모리 값(스냅샷)으로 한다.
+//   '바뀌지 않음'(escHide ① ② 의 숨지 않음)은 이 장벽을 양성 기록으로 삼는다.
 // - 색 · 투명도의 기대값은 여기 적은 글자다(설계 §5.1 · §5.5 — lib 값으로 계산하지 않는다: 같은 값을 두 곳이 계산하면 틀려도 같다).
-// - 기다림(settings.json)의 시간 초과는 그 검사의 판정(ok false · detail)이다 — 던지지 않는다(R12). 창 · webContents 가 파괴됐으면 만지지
-//   않고 판정으로 적은 뒤 그 검사를 멈춘다(R29 — 파괴된 창을 만지면 던져서 실행 전체가 stage 실패가 된다).
-// - 각 검사는 끝에 — 실패 길에서도(finally) — 창을 main 의 길로 보인 채 돌려놓는다(R13 — 실행기의 endShown). 돌려놓지 못하면(누를 것이
-//   없다 · 기다림의 시간 초과) 그 검사의 실패다(R12 — 뒤 검사는 보이는 창을 전제로 한다, 설계 §5.5). 판정은 '지금 보이는가' 만 본다 — 앞
-//   검사가 남긴 창 기록('마지막 기록이 show')은 보지 않는다(그 규칙은 tray 에만 있다). theme · opacity 에는 '우연한 숨김' 규칙(검사 도중의
-//   숨김)을 두지 않는다(보임과 상관없는 검사라 흔들림만 늘린다). 스모크에서 창을 고정하지 않는다(고정은 저장되고 tray 가 체크 false 를
-//   요구한다).
+// - 기다림(settings.json · 창 기록 · 페이지의 tapp-hidden)의 시간 초과는 그 검사의 판정(ok false · detail)이다 — 던지지 않는다(R12). 창 ·
+//   webContents 가 파괴됐으면 만지지 않고 판정으로 적은 뒤 그 검사를 멈춘다(R29 — 파괴된 창을 만지면 던져서 실행 전체가 stage 실패가 된다).
+//   기다림의 predicate 도 파괴를 먼저 본다.
+// - 각 검사는 끝에 — 실패 길에서도(finally) — 창을 main 의 길로 보인 채 돌려놓는다(R13 — 실행기의 endShown: 마지막 숨김 기록에서 경합 시간 +
+//   여유가 지난 뒤 연다). 돌려놓지 못하면(누를 것이 없다 · 기다림의 시간 초과) 그 검사의 실패다(R12 — 뒤 검사는 보이는 창을 전제로 한다, 설계
+//   §5.5). 판정은 '지금 보이는가' 만 본다 — 앞 검사가 남긴 창 기록('마지막 기록이 show')은 보지 않는다(그 규칙은 tray 에만 있다). visibility
+//   는 끈 스로틀도 끝에 다시 켠다. 스모크에서 창을 고정하지 않는다(고정은 저장되고 tray 가 체크 false 를 요구한다).
+// - '우연한 숨김' 규칙은 escHide · visibility 에만 둔다(R14): 시작 때 창이 보이는지 보고(visibility 는 보인 기록이 이미 있는지도), 검사
+//   도중 이 검사가 일으키지 않은 숨김 기록이 오면 그 이유를 상세에 적고 실패한다. theme · opacity 에는 두지 않는다(보임과 상관없는 검사라
+//   흔들림만 늘린다).
+// - 경합 창(CLICK_RACE_MS)을 재는 곳은 tray 의 열기와 escHide ④ 뿐이다. visibility 의 다시 보이기는 그 숨김 기록에서 경합 시간 + 여유가 지난
+//   뒤 한다(R13 — main 의 경합 가드 결함이 이 검사로 번지지 않게).
+// - 숨긴 동안 capturePage 를 하지 않는다(캡처하면 페이지가 visible 로 바뀐다 — 설계 §5.5).
 // - 실행기의 사실 · 도우미(createSmokeRun 의 클로저)는 ctx 로 받는다 — 능동 검사의 ActiveContext 와 같은 모양이고 베끼지 않는다. 공용
-//   도우미(support.cjs)와 페이지 코드(pageScripts.cjs)는 active.cjs 처럼 직접 가져온다. run.cjs 는 require 하지 않는다(순환). electron 도
-//   require 하지 않는다.
+//   도우미(support.cjs — until · untilAsync · waitElapsed …)와 페이지 코드(pageScripts.cjs)는 active.cjs 처럼 직접 가져온다. run.cjs 는
+//   require 하지 않는다(순환). electron 도 require 하지 않는다.
 
 const { isRecord } = require('../lib/guards.cjs');
-const { opacityScript, themeScript } = require('./pageScripts.cjs');
-const { WAIT_MS, show, until, verdictOf } = require('./support.cjs');
+const { CLICK_RACE_MS } = require('../lib/windowPolicy.cjs');
+const { HIDDEN_STATE_SCRIPT, HIDE_BUTTON_SCRIPT, escScript, opacityScript, themeScript } = require('./pageScripts.cjs');
+const { PAGE_MS, WAIT_MS, errorText, show, until, untilAsync, verdictOf, waitElapsed } = require('./support.cjs');
 
 /**
  * 테마별 창 배경색 — 설계 §5.1 의 THEME_BACKGROUND 를 글자 그대로 적는다(lib/theme.cjs 에서 가져오지 않는다). body 배경 · --bg ·
@@ -29,6 +38,9 @@ const THEME_COLORS = Object.freeze({ dark: '#0d1117', light: '#f5f6f8' });
 const LIGHT_LABEL = '라이트 모드';
 /** main 이 테마를 렌더러에 미는 채널(설계 §5.3). */
 const THEME_CHANNEL = 'tj-theme';
+/** main 이 창을 숨기고 · 보인 뒤 렌더러에 미는 채널(설계 §5.3). */
+const HIDDEN_CHANNEL = 'tj-hidden';
+const SHOWN_CHANNEL = 'tj-shown';
 /**
  * 투명도 표 — 설계 §5.5 표를 이 차례로 글자 그대로 적는다(lib 값으로 계산하지 않는다). send 는 페이지가 보내는 값(고치지 않는다), expect 는
  * main 이 남길 값(스냅샷 · 창), saves 는 저장값이 바뀌는 줄이다 — 그 줄만 settings.json 이 expect 가 될 때까지 기다린다(새 프로필의 100 에서
@@ -48,24 +60,37 @@ const OPACITY_TABLE = Object.freeze([
 
 /** @typedef {import('../lib/smokeChecks.cjs').CheckVerdict} CheckVerdict */
 /** @typedef {import('./support.cjs').WindowFact} WindowFact */
+/** @typedef {import('./run.cjs').FactMark} FactMark */
 /** @typedef {'dark' | 'light'} Theme */
 /**
  * 투명도 표 한 줄.
  * @typedef {{ send: unknown, expect: number, saves: boolean }} OpacityRow
  */
 /**
+ * 페이지가 본 <html> 의 tapp-hidden 과 document.visibilityState(HIDDEN_STATE_SCRIPT).
+ * @typedef {{ hiddenClass: boolean, visibilityState: unknown }} HiddenState
+ */
+/**
+ * 기다리지 않고 시작한 페이지 호출이 끝난 모양 — 값 또는 거부.
+ * @typedef {{ kind: 'resolved', value: unknown } | { kind: 'rejected', error: unknown }} PageOutcome
+ */
+/**
+ * main 의 길로 연 한 번(pressOpen) — 누르기 앞의 자리, 누르는 법(how) · 누를 것이 없을 때의 글(missing), 누를 것이 있었는가.
+ * @typedef {{ from: FactMark, how: string, missing: string, pressed: boolean }} OpenPress
+ */
+/**
  * 창 검사가 실행기에서 받는 것 — 실행기(createSmokeRun)가 가진 사실과 도우미(클로저)를 그대로 넘긴다(능동 검사의 ActiveContext 와 같은
- * 모양). theme · opacity 가 쓰는 것과 escHide · visibility(Task 13)가 쓸 것(hideViaMain · clickTray · windowTrail · timingMarginMs)을 함께 둔다.
+ * 모양).
  * @typedef {object} WindowContext
  * @property {import('./support.cjs').SmokeFacts} facts 수집한 사실 — window · sent · hideReceipts · opacityReceipts …
  * @property {string} platform main 이 넘긴 platform(process.platform 을 새로 읽지 않는다)
  * @property {() => import('electron').BrowserWindow} win 트레이 창
  * @property {readonly import('electron').Menu[]} menus main 이 setTray 로 넘긴 트레이 메뉴(넘긴 차례 — 맨 뒤가 최신이다. 실행기가 뒤에 쌓는다)
+ * @property {readonly import('./run.cjs').TrayClick[]} trayClicks 실행기가 낸 트레이 좌클릭의 시각(낸 차례 — 실행기가 뒤에 쌓는다)
  * @property {(code: string, what: string, options?: import('./active.cjs').PageOptions) => Promise<unknown>} page main world 에서 돌린 값(상한이 있다)
- * @property {() => import('./run.cjs').FactMark} mark 사실 목록의 길이 — 그 뒤에 온 것만 보려면 목록.slice(자리)다
- * @property {() => boolean} clickTray 트레이 좌클릭(main 이 단 click 처리기 — win32). 처리기가 있었으면 true
+ * @property {() => FactMark} mark 사실 목록의 길이 — 그 뒤에 온 것만 보려면 목록.slice(자리)다
  * @property {() => boolean} openViaMain main 의 길로 연다(win32 트레이 클릭 · 그 밖 최신 메뉴의 '열기'). 누를 것이 있었으면 true
- * @property {() => Promise<WindowFact | null>} hideViaMain main 의 길로 숨긴다 — 그 이유의 새 숨김 기록, 아니면 null(던지지 않는다)
+ * @property {() => { how: string, missing: string }} openPath openViaMain 이 누르는 것과 누를 것이 없을 때의 글
  * @property {(records?: readonly WindowFact[]) => string[]} windowTrail 마지막 창 기록 몇 건(action:reason) — 실패 글에 싣는다
  * @property {(notes: string[]) => Promise<string | null>} endShown 창을 main 의 길로 보인 채 둔다(R13) — 다시 보였으면 notes 에 적는다. 끝에
  *   보이면 null, 아니면 그 이유(누를 것이 없다 · 기다림의 시간 초과 · 창 파괴)
@@ -130,7 +155,8 @@ function labelled(label, problems) {
 }
 
 /**
- * 창 검사 한 벌을 만든다 — 검사마다 판정({ ok, detail })을 돌려주는 함수다. 실행기가 screenshot 바로 뒤에 theme → opacity 차례로 부른다.
+ * 창 검사 한 벌을 만든다 — 검사마다 판정({ ok, detail })을 돌려주는 함수다. 실행기가 screenshot 바로 뒤에 theme → opacity → escHide →
+ * visibility 차례로 부른다.
  * @param {WindowContext} ctx
  */
 function createWindowChecks(ctx) {
@@ -150,12 +176,13 @@ function createWindowChecks(ctx) {
    * 창이 파괴됐으면 그 문제를 적고 true(그 검사를 멈춘다 — 파괴된 창은 만지지 않는다, R29).
    * @param {string[]} problems
    * @param {string} label 멈춘 자리(단계 · 줄)
+   * @param {string} [when] 그 자리의 언제(기본 '전에' — 단계 안이면 '도중에' · '… 뒤')
    * @returns {boolean}
    */
-  function stopped(problems, label) {
+  function stopped(problems, label, when = '전에') {
     const gone = destroyed();
     if (gone === null) return false;
-    problems.push(`${label} 전에 ${gone} — 검사를 멈춘다`);
+    problems.push(`${label} ${when} ${gone} — 검사를 멈춘다`);
     return true;
   }
 
@@ -435,7 +462,544 @@ function createWindowChecks(ctx) {
     ].join(' · '));
   }
 
-  return { theme, opacity };
+  // ── escHide · visibility 공용 ───────────────────────────────────────
+
+  /**
+   * 창 기록 한 건이 숨김인가.
+   * @param {WindowFact} entry
+   * @returns {boolean}
+   */
+  function isHide(entry) {
+    return entry.action === 'hide';
+  }
+
+  /**
+   * from 자리 뒤의(to 를 주면 그 자리 앞까지의) 숨김 기록.
+   * @param {FactMark} from
+   * @param {FactMark} [to]
+   * @returns {WindowFact[]}
+   */
+  function hidesBetween(from, to) {
+    return facts.window.slice(from.window, to?.window).filter(isHide);
+  }
+
+  /**
+   * from 자리 뒤의 창 기록(action:reason 목록의 값 표현) — 실패 글에 싣는다.
+   * @param {FactMark} from
+   * @returns {string}
+   */
+  function trailSince(from) {
+    return show(ctx.windowTrail(facts.window.slice(from.window)));
+  }
+
+  /**
+   * from 자리 뒤에 실행기가 받은 tj-hide 수.
+   * @param {FactMark} from
+   * @returns {number}
+   */
+  function receiptsSince(from) {
+    return facts.hideReceipts.length - from.hideReceipts;
+  }
+
+  /**
+   * from 자리 뒤에 main 이 channel 을 민 수.
+   * @param {FactMark} from
+   * @param {string} channel
+   * @returns {number}
+   */
+  function pushesSince(from, channel) {
+    return facts.sent.slice(from.sent).filter((entry) => entry.channel === channel).length;
+  }
+
+  /**
+   * 숨김 기록이 정확히 하나이고 그 이유가 reason 인가 — 맞으면 null, 아니면 그 문제(what 은 앞에 붙는 말).
+   * @param {readonly WindowFact[]} hides
+   * @param {string} reason
+   * @param {string} [what]
+   * @returns {string | null}
+   */
+  function oneHideProblem(hides, reason, what = '') {
+    if (hides.length === 1 && hides[0]?.reason === reason) return null;
+    return `${what}숨김 기록이 ${show(ctx.windowTrail(hides))} 다(기대 하나 — 이유 ${show(reason)})`;
+  }
+
+  /**
+   * 이 검사가 일으키지 않은 숨김(R14) — from 자리 뒤에 숨김 기록이 있으면 첫 것의 이유를 적은 문제(what 은 앞에 붙는 말), 없으면 null.
+   * @param {FactMark} from
+   * @param {string} [what]
+   * @returns {string | null}
+   */
+  function strayHide(from, what = '') {
+    const [stray] = hidesBetween(from);
+    return stray === undefined ? null : `${what}우연한 숨김(이유 ${show(stray.reason)}) — 이 검사가 일으키지 않은 숨김이다(새 창 기록 ${trailSince(from)})`;
+  }
+
+  /**
+   * main 의 길로 연다(openViaMain) — 동기로 누르고 기다리지 않는다(보였는지는 waitShown 으로 본다). 창이 파괴됐으면 누르지 않는다.
+   * @returns {OpenPress}
+   */
+  function pressOpen() {
+    const from = ctx.mark();
+    const { how, missing } = ctx.openPath();
+    return { from, how, missing, pressed: destroyed() === null && ctx.openViaMain() };
+  }
+
+  /**
+   * from 자리 뒤에 창이 보이고 그 보이기 기록이 올 때까지 WAIT_MS 까지 기다린다 — 그 기록, 아니면 null(시간 초과 · 창 파괴 — 던지지 않는다).
+   * @param {FactMark} from
+   * @returns {Promise<WindowFact | null>}
+   */
+  async function waitShown(from) {
+    const shown = () => (destroyed() === null && ctx.win().isVisible() ? facts.window.slice(from.window).find((entry) => entry.action === 'show') : undefined);
+    await until(() => destroyed() !== null || shown() !== undefined, WAIT_MS);
+    return shown() ?? null;
+  }
+
+  /**
+   * 페이지 호출을 기다리지 않고 시작한다 — 끝나면 outcome() 이 그 모양이고 settled 가 풀린다(거부하지 않는다 — 동기로 던져도 거부로 적는다).
+   * @param {string} code
+   * @param {string} what
+   * @returns {{ settled: Promise<void>, outcome: () => PageOutcome | null }}
+   */
+  function startPage(code, what) {
+    /** @type {{ outcome: PageOutcome | null }} 콜백이 바꾼다(지역 변수는 TS 흐름 분석이 콜백의 변경을 놓친다) */
+    const box = { outcome: null };
+    /** @type {Promise<unknown>} */
+    let call;
+    try {
+      call = ctx.page(code, what);
+    } catch (error) {
+      call = Promise.reject(error);
+    }
+    const settled = call.then(
+      (value) => {
+        box.outcome = { kind: 'resolved', value };
+      },
+      (error) => {
+        box.outcome = { kind: 'rejected', error };
+      },
+    );
+    return { settled, outcome: () => box.outcome };
+  }
+
+  // ── escHide ────────────────────────────────────────────────────────
+
+  /**
+   * 숨지 않아야 할 Esc 한 단계(① ②) — 페이지가 Esc 를 보내고 장벽(getState)을 지난 답을 받은 뒤, 그 사이 tj-hide 수신과 숨김 기록이 없고 창이
+   * 보이는지 본다(장벽이 '숨지 않음' 의 양성 기록이다). 숨었는데 tj-hide 를 받았으면 이 Esc 가 숨긴 것이고(대화상자가 있는데 숨음), 받지 않았으면
+   * 이 검사가 일으키지 않은 숨김이다(R14). 페이지의 답, 아니면 null — 문제를 적었다(검사를 멈춘다: 뒤 단계는 보이는 창을 전제로 한다).
+   * @param {'①' | '②'} label
+   * @param {'open' | 'closes'} dialog
+   * @param {string[]} problems
+   * @returns {Promise<Record<string, unknown> | null>}
+   */
+  async function escKeepsShown(label, dialog, problems) {
+    if (stopped(problems, label)) return null;
+    const before = ctx.mark();
+    const seen = await ctx.page(escScript(dialog), `Esc(${label})`);
+    if (stopped(problems, label, '도중에')) return null;
+    const receipts = receiptsSince(before);
+    if (receipts > 0) {
+      problems.push(`${label} 대화상자(aria-modal)가 열려 있는데 Esc 로 숨었다 — tj-hide 수신 ${receipts}번 · 새 창 기록 ${trailSince(before)}`);
+      return null;
+    }
+    const stray = strayHide(before, `${label} `);
+    if (stray !== null) {
+      problems.push(stray);
+      return null;
+    }
+    if (!ctx.win().isVisible()) {
+      problems.push(`${label} 창이 보이지 않는다(숨김 기록 없이 — 새 창 기록 ${trailSince(before)})`);
+      return null;
+    }
+    if (!isRecord(seen)) {
+      problems.push(`${label} 페이지 사실이 객체가 아니다: ${show(seen)}`);
+      return null;
+    }
+    return seen;
+  }
+
+  /**
+   * escHide 의 본문 — 문제는 단계 표식(①–④)을 붙여 problems 에, 통과 글은 notes 에 쌓는다. 시작 때 창이 보여야 하고(R14 — 앞 검사가 남긴
+   * 창 기록은 보지 않는다), ① ② 는 숨지 않아야 하며(어긋나면 멈춘다), ③ 에서 숨고 ④ 에서 다시 연다.
+   * @param {string[]} problems
+   * @param {string[]} notes
+   * @returns {Promise<void>}
+   */
+  async function escSteps(problems, notes) {
+    if (stopped(problems, '시작')) return;
+    if (!ctx.win().isVisible()) {
+      problems.push(`시작 때 창이 보이지 않는다(마지막 창 기록 ${show(ctx.windowTrail())}) — 검사를 하지 못함`);
+      return;
+    }
+    // ① 대화상자(aria-modal 요소)가 열린 채 Esc — 장벽 뒤에도 숨지 않는다
+    const first = await escKeepsShown('①', 'open', problems);
+    if (first === null) return;
+    if (first.dialog !== true) {
+      problems.push(`① Esc 를 보낼 때 aria-modal 요소가 없었다(${show(first.dialog)}) — 대화상자 단계를 증명하지 못함`);
+      return;
+    }
+    notes.push('① aria-modal 요소가 있는 채 Esc → 장벽 뒤 숨김 0 · tj-hide 수신 0');
+    // ② 같은 요소 + 그것을 동기로 지우는 #root keydown 리스너(React 커밋 대신 — 버블 길에서 window 보다 먼저 돈다). 시작 때의 대화상자로
+    // 정하는 렌더러는 리스너 등록 순서와 상관없이 숨지 않는다
+    const second = await escKeepsShown('②', 'closes', problems);
+    if (second === null) return;
+    if (second.dialog !== true || second.ran !== true || second.removed !== true) {
+      problems.push(
+        `② #root keydown 리스너가 aria-modal 요소를 지우지 않았다(보낼 때 요소 ${show(second.dialog)} · 리스너 ${show(second.ran)} · 지움 ${show(second.removed)}) — 등록 순서와 상관없음을 증명하지 못함`,
+      );
+      return;
+    }
+    notes.push('② 그 요소를 #root keydown 리스너가 동기로 지웠다(돌았다) → 창은 그대로 보임(시작 때의 대화상자로 정한다 — 등록 순서와 상관없다)');
+    await escHideAndReopen(problems, notes);
+  }
+
+  /**
+   * ③ 요소 없이 Esc → tj-hide 수신 1 · 숨김 1('request') · 파괴 안 됨 · 페이지 응답(R15 — 설계 §5.5 그대로. tj-hidden 전달은 visibility ① 이
+   * 본다) ④ 다시 보인다 — 'request' 숨김 기록을 보자마자, 페이지의 답(숨은 창의 페이지는 느릴 수 있다)보다 먼저 main 의 길로 연다(escReopened).
+   * 'request' 숨김이 없으면 ④ 를 하지 않는다(③ 이 적었다 — 숨어 있으면 끝이 다시 연다).
+   * @param {string[]} problems
+   * @param {string[]} notes
+   * @returns {Promise<void>}
+   */
+  async function escHideAndReopen(problems, notes) {
+    if (stopped(problems, '③')) return;
+    const before = ctx.mark();
+    const call = startPage(escScript('none'), 'Esc(③)');
+    const requestHide = () => hidesBetween(before).find((entry) => entry.reason === 'request');
+    await until(() => destroyed() !== null || requestHide() !== undefined || call.outcome() !== null, PAGE_MS);
+    const hide = destroyed() === null ? requestHide() : undefined;
+    // ④ 를 누른다 — 기다리지 않는다(win32 는 경합 창 안의 트레이 클릭이어야 한다)
+    const open = hide === undefined ? null : pressOpen();
+    await call.settled;
+    if (stopped(problems, '③', '도중에')) return;
+    const count = problems.length;
+    const outcome = call.outcome();
+    if (outcome === null || outcome.kind === 'rejected') {
+      problems.push(`③ 페이지가 응답하지 않았다(${outcome === null ? '끝나지 않았다' : errorText(outcome.error)})`);
+    } else if (!isRecord(outcome.value)) {
+      problems.push(`③ 페이지 사실이 객체가 아니다: ${show(outcome.value)}`);
+    } else if (outcome.value.dialog !== false) {
+      problems.push(`③ Esc 를 보낼 때 aria-modal 요소가 있었다(${show(outcome.value.dialog)}) — 대화상자 없는 단계가 아니다`);
+    }
+    const receipts = receiptsSince(before);
+    if (receipts !== 1) problems.push(`③ tj-hide 수신이 ${receipts}번이다(기대 1번)`);
+    const wrong = oneHideProblem(hidesBetween(before, open?.from), 'request', '③ ');
+    if (wrong !== null) problems.push(wrong);
+    if (problems.length === count) notes.push('③ 요소 없이 Esc → tj-hide 수신 1 · 숨김 1(request) · 파괴 안 됨 · 페이지 응답');
+    if (hide !== undefined && open !== null) await escReopened(problems, notes, hide, open);
+  }
+
+  /**
+   * ④ 의 판정 — 누른 뒤 창이 보이고 그 보이기 기록이 와야 한다(WAIT_MS). win32 는 트레이 클릭이고, 기록으로 클릭.at − 숨김.at < CLICK_RACE_MS
+   * 를 단언한다 — 경합 창 안의 클릭이 열어야 Esc 숨김이 경합 가드를 켜지 않았다는 증명이 된다(가드는 blur 숨김에만). 그 밖은 메뉴의
+   * '열기'(클릭 처리기 · 경합 가드가 없다). 다시 보인 뒤의 숨김은 이 검사가 일으키지 않은 것이다(R14).
+   * @param {string[]} problems
+   * @param {string[]} notes
+   * @param {WindowFact} hide ③ 의 'request' 숨김 기록
+   * @param {OpenPress} open
+   * @returns {Promise<void>}
+   */
+  async function escReopened(problems, notes, hide, open) {
+    if (!open.pressed) {
+      problems.push(`④ ${open.missing} — 숨긴 창을 main 의 길로 다시 열 수 없다`);
+      return;
+    }
+    const shown = await waitShown(open.from);
+    if (stopped(problems, '④', '도중에')) return;
+    const count = problems.length;
+    /** @type {string | null} win32 — 'request' 숨김 기록에서 트레이 클릭까지 */
+    let gap = null;
+    if (ctx.platform === 'win32') {
+      const click = ctx.trayClicks.slice(open.from.trayClicks)[0];
+      if (click === undefined) {
+        problems.push('④ 트레이 클릭 기록이 없다 — 경합 창 안의 클릭이었는지 잴 수 없다');
+      } else {
+        gap = `${(click.at - hide.at).toFixed(1)}ms`;
+        if (!(click.at - hide.at < CLICK_RACE_MS)) {
+          problems.push(`④ 트레이 클릭이 'request' 숨김 기록 ${gap} 뒤였다(경합 시간 ${CLICK_RACE_MS}ms 안이어야 한다) — Esc 숨김이 경합 가드를 켜지 않음을 증명하지 못함`);
+        }
+      }
+    }
+    if (shown === null) {
+      problems.push(`④ ${open.how} 뒤 ${WAIT_MS}ms 안에 창이 보이지 않았다(보임 ${ctx.win().isVisible()} · 새 창 기록 ${trailSince(open.from)})`);
+      return;
+    }
+    const stray = strayHide(open.from, '④ 다시 보인 뒤 ');
+    if (stray !== null) problems.push(stray);
+    if (problems.length > count) return;
+    notes.push(
+      gap === null
+        ? `④ ${open.how} → 보임(${shown.reason})`
+        : `④ 'request' 숨김 기록 ${gap} 뒤 ${open.how} → 보임(${shown.reason}) — 경합 시간(${CLICK_RACE_MS}ms) 안의 클릭이 열었다: Esc 숨김은 경합 가드를 켜지 않는다`,
+    );
+  }
+
+  /**
+   * escHide(설계 §5.5 표) — ① aria-modal 요소를 넣고 페이지에서 Esc → 장벽 → 숨김 0 · tj-hide 수신 0 ② 같은 요소 + 그것을 동기로 지우는 #root
+   * keydown 리스너 → #root 안에서 Esc → 요소가 지워졌고(양성 기록 — 리스너가 돌았다) 창은 그대로 보임(등록 순서와 상관없음) ③ 요소 없이 Esc →
+   * tj-hide 수신 1 · 숨김 1('request') · 파괴 안 됨 · 페이지 응답 ④ 다시 보인다(win32 는 경합 창 안의 트레이 클릭). Esc 는 페이지에서 만든 키
+   * 이벤트다(sendInputEvent 는 창 포커스가 필요하다 — 실제 키 경로는 손으로 본다, 설계 §5.5 [결정]). 끝에(실패 길에서도) 창을 main 의 길로
+   * 보인 채 둔다 — 못 하면 실패다(restoreShown).
+   * @returns {Promise<CheckVerdict>}
+   */
+  async function escHide() {
+    /** @type {string[]} */
+    const problems = [];
+    /** @type {string[]} */
+    const notes = [];
+    try {
+      await escSteps(problems, notes);
+    } finally {
+      await restoreShown(problems, notes);
+    }
+    return verdictOf(problems, notes.join(' · '));
+  }
+
+  // ── visibility ─────────────────────────────────────────────────────
+
+  /**
+   * 페이지의 <html> tapp-hidden · visibilityState — 모양이 아니면 null.
+   * @returns {Promise<HiddenState | null>}
+   */
+  async function hiddenState() {
+    const seen = await ctx.page(HIDDEN_STATE_SCRIPT, 'tapp-hidden · visibilityState');
+    return isRecord(seen) && typeof seen.hiddenClass === 'boolean' ? { hiddenClass: seen.hiddenClass, visibilityState: seen.visibilityState } : null;
+  }
+
+  /**
+   * <html> 의 tapp-hidden 이 want 가 될 때까지 WAIT_MS 까지 페이지를 다시 읽는다(렌더러는 tj-hidden · tj-shown push 로 단다). 창이 파괴되면 그만
+   * 기다린다(R29 — 그 페이지 호출이 파괴로 거부돼도 같다. 그 밖의 거부는 그 단계의 실패다). 되었는가(ok)와 마지막에 본 것(last).
+   * @param {boolean} want
+   * @returns {Promise<{ ok: boolean, last: HiddenState | null }>}
+   */
+  async function waitHiddenClass(want) {
+    /** @type {{ last: HiddenState | null }} 콜백이 바꾼다(지역 변수는 TS 흐름 분석이 콜백의 변경을 놓친다) */
+    const seen = { last: null };
+    const done = await untilAsync(
+      async () => {
+        if (destroyed() !== null) return true;
+        try {
+          seen.last = await hiddenState();
+        } catch (err) {
+          if (destroyed() !== null) return true;
+          throw err;
+        }
+        return seen.last?.hiddenClass === want;
+      },
+      WAIT_MS,
+      `<html> 의 tapp-hidden 을 기다리기(${want ? '붙기' : '빠지기'})`,
+    );
+    return { ok: done && destroyed() === null && seen.last?.hiddenClass === want, last: seen.last };
+  }
+
+  /**
+   * ① 진짜 ✕ 단추를 페이지에서 누른다 → tj-hide 수신 1 · 숨김 1('request') · 새 tj-hidden 전달 1 · <html> 에 tapp-hidden ·
+   * getBackgroundThrottling() === true(기본 켬) · 파괴 안 됨 → 그 숨김에서 경합 시간 + 여유가 지난 뒤(R13) main 의 길로 다시 연다 → tj-shown 전달
+   * 1 · 클래스 빠짐. 문제는 ① 표식을 붙여 problems 에. ② 를 해도 되면(창이 살아 있고 보인다) true.
+   * @param {string[]} problems
+   * @param {string[]} notes
+   * @returns {Promise<boolean>}
+   */
+  async function hideButtonRound(problems, notes) {
+    if (stopped(problems, '①')) return false;
+    const count = problems.length;
+    /** @param {string} text */
+    const fail = (text) => problems.push(`① ${text}`);
+    const before = ctx.mark();
+    const pressed = await ctx.page(HIDE_BUTTON_SCRIPT, '✕(숨기기) 클릭');
+    if (stopped(problems, '①', '도중에')) return false;
+    if (!isRecord(pressed) || pressed.found !== true) {
+      fail(`✕ 단추(button[aria-label="숨기기"])를 찾지 못했다: ${show(pressed)}`);
+      return ctx.win().isVisible();
+    }
+    const receipts = receiptsSince(before);
+    if (receipts !== 1) fail(`tj-hide 수신이 ${receipts}번이다(기대 1번)`);
+    const early = hidesBetween(before).at(-1);
+    if (early === undefined) {
+      fail(`숨김 기록이 없다 — ✕ 로 창이 숨지 않았다(보임 ${ctx.win().isVisible()})`);
+      return ctx.win().isVisible();
+    }
+    const added = await waitHiddenClass(true);
+    if (stopped(problems, '①', '도중에')) return false;
+    // 전달 수는 클래스를 기다린 뒤에 센다 — main 은 창의 hide 사건에서 밀고 그 뒤에 기록하며, 렌더러는 받은 뒤에야 클래스를 단다(그 사건이
+    // 늦게 와도 헛실패하지 않는다)
+    const pushed = pushesSince(before, HIDDEN_CHANNEL);
+    if (pushed !== 1) fail(`새 ${HIDDEN_CHANNEL} 전달이 ${pushed}번이다(기대 1번)`);
+    if (!added.ok) fail(`<html> 에 tapp-hidden 이 ${WAIT_MS}ms 안에 붙지 않았다(마지막에 본 것 ${show(added.last)})`);
+    const throttling = ctx.win().webContents.getBackgroundThrottling();
+    if (throttling !== true) fail(`숨긴 동안 getBackgroundThrottling() 이 ${show(throttling)} 다(기대 true — 기본 켬)`);
+    // 그 숨김에서 경합 시간 + 여유가 지난 뒤 다시 연다(R13 — 경합 창은 tray · escHide ④ 만 잰다)
+    await waitElapsed(early.at, CLICK_RACE_MS + ctx.timingMarginMs);
+    if (stopped(problems, '①', '도중에')) return false;
+    const waited = `${(performance.now() - early.at).toFixed(1)}ms`;
+    const open = pressOpen();
+    const wrong = oneHideProblem(hidesBetween(before, open.from), 'request');
+    if (wrong !== null) fail(wrong);
+    if (!open.pressed) {
+      fail(`${open.missing} — 숨긴 창을 main 의 길로 다시 열 수 없다`);
+      return false;
+    }
+    const shown = await waitShown(open.from);
+    if (stopped(problems, '①', '다시 연 뒤')) return false;
+    if (shown === null) {
+      fail(`${open.how} 뒤 ${WAIT_MS}ms 안에 창이 보이지 않았다(보임 ${ctx.win().isVisible()} · 새 창 기록 ${trailSince(open.from)})`);
+      return false;
+    }
+    const removed = await waitHiddenClass(false);
+    if (stopped(problems, '①', '다시 연 뒤')) return false;
+    const shownPushes = pushesSince(open.from, SHOWN_CHANNEL); // 클래스를 기다린 뒤에 센다(위의 tj-hidden 과 같다)
+    if (shownPushes !== 1) fail(`다시 보인 뒤 ${SHOWN_CHANNEL} 전달이 ${shownPushes}번이다(기대 1번)`);
+    if (!removed.ok) fail(`다시 보인 뒤 <html> 의 tapp-hidden 이 ${WAIT_MS}ms 안에 빠지지 않았다(마지막에 본 것 ${show(removed.last)})`);
+    const stray = strayHide(open.from, '다시 보인 뒤 ');
+    if (stray !== null) {
+      fail(stray);
+      return false;
+    }
+    if (problems.length === count) {
+      notes.push(
+        `① ✕ → tj-hide 수신 1 · 숨김 1(request) · ${HIDDEN_CHANNEL} 전달 1 · <html> tapp-hidden · getBackgroundThrottling() true · 파괴 안 됨 → ${waited} 뒤 ${open.how} → 보임(${shown.reason}) · ${SHOWN_CHANNEL} 전달 1 · tapp-hidden 빠짐`,
+      );
+    }
+    return true;
+  }
+
+  /**
+   * ② 스로틀 끈 한 바퀴 — 실행기가 setBackgroundThrottling(false) → win.close()(OS 닫기 경로 — 숨김 이유 'close') → 페이지의 visibilityState 가
+   * 'visible' 인데(양성 기록 — 스로틀을 끈 숨긴 창은 visible 이다) <html> 에 tapp-hidden 이 붙는다(visibilitychange 로 움직이는 렌더러를 걸러
+   * 낸다) → 그 숨김에서 경합 시간 + 여유가 지난 뒤 다시 연다 → 빠짐 → setBackgroundThrottling(true) · getBackgroundThrottling() === true. 끈
+   * 스로틀은 throttle.off 로 알린다(다시 켜기 전에 멈추면 끝이 켠다). 문제는 ② 표식을 붙여 problems 에.
+   * @param {string[]} problems
+   * @param {string[]} notes
+   * @param {{ off: boolean }} throttle
+   * @returns {Promise<void>}
+   */
+  async function throttledRound(problems, notes, throttle) {
+    if (stopped(problems, '②')) return;
+    const count = problems.length;
+    /** @param {string} text */
+    const fail = (text) => problems.push(`② ${text}`);
+    const before = ctx.mark();
+    const win = ctx.win();
+    win.webContents.setBackgroundThrottling(false);
+    throttle.off = true;
+    win.close();
+    await until(() => destroyed() !== null || hidesBetween(before).length > 0, WAIT_MS);
+    if (stopped(problems, '②', 'win.close() 뒤')) return;
+    const early = hidesBetween(before).at(-1);
+    if (early === undefined) {
+      fail(`win.close() 뒤 ${WAIT_MS}ms 안에 숨김 기록이 없다(보임 ${ctx.win().isVisible()})`);
+      return;
+    }
+    const added = await waitHiddenClass(true);
+    if (stopped(problems, '②', '도중에')) return;
+    const visibilityState = added.last?.visibilityState;
+    if (visibilityState !== 'visible') {
+      fail(`스로틀을 끈 숨긴 창의 visibilityState 가 ${show(visibilityState)} 다(기대 "visible" — 양성 기록이 없어 visibilitychange 로 움직이는 렌더러를 가르지 못함)`);
+    }
+    if (!added.ok) fail(`visibilityState ${show(visibilityState)} 인 채 <html> 에 tapp-hidden 이 ${WAIT_MS}ms 안에 붙지 않았다(렌더러는 visibilitychange 가 아니라 ${HIDDEN_CHANNEL} 으로 단다)`);
+    // 그 숨김에서 경합 시간 + 여유가 지난 뒤 다시 연다(R13)
+    await waitElapsed(early.at, CLICK_RACE_MS + ctx.timingMarginMs);
+    if (stopped(problems, '②', '도중에')) return;
+    const waited = `${(performance.now() - early.at).toFixed(1)}ms`;
+    const open = pressOpen();
+    const wrong = oneHideProblem(hidesBetween(before, open.from), 'close', 'win.close() 뒤 ');
+    if (wrong !== null) fail(wrong);
+    if (!open.pressed) {
+      fail(`${open.missing} — 숨긴 창을 main 의 길로 다시 열 수 없다`);
+      return;
+    }
+    const shown = await waitShown(open.from);
+    if (stopped(problems, '②', '다시 연 뒤')) return;
+    if (shown === null) {
+      fail(`${open.how} 뒤 ${WAIT_MS}ms 안에 창이 보이지 않았다(보임 ${ctx.win().isVisible()} · 새 창 기록 ${trailSince(open.from)})`);
+      return;
+    }
+    const removed = await waitHiddenClass(false);
+    if (stopped(problems, '②', '다시 연 뒤')) return;
+    if (!removed.ok) fail(`다시 보인 뒤 <html> 의 tapp-hidden 이 ${WAIT_MS}ms 안에 빠지지 않았다(마지막에 본 것 ${show(removed.last)})`);
+    const contents = ctx.win().webContents;
+    contents.setBackgroundThrottling(true);
+    throttle.off = false;
+    const back = contents.getBackgroundThrottling();
+    if (back !== true) fail(`setBackgroundThrottling(true) 뒤 getBackgroundThrottling() 이 ${show(back)} 다 — 스로틀이 돌아오지 않았다`);
+    const stray = strayHide(open.from, '다시 보인 뒤 ');
+    if (stray !== null) fail(stray);
+    if (problems.length === count) {
+      notes.push(
+        `② 스로틀 끔 → win.close() → 숨김(close) · visibilityState "visible" 인데 tapp-hidden → ${waited} 뒤 ${open.how} → 보임(${shown.reason}) · tapp-hidden 빠짐 → 스로틀 켬 · getBackgroundThrottling() true`,
+      );
+    }
+  }
+
+  /**
+   * visibility 의 본문 — 보인 기록이 이미 있고(visibilityState 는 처음 보이기 전에는 숨어도 visible 이다 — 설계 §5.5) 시작 때 창이 보여야 한다
+   * (R14). 시작 때 <html> 에 tapp-hidden 이 없어야 ① 의 '붙음' 이 뜻이 있다(있으면 적고 계속한다). ① 뒤 창이 살아 있고 보이면 ② 를 한다.
+   * @param {string[]} problems
+   * @param {string[]} notes
+   * @param {{ off: boolean }} throttle
+   * @returns {Promise<void>}
+   */
+  async function visibilitySteps(problems, notes, throttle) {
+    if (stopped(problems, '시작')) return;
+    if (!facts.window.some((entry) => entry.action === 'show')) {
+      problems.push('보인 기록이 아직 없다 — 처음 보이기 전의 visibilityState 는 숨어도 visible 이라 양성 기록이 되지 않는다(검사를 하지 못함)');
+      return;
+    }
+    if (!ctx.win().isVisible()) {
+      problems.push(`시작 때 창이 보이지 않는다(마지막 창 기록 ${show(ctx.windowTrail())}) — 검사를 하지 못함`);
+      return;
+    }
+    const start = ctx.mark();
+    const initial = await hiddenState();
+    if (stopped(problems, '시작', '도중에')) return;
+    const stray = strayHide(start, '시작 때 ');
+    if (stray !== null) {
+      problems.push(stray);
+      return;
+    }
+    if (initial?.hiddenClass === false) notes.push('보인 기록 있음 · 시작 때 보이고 tapp-hidden 없음');
+    else problems.push(`시작 때 <html> 의 tapp-hidden 이 ${show(initial?.hiddenClass)} 다 — 보이는 창에는 없어야 한다(① 의 '붙음' 이 뜻이 없다)`);
+    if (await hideButtonRound(problems, notes)) await throttledRound(problems, notes, throttle);
+  }
+
+  /**
+   * 검사의 끝 — 이 검사가 끈 스로틀을 아직 켜지 않았으면 켜고(창이 살아 있을 때만), 그래도 켜지지 않으면 그 검사의 실패로 적는다(뒤 검사와 앱은
+   * 기본 스로틀을 전제로 한다).
+   * @param {string[]} problems
+   * @param {{ off: boolean }} throttle
+   */
+  function restoreThrottling(problems, throttle) {
+    if (!throttle.off || destroyed() !== null) return;
+    const contents = ctx.win().webContents;
+    contents.setBackgroundThrottling(true);
+    throttle.off = false;
+    if (contents.getBackgroundThrottling() !== true) problems.push('끝에 끈 스로틀을 다시 켜지 못했다(setBackgroundThrottling(true) 뒤에도 getBackgroundThrottling() 이 true 가 아니다)');
+  }
+
+  /**
+   * visibility(설계 §5.5 표) — 보인 기록이 이미 있음을 확인 → ① 진짜 ✕ 단추(hideButtonRound) ② 스로틀 끈 한 바퀴(throttledRound). 렌더러는
+   * tj-hidden · tj-shown 으로만 tapp-hidden 을 바꾼다(visibilitychange 는 쓰지 않는다 — ② 가 그것을 가른다). 숨긴 동안 capturePage 를 하지
+   * 않는다. 끝에(실패 길에서도) 이 검사가 끈 스로틀을 다시 켜고(restoreThrottling) 창을 main 의 길로 보인 채 둔다 — 못 하면 실패다(restoreShown).
+   * @returns {Promise<CheckVerdict>}
+   */
+  async function visibility() {
+    /** @type {string[]} */
+    const problems = [];
+    /** @type {string[]} */
+    const notes = [];
+    /** 이 검사가 끈 스로틀 — 다시 켜기 전에 멈추면 끝이 켠다 */
+    const throttle = { off: false };
+    try {
+      await visibilitySteps(problems, notes, throttle);
+    } finally {
+      restoreThrottling(problems, throttle);
+      await restoreShown(problems, notes);
+    }
+    return verdictOf(problems, notes.join(' · '));
+  }
+
+  return { theme, opacity, escHide, visibility };
 }
 
 module.exports = { createWindowChecks };

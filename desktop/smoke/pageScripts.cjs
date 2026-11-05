@@ -132,6 +132,64 @@ function opacityScript(value) {
   );
 }
 
+/**
+ * Esc 한 단계의 페이지 쪽(창 검사 escHide) — 페이지가 만든 Escape keydown 을 #root 안 요소에서 보낸다(bubbles — 렌더러가 window 에 건 캡처 ·
+ * 버블 리스너에 닿는다. 실제 키 경로는 손으로 본다, 설계 §5.5). dialog 갈래: 'open' 은 aria-modal="true" 요소를 넣은 채, 'closes' 는 그 요소와
+ * 그것을 동기로 지우는 #root keydown 리스너와 함께(React 커밋 대신 — 버블 길에서 window 보다 먼저 돈다), 'none' 은 요소 없이 보낸다. 보낸 뒤
+ * 넣은 요소 · 리스너를 치우고 getState() 를 왕복한다(순서 장벽 — 렌더러가 보낸 tj-hide 가 그 응답보다 먼저 처리된다). 보낼 때 aria-modal 요소가
+ * 있었는지(dialog) · #root 리스너가 돌았는지(ran) · 그 요소가 지워졌는지(removed) · 스냅샷을 돌려준다.
+ * @param {'open' | 'closes' | 'none'} dialog
+ * @returns {string}
+ */
+function escScript(dialog) {
+  return tagged(
+    'esc',
+    `(async () => {
+  const mode = ${JSON.stringify(dialog)};
+  const root = document.getElementById('root');
+  const target = root?.firstElementChild ?? root ?? document.body;
+  const modal = mode === 'none' ? null : document.createElement('div');
+  if (modal !== null) {
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('data-tj-smoke', 'dialog');
+    document.body.append(modal);
+  }
+  let ran = false;
+  const close = () => {
+    ran = true;
+    modal?.remove();
+  };
+  if (mode === 'closes') root?.addEventListener('keydown', close);
+  const dialogAtStart = document.querySelector('[aria-modal="true"]') !== null;
+  target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
+  root?.removeEventListener('keydown', close);
+  const removed = modal !== null && !modal.isConnected;
+  modal?.remove();
+  return { dialog: dialogAtStart, ran, removed, snapshot: await window.tjDesktop.getState() };
+})()`,
+    dialog,
+  );
+}
+
+/**
+ * ✕(숨기기) 클릭의 페이지 쪽(창 검사 visibility ①) — 진짜 단추(button[aria-label="숨기기"])를 누르고(렌더러의 onClick → tjDesktop.hide())
+ * getState() 를 왕복한다(순서 장벽). 단추가 있었는지(found)와 스냅샷.
+ */
+const HIDE_BUTTON_SCRIPT = tagged(
+  'hide-button',
+  `(async () => {
+  const button = document.querySelector('button[aria-label="숨기기"]');
+  if (button === null) return { found: false, snapshot: null };
+  button.click();
+  return { found: true, snapshot: await window.tjDesktop.getState() };
+})()`,
+);
+/** <html> 의 숨김 클래스(tapp-hidden — 렌더러가 tj-hidden · tj-shown 으로 단다)와 document.visibilityState(창 검사 visibility). */
+const HIDDEN_STATE_SCRIPT = tagged(
+  'hidden-state',
+  `({ hiddenClass: document.documentElement.classList.contains('tapp-hidden'), visibilityState: document.visibilityState })`,
+);
+
 /** preload 의 격리 world — Electron 이 contextIsolation 에 쓰는 world 번호. */
 const ISOLATED_WORLD_ID = 999;
 /** 격리 world 의 표식과 CSP 위반 버퍼(preload 의 __tjIsoProbe · __tjCspBuffer). */
@@ -281,6 +339,9 @@ module.exports = {
   FRAMES_SCRIPT,
   themeScript,
   opacityScript,
+  escScript,
+  HIDE_BUTTON_SCRIPT,
+  HIDDEN_STATE_SCRIPT,
   CSP_META_SCRIPT,
   headersScript,
   protocolScript,

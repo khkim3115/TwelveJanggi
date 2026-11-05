@@ -8,7 +8,8 @@
 // - 가짜 Electron 장치(rigScenario — 가짜 페이지 · 기본 세션 · 흉내 낸 main · 가짜 렌더러 · 시계)와 사례마다의 준비 · 정리
 //   (installRigLifecycle)는 smokeRig.ts 에 있다(#36 T6-8 · T11-5). 사례는 손잡이 하나 — 페이지 처리기(Scenario.page) · main 의 결함
 //   (Scenario.main) · 렌더러의 결함(Scenario.renderer) · 갈래 · 로그인 항목 — 를 바꿔 그 검사의 음성 갈래를 탄다(#36 runner-N1 의 tray ·
-//   boot · loginItem, 창 검사 theme · opacity).
+//   boot · loginItem, 창 검사 theme · opacity · escHide · visibility). 창 파괴(FakeApp.destroyWindow · close 를 막지 않는 main)는 창 검사가
+//   판정으로 적는지 본다(R29).
 // - 건강한 흐름은 세 갈래(win32 · darwin · linux)를 호스트와 상관없이 돈다(필수 check 는 ubuntu 에서 Windows 갈래를 덮는다).
 // - securityWarnings: 플랫폼마다 다른 켜짐 규칙은 securityWarningsArming 을 바로 불러 본다.
 import { createRequire } from 'node:module';
@@ -81,8 +82,8 @@ const HUB_URL = 'https://khkim3115.github.io/';
 /** 격리 world 버퍼를 읽는 코드(브리프의 값 그대로). */
 const ISOLATED_CODE = '({ probe: globalThis.__tjIsoProbe, buf: globalThis.__tjCspBuffer })';
 /**
- * 실행기가 결과에 싣는 검사(실행 순서) — 창 검사(theme · opacity)는 screenshot 바로 뒤, 조건부 검사(.invalid 빌드의 connectAllowed · --net 의
- * net)는 permissions 뒤에 온다.
+ * 실행기가 결과에 싣는 검사(실행 순서) — 창 검사(theme · opacity · escHide · visibility)는 screenshot 바로 뒤, 조건부 검사(.invalid 빌드의
+ * connectAllowed · --net 의 net)는 permissions 뒤에 온다.
  */
 const BEFORE_CONDITIONAL = [
   'boot',
@@ -96,6 +97,8 @@ const BEFORE_CONDITIONAL = [
   'screenshot',
   'theme',
   'opacity',
+  'escHide',
+  'visibility',
   'cspMeta',
   'cspHeader',
   'protocol',
@@ -107,10 +110,11 @@ const AFTER_CONDITIONAL = ['cspViolations', 'consoleErrors', 'cspCanary', 'noNet
 /** 갈래 — 실행기에 넘기는 platform(흉내 낸 main 도 따른다). 호스트 값이 아니다. */
 const PLATFORMS = ['win32', 'darwin', 'linux'] as const;
 /**
- * 건강한 흐름의 창 기록(흉내 낸 main 이 넘긴 차례) — 시작 표시 → 열기 경로(win32 는 트레이 토글 → 트레이 클릭, 그 밖은 win.close() →
- * 메뉴의 '열기') → win32 는 경합 단계(blur 숨김 → 같은 턴의 클릭 무시 → 경합 시간 뒤 클릭). 그 뒤 검사는 창 기록을 남기지 않는다.
+ * 건강한 흐름에서 tray 까지의 창 기록(흉내 낸 main 이 넘긴 차례) — 시작 표시 → 열기 경로(win32 는 트레이 토글 → 트레이 클릭, 그 밖은
+ * win.close() → 메뉴의 '열기') → win32 는 경합 단계(blur 숨김 → 같은 턴의 클릭 무시 → 경합 시간 뒤 클릭). theme · opacity 는 창 기록을
+ * 남기지 않는다.
  */
-const HEALTHY_WINDOWS: Record<(typeof PLATFORMS)[number], Outcome['windows']> = {
+const TRAY_WINDOWS: Record<(typeof PLATFORMS)[number], Outcome['windows']> = {
   win32: [
     { action: 'show', reason: 'start' },
     { action: 'hide', reason: 'toggle' },
@@ -129,6 +133,49 @@ const HEALTHY_WINDOWS: Record<(typeof PLATFORMS)[number], Outcome['windows']> = 
     { action: 'show', reason: 'menu' },
   ],
 };
+/**
+ * 건강한 흐름의 창 기록 — tray 의 것 뒤에 escHide(③ Esc 숨김 → ④ 다시 열기)와 visibility(① ✕ 숨김 → 다시 열기 → ② win.close() 숨김 →
+ * 다시 열기)가 남긴다. 다시 열기는 main 의 길이다(win32 는 트레이 클릭, 그 밖은 메뉴의 '열기'). 그 뒤 검사는 창 기록을 남기지 않는다.
+ */
+const HEALTHY_WINDOWS = Object.fromEntries(
+  PLATFORMS.map((platform) => {
+    const reopened = platform === 'win32' ? 'tray' : 'menu';
+    const windows: Outcome['windows'] = [
+      ...TRAY_WINDOWS[platform],
+      { action: 'hide', reason: 'request' },
+      { action: 'show', reason: reopened },
+      { action: 'hide', reason: 'request' },
+      { action: 'show', reason: reopened },
+      { action: 'hide', reason: 'close' },
+      { action: 'show', reason: reopened },
+    ];
+    return [platform, windows];
+  }),
+) as Record<(typeof PLATFORMS)[number], Outcome['windows']>;
+/** 건강한 페이지 처리기 — 사례가 감싸서 쓴다. */
+const HEALTHY_PAGE = healthyPage({ files: new Map(), unmapped: [] });
+
+/**
+ * 실행기의 fail 이 stderr(fd 2)에 쓰는 '[tj] …' 줄을 모은다 — 시험 출력에 내보내지 않는다(그 밖의 쓰기는 그대로 보낸다).
+ * @returns work 의 값과 모은 줄
+ */
+async function withTjLines<T>(work: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
+  const nodeFs = require('node:fs') as { writeSync: (...args: unknown[]) => unknown };
+  const realWriteSync = nodeFs.writeSync;
+  const lines: string[] = [];
+  nodeFs.writeSync = (fd: unknown, data: unknown, ...rest: unknown[]): unknown => {
+    if (fd === 2 && typeof data === 'string' && data.startsWith('[tj] ')) {
+      lines.push(data);
+      return Buffer.byteLength(data);
+    }
+    return Reflect.apply(realWriteSync, nodeFs, [fd, data, ...rest]);
+  };
+  try {
+    return { value: await work(), lines };
+  } finally {
+    nodeFs.writeSync = realWriteSync;
+  }
+}
 
 /** tray 가 창을 main 의 길로 보인 채 끝냈다(판정 R13) — 마지막 창 기록이 show 이고, 바로 뒤의 screenshot 이 창을 직접 보이지 않았다. */
 function expectEndsShown(outcome: Outcome): void {
@@ -143,7 +190,7 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
   const requiredFor = (build: keyof typeof SUPABASE_URLS, net: boolean): string[] =>
     requiredChecks({ net, supabaseOrigin: buildTrayCsp(SUPABASE_URLS[build]).supabaseOrigin }).sort();
 
-  it("기본 빌드 — 22개가 실행 순서대로 모두 ok · stage · error 없음 · 메모 필드는 ai() 와 canary 전 위반 수 · 붙은 메뉴 '종료' 한 번", async () => {
+  it("기본 빌드 — 24개가 실행 순서대로 모두 ok · stage · error 없음 · 메모 필드는 ai() 와 canary 전 위반 수 · 붙은 메뉴 '종료' 한 번", async () => {
     const outcome = await runScenario();
     expect(outcome.checks.map((entry) => entry.name)).toStrictEqual([...BEFORE_CONDITIONAL, ...AFTER_CONDITIONAL]);
     expect([...outcome.checks.map((entry) => entry.name)].sort()).toStrictEqual(requiredFor('default', false));
@@ -172,7 +219,7 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
     ]);
   });
 
-  it('.invalid 빌드 — connectAllowed 까지 23개 ok, noNetwork 는 탐침 + connectProbe 두 주소, consoleErrors 는 취소된 소켓의 오류를 뺀다', async () => {
+  it('.invalid 빌드 — connectAllowed 까지 25개 ok, noNetwork 는 탐침 + connectProbe 두 주소, consoleErrors 는 취소된 소켓의 오류를 뺀다', async () => {
     const outcome = await runScenario({ build: 'invalid' });
     expect(outcome.checks.map((entry) => entry.name)).toStrictEqual([...BEFORE_CONDITIONAL, 'connectAllowed', ...AFTER_CONDITIONAL]);
     expect([...outcome.checks.map((entry) => entry.name)].sort()).toStrictEqual(requiredFor('invalid', false));
@@ -182,7 +229,7 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
     expect(checkOf(outcome, 'consoleErrors').detail).toContain('connectProbe 의 취소된 요청 오류 1건은 뺐다');
   });
 
-  it('--net · 실제 값 빌드 — net 까지 23개 ok, noNetwork 는 탐침 + 인증 설정 · Realtime 소켓(가드가 통과시켰다)', async () => {
+  it('--net · 실제 값 빌드 — net 까지 25개 ok, noNetwork 는 탐침 + 인증 설정 · Realtime 소켓(가드가 통과시켰다)', async () => {
     const outcome = await runScenario({ build: 'real', net: true });
     expect(outcome.checks.map((entry) => entry.name)).toStrictEqual([...BEFORE_CONDITIONAL, 'net', ...AFTER_CONDITIONAL]);
     expect([...outcome.checks.map((entry) => entry.name)].sort()).toStrictEqual(requiredFor('real', true));
@@ -192,7 +239,7 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
   });
 
   it.each(PLATFORMS)(
-    "%s — 22개 ok · 최신 메뉴의 '종료' 한 번 · 창은 main 의 길로만 숨고 보였다 · getLoginItemSettings 는 모두 loginItemQuery(갈래) 로 · 원래 setLoginItemSettings 0회 · 테마 네 단계 · 투명도 표",
+    "%s — 24개 ok · 최신 메뉴의 '종료' 한 번 · 창은 main 의 길로만 숨고 보였다 · getLoginItemSettings 는 모두 loginItemQuery(갈래) 로 · 원래 setLoginItemSettings 0회 · 테마 네 단계 · 투명도 표 · Esc 네 단계 · ✕ 와 스로틀 끈 닫기",
     async (platform) => {
       const outcome = await runScenario({ platform });
       expect(outcome.checks.map((entry) => entry.name)).toStrictEqual([...BEFORE_CONDITIONAL, ...AFTER_CONDITIONAL]);
@@ -212,9 +259,28 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
       expect(theme).toContain("③ ① 전의 낡은 메뉴의 '라이트 모드' 체크 false → true(Electron 이 click 전에 뒤집었다)");
       expect(theme).toContain('④');
       expect(checkOf(outcome, 'opacity').detail).toContain('64→64 · 5→30 · 64.4→64 · "70"→64 · NaN→64 · null→64 · 150→100 · 100→100');
-      // 창 검사는 페이지에 테마 네 단계 · 투명도 여덟 줄을 묻는다 — screenshot 의 frames 다음, cspMeta 앞이다
+      const reopen = platform === 'win32' ? '트레이 클릭 → 보임(tray)' : "메뉴의 '열기' → 보임(menu)";
+      const escHide = checkOf(outcome, 'escHide').detail;
+      expect(escHide).toContain('① aria-modal 요소가 있는 채 Esc → 장벽 뒤 숨김 0 · tj-hide 수신 0');
+      expect(escHide).toContain('② 그 요소를 #root keydown 리스너가 동기로 지웠다(돌았다) → 창은 그대로 보임');
+      expect(escHide).toContain('③ 요소 없이 Esc → tj-hide 수신 1 · 숨김 1(request) · 파괴 안 됨 · 페이지 응답');
+      // win32 는 'request' 숨김 기록을 보자마자(같은 시각) 트레이 클릭 — 경합 창 안의 클릭이 열었다
+      expect(escHide).toContain(platform === 'win32' ? "④ 'request' 숨김 기록 0.0ms 뒤 트레이 클릭 → 보임(tray)" : `④ ${reopen}`);
+      const visibility = checkOf(outcome, 'visibility').detail;
+      expect(visibility).toContain(
+        `① ✕ → tj-hide 수신 1 · 숨김 1(request) · tj-hidden 전달 1 · <html> tapp-hidden · getBackgroundThrottling() true · 파괴 안 됨 → 300.0ms 뒤 ${reopen} · tj-shown 전달 1 · tapp-hidden 빠짐`,
+      );
+      expect(visibility).toContain(`② 스로틀 끔 → win.close() → 숨김(close) · visibilityState "visible" 인데 tapp-hidden → 300.0ms 뒤 ${reopen} · tapp-hidden 빠짐 → 스로틀 켬 · getBackgroundThrottling() true`);
+      // 창 검사는 페이지에 테마 네 단계 · 투명도 여덟 줄 · Esc 세 번 · ✕ 와 숨김 상태 다섯 번을 묻는다 — screenshot 의 frames 다음, cspMeta 앞이다
       const calls = outcome.pageCalls;
-      expect(calls.slice(calls.indexOf('frames') + 1, calls.indexOf('csp-meta'))).toStrictEqual([...Array(4).fill('theme'), ...Array(8).fill('opacity')]);
+      expect(calls.slice(calls.indexOf('frames') + 1, calls.indexOf('csp-meta'))).toStrictEqual([
+        ...Array(4).fill('theme'),
+        ...Array(8).fill('opacity'),
+        ...Array(3).fill('esc'),
+        'hidden-state',
+        'hide-button',
+        ...Array(4).fill('hidden-state'),
+      ]);
       expectEndsShown(outcome);
     },
   );
@@ -247,10 +313,16 @@ describe('tray — 최신 메뉴(새 프로필) · main 이 붙인 아이콘 · 
     expectEndsShown(outcome);
   });
 
-  it("darwin 에 Windows 메뉴('열기' 없음) → 라벨 실패 · 숨긴 창을 열 수 없다 · 끝에도 열지 못했다", async () => {
+  it("darwin 에 Windows 메뉴('열기' 없음) → 라벨 실패 · 숨긴 창을 열 수 없다 · 끝에도 열지 못했다 — 숨기고 다시 여는 escHide · visibility 도 실패", async () => {
     const outcome = await runScenario({ platform: 'darwin', main: { template: (template) => template.filter((entry) => entry.label !== '열기') } });
-    expectOnlyFailure(outcome, 'tray', ['메뉴 라벨이', "최신 메뉴에 '열기' 가 없다 — 숨긴 창을 main 의 길로 열 수 없다", '끝에 창을 main 의 길로 보인 채 두지 못했다']);
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(['tray', 'escHide', 'visibility']);
+    const tray = checkOf(outcome, 'tray').detail;
+    for (const fragment of ['메뉴 라벨이', "최신 메뉴에 '열기' 가 없다 — 숨긴 창을 main 의 길로 열 수 없다", '끝에 창을 main 의 길로 보인 채 두지 못했다']) expect(tray).toContain(fragment);
     expect(checkOf(outcome, 'screenshot').detail).toContain('보이지 않던 창을 보인 뒤'); // 뒤의 검사는 그래도 보이는 창에서 돈다
+    // escHide 는 screenshot 이 보인 창에서 ③ 까지 돌고 ④ 에서 다시 열 것이 없다 — 숨은 채 넘겨받은 visibility 는 시작하지 못한다
+    expect(checkOf(outcome, 'escHide').detail).toContain("④ 최신 메뉴에 '열기' 가 없다 — 숨긴 창을 main 의 길로 다시 열 수 없다");
+    expect(checkOf(outcome, 'visibility').detail).toContain('시작 때 창이 보이지 않는다');
+    expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
   });
 
   it.each([`십이장기 ${APP_VERSION}`, '자동 실행', '위치 초기화'])('%s 가 켜졌다 → 실패', async (label) => {
@@ -286,28 +358,36 @@ describe('tray — 최신 메뉴(새 프로필) · main 이 붙인 아이콘 · 
     expectEndsShown(outcome);
   });
 
-  it('win32 — 토글 숨김에도 경합 가드를 켠다(곧바로 연 클릭을 삼킨다) → 실패, 끝에는 경합 시간 뒤에 main 의 길로 다시 보였다', async () => {
+  it('win32 — 모든 숨김에 경합 가드를 켠다(곧바로 연 클릭을 삼킨다) → tray 실패 · Esc 숨김 직후의 클릭도 삼켜 escHide ④ 실패, 끝에는 경합 시간 뒤에 main 의 길로 다시 보였다', async () => {
     const outcome = await runScenario({ main: { guardEveryHide: true } });
-    expectOnlyFailure(outcome, 'tray', ['숨김(toggle) 기록 0.0ms 뒤의 트레이 클릭 뒤 창이 보이고 포커스를 받지 않았다(보임 false']);
-    expect(outcome.windows.map(({ action, reason }) => `${action}:${reason}`)).toStrictEqual(['show:start', 'hide:toggle', 'show:tray']);
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(['tray', 'escHide']);
+    expect(checkOf(outcome, 'tray').detail).toContain('숨김(toggle) 기록 0.0ms 뒤의 트레이 클릭 뒤 창이 보이고 포커스를 받지 않았다(보임 false');
+    expect(checkOf(outcome, 'escHide').detail).toContain('④ 트레이 클릭 뒤 5000ms 안에 창이 보이지 않았다');
+    expect(outcome.windows.slice(0, 3).map(({ action, reason }) => `${action}:${reason}`)).toStrictEqual(['show:start', 'hide:toggle', 'show:tray']);
+    expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
     expectEndsShown(outcome);
   });
 
-  it.each([
-    ['win32', 'toggle'],
-    ['darwin', 'close'],
-    ['linux', 'close'],
-  ] as const)('%s — 숨김을 다른 이유(request)로 기록한다 → 실패(이유 %s 의 숨김 기록을 받지 못했다)', async (platform, reason) => {
+  /** [갈래, tray 가 숨기는 이유, 실패하는 검사] — 닫기를 다른 이유로 기록하면 win.close() 로 숨기는 visibility ② 도 실패한다. */
+  const RELABELED: Array<[(typeof PLATFORMS)[number], 'toggle' | 'close', string[]]> = [
+    ['win32', 'toggle', ['tray']],
+    ['darwin', 'close', ['tray', 'visibility']],
+    ['linux', 'close', ['tray', 'visibility']],
+  ];
+  it.each(RELABELED)('%s — 숨김을 다른 이유(request)로 기록한다 → 실패(이유 %s 의 숨김 기록을 받지 못했다)', async (platform, reason, failed) => {
     const outcome = await runScenario({ platform, main: { relabelHide: { [reason]: 'request' } } });
     const how = platform === 'win32' ? '트레이 클릭(토글)' : 'win.close()';
-    expectOnlyFailure(outcome, 'tray', [`${how} 뒤 이유 "${reason}" 의 숨김 기록을 받지 못했다(5000ms) — 마지막 창 기록 ["show:start","hide:request"]`]);
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(failed);
+    expect(checkOf(outcome, 'tray').detail).toContain(`${how} 뒤 이유 "${reason}" 의 숨김 기록을 받지 못했다(5000ms) — 마지막 창 기록 ["show:start","hide:request"]`);
+    if (failed.includes('visibility')) expect(checkOf(outcome, 'visibility').detail).toContain('② win.close() 뒤 숨김 기록이 ["hide:request"] 다(기대 하나 — 이유 "close")');
+    expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
     expectEndsShown(outcome);
   });
 
   it('win32 — 우연한 blur(표시 320ms 뒤 OS 가 포커스를 가져갔다) → 실패(경합 단계를 증명하지 못함), 끝에는 main 의 길로 다시 보였다', async () => {
     const outcome = await runScenario({ main: { strayBlurAfterTrayShow: 320 } });
     expectOnlyFailure(outcome, 'tray', ['우연한 숨김(이유 "blur") — 경합 단계를 증명하지 못함']);
-    expect(outcome.windows.map(({ action, reason }) => `${action}:${reason}`)).toStrictEqual(['show:start', 'hide:toggle', 'show:tray', 'hide:blur', 'show:tray']);
+    expect(outcome.windows.slice(0, 5).map(({ action, reason }) => `${action}:${reason}`)).toStrictEqual(['show:start', 'hide:toggle', 'show:tray', 'hide:blur', 'show:tray']);
     expectEndsShown(outcome);
   });
 
@@ -439,7 +519,8 @@ describe('창 검사의 끝(R13) — theme · opacity 에는 숨김 규칙이 �
       },
     });
     expect(failing(outcome)).toStrictEqual([]);
-    expect(outcome.windows.slice(HEALTHY_WINDOWS.win32.length)).toStrictEqual([
+    // tray 의 기록 바로 뒤가 그 검사의 몫이다(escHide · visibility 의 기록은 그 뒤에 온다)
+    expect(outcome.windows.slice(TRAY_WINDOWS.win32.length, TRAY_WINDOWS.win32.length + 2)).toStrictEqual([
       { action: 'hide', reason: 'blur' },
       { action: 'show', reason: 'tray' },
     ]);
@@ -451,12 +532,18 @@ describe('창 검사의 끝(R13) — theme · opacity 에는 숨김 규칙이 �
   const NO_OPEN_ITEM: Scenario = { platform: 'darwin', main: { template: (template) => template.filter((entry) => entry.label !== '열기') } };
   /** win32 의 경합 가드가 3초 더 길다 — blur 숨김 뒤의 트레이 클릭을 삼켜, 다시 보이기를 기다리다 시간이 다 된다(tray 의 경합 단계도 실패한다). */
   const LONG_GUARD: Scenario = { main: { longerRace: 3_000 } };
-  /** [끝에 다시 보이지 못하는 길, 검사, 시나리오, 이유 조각, 실패하는 검사] */
+  /**
+   * [끝에 다시 보이지 못하는 길, 검사, 시나리오, 이유 조각, 실패하는 검사] — 숨은 채 넘겨받은 escHide · visibility 는 시작 때 보이지 않아
+   * 실패한다(R14 — 그 끝이 다시 열면 다음 검사는 보이는 창에서 시작한다).
+   */
   const NO_REOPEN: Array<[string, 'theme' | 'opacity', Scenario, string, string[]]> = [
-    ["누를 것이 없다(darwin 메뉴에 '열기' 없음)", 'theme', NO_OPEN_ITEM, "최신 메뉴에 '열기' 가 없다", ['tray', 'theme', 'opacity']], // 창이 숨은 채라 opacity 의 끝도 못 연다
-    ["누를 것이 없다(darwin 메뉴에 '열기' 없음)", 'opacity', NO_OPEN_ITEM, "최신 메뉴에 '열기' 가 없다", ['tray', 'opacity']],
-    ['눌러도 보이지 않는다(win32 경합 가드가 3초 더 길다 — 기다림의 시간 초과)', 'theme', LONG_GUARD, '트레이 클릭 뒤 5000ms 안에 보이지 않았다', ['tray', 'theme']], // opacity 의 끝은 가드가 풀린 뒤라 다시 연다
-    ['눌러도 보이지 않는다(win32 경합 가드가 3초 더 길다 — 기다림의 시간 초과)', 'opacity', LONG_GUARD, '트레이 클릭 뒤 5000ms 안에 보이지 않았다', ['tray', 'opacity']],
+    // 창이 숨은 채라 opacity · escHide · visibility 의 끝도 못 연다
+    ["누를 것이 없다(darwin 메뉴에 '열기' 없음)", 'theme', NO_OPEN_ITEM, "최신 메뉴에 '열기' 가 없다", ['tray', 'theme', 'opacity', 'escHide', 'visibility']],
+    ["누를 것이 없다(darwin 메뉴에 '열기' 없음)", 'opacity', NO_OPEN_ITEM, "최신 메뉴에 '열기' 가 없다", ['tray', 'opacity', 'escHide', 'visibility']],
+    // opacity 의 끝은 가드가 풀린 뒤라 다시 연다 — escHide 는 보이는 창에서 시작한다
+    ['눌러도 보이지 않는다(win32 경합 가드가 3초 더 길다 — 기다림의 시간 초과)', 'theme', LONG_GUARD, '트레이 클릭 뒤 5000ms 안에 보이지 않았다', ['tray', 'theme']],
+    // escHide 는 숨은 창을 넘겨받아 실패하고, 그 끝이 가드가 풀린 뒤 다시 연다 — visibility 는 보이는 창에서 시작한다
+    ['눌러도 보이지 않는다(win32 경합 가드가 3초 더 길다 — 기다림의 시간 초과)', 'opacity', LONG_GUARD, '트레이 클릭 뒤 5000ms 안에 보이지 않았다', ['tray', 'opacity', 'escHide']],
   ];
   it.each(NO_REOPEN)('%s · %s 도중 우연한 blur → 끝에 창을 다시 보이지 못해 그 검사가 실패한다(R13 · R12 — 숨은 창을 다음 검사로 넘기지 않는다)', async (_path, name, scenario, why, failed) => {
     const healthy = healthyPage({ files: new Map(), unmapped: [] })[name];
@@ -475,7 +562,264 @@ describe('창 검사의 끝(R13) — theme · opacity 에는 숨김 규칙이 �
     });
     expect(failing(outcome).map(([failedName]) => failedName)).toStrictEqual(failed);
     expect(checkOf(outcome, name).detail).toContain(`끝에 창을 main 의 길로 다시 보이지 못했다(${why}`);
+    for (const later of failed.filter((failedName) => failedName === 'escHide' || failedName === 'visibility')) {
+      expect(checkOf(outcome, later).detail).toContain('시작 때 창이 보이지 않는다');
+    }
     expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
+  });
+});
+
+describe('escHide — ① 대화상자가 열린 채의 Esc 는 숨기지 않는다 ② 같은 Esc 로 닫히는 대화상자도(등록 순서 무관) ③ 대화상자 없는 Esc 는 숨긴다(request) ④ 곧바로 다시 연다(win32 는 경합 창 안의 트레이 클릭)', () => {
+  /** [사례, 시나리오(결함 하나), detail 에 들 글, 통과하는 단계] — escHide 만 실패한다(끝에 창을 다시 보여 visibility 는 보이는 창에서 돈다). */
+  const CASES: Array<[string, Scenario, string[], string[]]> = [
+    ['Esc 처리기가 없다 — ③ 이 숨지 않는다', { renderer: { noEsc: true } }, ['③ tj-hide 수신이 0번이다(기대 1번)', '③ 숨김 기록이 [] 다(기대 하나 — 이유 "request")'], ['①', '②', '④']],
+    [
+      '대화상자 순서 의존(캡처 리스너 없이 버블에서 그때의 대화상자를 본다) — ② 가 잡는다',
+      { renderer: { escNoCapture: true } },
+      ['② 대화상자(aria-modal)가 열려 있는데 Esc 로 숨었다 — tj-hide 수신 1번 · 새 창 기록 ["hide:request"]'],
+      ['①', '③', '④'],
+    ],
+    ['win32 — Esc 숨김에도 경합 가드를 켠다 — ④ 의 곧바로 한 트레이 클릭을 삼킨다', { main: { guardRequestHide: true } }, ['④ 트레이 클릭 뒤 5000ms 안에 창이 보이지 않았다'], ['①', '②', '③']],
+  ];
+  it.each(CASES)('%s → 실패, 끝에는 main 의 길로 다시 보였다', async (_label, scenario, fragments, quietSteps) => {
+    const outcome = await runScenario(scenario);
+    // 실패 detail 은 단계 표식으로 시작하는 문제들을 '; ' 로 이은 것이다
+    const problems = expectOnlyFailure(outcome, 'escHide', fragments).detail.split('; ');
+    for (const step of quietSteps) expect(problems.filter((problem) => problem.startsWith(step)), `${step} 단계는 통과한다`).toStrictEqual([]);
+    expectEndsShown(outcome);
+  });
+
+  it("main 이 tj-hide 를 이유 'blur' 로 기록한다 → escHide ③ 과 visibility ① 이 실패한다(Esc 와 ✕ 는 같은 tj-hide 다) · 'request' 숨김이 없어 ④ 는 하지 않는다", async () => {
+    const outcome = await runScenario({ main: { relabelHide: { request: 'blur' } } });
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(['escHide', 'visibility']);
+    const escHide = checkOf(outcome, 'escHide').detail;
+    expect(escHide).toContain('③ 숨김 기록이 ["hide:blur"] 다(기대 하나 — 이유 "request")');
+    expect(escHide).not.toContain('④');
+    expect(checkOf(outcome, 'visibility').detail).toContain('① 숨김 기록이 ["hide:blur"] 다(기대 하나 — 이유 "request")');
+    expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
+    expectEndsShown(outcome);
+  });
+
+  it('우연한 blur(① 도중 OS 가 포커스를 가져갔다) → 그 숨김의 이유를 상세에 적고 멈춘다, 끝에 경합 시간 뒤 트레이 클릭으로 다시 보였다', async () => {
+    const outcome = await runScenario({
+      page: {
+        esc: (arg, app) => {
+          if (arg === 'open') app.osBlur();
+          return HEALTHY_PAGE.esc?.(arg, app);
+        },
+      },
+    });
+    const problems = expectOnlyFailure(outcome, 'escHide', ['① 우연한 숨김(이유 "blur") — 이 검사가 일으키지 않은 숨김이다']).detail.split('; ');
+    expect(problems.filter((problem) => /^[②③④]/.test(problem)), '멈춘 뒤의 단계는 돌지 않는다').toStrictEqual([]);
+    expect(outcome.pageCalls.filter((name) => name === 'esc')).toStrictEqual(['esc']);
+    expect(outcome.windows.slice(TRAY_WINDOWS.win32.length, TRAY_WINDOWS.win32.length + 2)).toStrictEqual([
+      { action: 'hide', reason: 'blur' },
+      { action: 'show', reason: 'tray' },
+    ]);
+    expectEndsShown(outcome);
+  });
+
+  it("win32 — 실행기가 'request' 숨김 기록을 경합 시간이 지나서야 봤다(main 이 300ms 바빴다) → ④ 의 시각 단언이 실패한다(창은 열렸다 — 경합 가드를 증명하지 못했을 뿐이다)", async () => {
+    const outcome = await runScenario({
+      page: {
+        esc: (arg, app) => {
+          const seen = HEALTHY_PAGE.esc?.(arg, app);
+          // Esc 숨김이 기록된 뒤 실행기가 그 기록을 보기 전에 300ms 가 지난다
+          if (arg === 'none') vi.advanceTimersByTime(300);
+          return seen;
+        },
+      },
+    });
+    const check = expectOnlyFailure(outcome, 'escHide', ["④ 트레이 클릭이 'request' 숨김 기록 300.0ms 뒤였다(경합 시간 250ms 안이어야 한다)"]);
+    expect(check.detail).not.toContain('보이지 않았다');
+    expectEndsShown(outcome);
+  });
+
+  it("숨은 창의 페이지가 ③ 에 늦게 답한다(400ms) → ④ 는 그 답을 기다리지 않고 'request' 숨김 기록을 보자마자 연다(경합 창 안) → ok", async () => {
+    const outcome = await runScenario({
+      page: {
+        esc: (arg, app) => {
+          const seen = HEALTHY_PAGE.esc?.(arg, app);
+          return arg === 'none' ? new Promise((resolve) => setTimeout(() => resolve(seen), 400)) : seen;
+        },
+      },
+    });
+    expect(failing(outcome)).toStrictEqual([]);
+    expect(checkOf(outcome, 'escHide').detail).toContain("④ 'request' 숨김 기록 0.0ms 뒤 트레이 클릭 → 보임(tray)");
+  });
+
+  it('③ 의 페이지 호출이 거부됐다(창은 살아 있다) → 페이지 응답이 없어 실패 · ④ 는 숨김 기록을 보고 다시 열었다', async () => {
+    const outcome = await runScenario({
+      page: {
+        esc: (arg, app) => {
+          const seen = HEALTHY_PAGE.esc?.(arg, app);
+          if (arg === 'none') throw new Error('렌더러 오류');
+          return seen;
+        },
+      },
+    });
+    const check = expectOnlyFailure(outcome, 'escHide', ['③ 페이지가 응답하지 않았다(렌더러 오류)']);
+    expect(check.detail).not.toContain('④');
+    expect(outcome.windows.slice(TRAY_WINDOWS.win32.length, TRAY_WINDOWS.win32.length + 2)).toStrictEqual([
+      { action: 'hide', reason: 'request' },
+      { action: 'show', reason: 'tray' },
+    ]);
+    expectEndsShown(outcome);
+  });
+
+  /** [단계, 그 단계의 대화상자 갈래, 페이지가 바꿔 답하는 사실, detail 에 들 글] — 전제가 서지 않은 단계는 아무것도 증명하지 못해 실패한다. */
+  const PREMISES: Array<[string, 'open' | 'closes' | 'none', Record<string, unknown>, string]> = [
+    ['①', 'open', { dialog: false }, '① Esc 를 보낼 때 aria-modal 요소가 없었다(false) — 대화상자 단계를 증명하지 못함'],
+    [
+      '②',
+      'closes',
+      { ran: false, removed: false },
+      '② #root keydown 리스너가 aria-modal 요소를 지우지 않았다(보낼 때 요소 true · 리스너 false · 지움 false) — 등록 순서와 상관없음을 증명하지 못함',
+    ],
+    ['③', 'none', { dialog: true }, '③ Esc 를 보낼 때 aria-modal 요소가 있었다(true) — 대화상자 없는 단계가 아니다'],
+  ];
+  it.each(PREMISES)('%s 의 전제가 페이지에서 서지 않았다 → 그 단계를 증명하지 못해 실패', async (_step, mode, over, fragment) => {
+    const outcome = await runScenario({
+      page: {
+        esc: (arg, app) => {
+          const seen = HEALTHY_PAGE.esc?.(arg, app) as Record<string, unknown>;
+          return arg === mode ? { ...seen, ...over } : seen;
+        },
+      },
+    });
+    expectOnlyFailure(outcome, 'escHide', [fragment]);
+    expectEndsShown(outcome);
+  });
+});
+
+describe('visibility — ① 진짜 ✕ → 숨김(request) · tj-hidden · tapp-hidden · 스로틀 켬 → 다시 보임 · tj-shown · 빠짐 ② 스로틀 끈 win.close() → visible 인데 tapp-hidden → 다시 보임 · 빠짐 → 스로틀 켬', () => {
+  /** [사례, 시나리오(결함 하나), detail 에 들 글, 통과하는 단계, detail 에 없어야 할 글] — visibility 만 실패한다. */
+  const CASES: Array<[string, Scenario, string[], string[], string[]]> = [
+    [
+      '렌더러가 visibilitychange 로 움직인다 — ② 가 잡는다(스로틀을 끈 숨긴 창은 visible 이다)',
+      { renderer: { visibilityDriven: true } },
+      ['② visibilityState "visible" 인 채 <html> 에 tapp-hidden 이 5000ms 안에 붙지 않았다'],
+      ['①'],
+      [],
+    ],
+    ['✕ 단추에 처리기가 없다 — ① 이 숨지 않는다(② 는 돈다)', { renderer: { noHideButton: true } }, ['① tj-hide 수신이 0번이다(기대 1번)', '① 숨김 기록이 없다'], ['②'], []],
+    [
+      'main 이 숨어도 tj-hidden 을 밀지 않는다 — 전달 기록이 없고 클래스가 따라오지 않는다',
+      { main: { noHiddenPush: true } },
+      ['① 새 tj-hidden 전달이 0번이다(기대 1번)', '① <html> 에 tapp-hidden 이 5000ms 안에 붙지 않았다', '② visibilityState "visible" 인 채 <html> 에 tapp-hidden 이 5000ms 안에 붙지 않았다'],
+      [],
+      [],
+    ],
+    [
+      'main 이 보여도 tj-shown 을 밀지 않는다 — 다시 보인 뒤 클래스가 빠지지 않는다(앞의 숨김에서 붙은 것도 남았다)',
+      { main: { noShownPush: true } },
+      [
+        '시작 때 <html> 의 tapp-hidden 이 true 다',
+        '① 다시 보인 뒤 tj-shown 전달이 0번이다(기대 1번)',
+        '① 다시 보인 뒤 <html> 의 tapp-hidden 이 5000ms 안에 빠지지 않았다',
+        '② 다시 보인 뒤 <html> 의 tapp-hidden 이 5000ms 안에 빠지지 않았다',
+      ],
+      [],
+      [],
+    ],
+    [
+      '렌더러가 tj-shown 을 받아도 tapp-hidden 을 빼지 않는다 — 전달은 됐다',
+      { renderer: { keepHiddenClass: true } },
+      ['시작 때 <html> 의 tapp-hidden 이 true 다', '① 다시 보인 뒤 <html> 의 tapp-hidden 이 5000ms 안에 빠지지 않았다', '② 다시 보인 뒤 <html> 의 tapp-hidden 이 5000ms 안에 빠지지 않았다'],
+      [],
+      ['tj-shown 전달이'],
+    ],
+    [
+      '스로틀이 돌아오지 않는다(한 번 끄면 setBackgroundThrottling(true) 가 듣지 않는다)',
+      { throttle: 'sticky' },
+      ['② setBackgroundThrottling(true) 뒤 getBackgroundThrottling() 이 false 다 — 스로틀이 돌아오지 않았다'],
+      ['①'],
+      [],
+    ],
+    [
+      '스로틀이 처음부터 꺼져 있다(main 이 setThrottling(false) 를 불렀다 — #21 에는 부르는 곳이 없다) — ① 이 잡는다',
+      { throttle: 'off' },
+      ['① 숨긴 동안 getBackgroundThrottling() 이 false 다(기대 true — 기본 켬)'],
+      ['②'],
+      [],
+    ],
+    [
+      '스로틀을 꺼도 듣지 않는다(숨긴 창이 hidden 이 된다) — ② 의 양성 기록이 서지 않는다',
+      { throttle: 'ignored' },
+      ['② 스로틀을 끈 숨긴 창의 visibilityState 가 "hidden" 다(기대 "visible"'],
+      ['①'],
+      ['tapp-hidden 이 5000ms 안에'],
+    ],
+    ['win.close() 가 숨기지 않는다(main 이 close 를 막고 숨기지 않는다)', { main: { closeIgnored: true } }, ['② win.close() 뒤 5000ms 안에 숨김 기록이 없다(보임 true)'], ['①'], []],
+  ];
+  it.each(CASES)('%s → 실패, 끝에는 보이는 창', async (_label, scenario, fragments, quietSteps, absent) => {
+    const outcome = await runScenario(scenario);
+    const check = expectOnlyFailure(outcome, 'visibility', fragments);
+    const problems = check.detail.split('; ');
+    for (const step of quietSteps) expect(problems.filter((problem) => problem.startsWith(step)), `${step} 단계는 통과한다`).toStrictEqual([]);
+    for (const text of absent) expect(check.detail).not.toContain(text);
+    // 이 검사가 끈 스로틀은 — 다시 켜기 전에 멈춰도(win.close() 가 숨기지 않는다) — 끝에 다시 켰다('sticky' 는 켜지지 않아 실패로 적었다)
+    expect(outcome.throttling).toBe(scenario.throttle !== 'sticky');
+    expectEndsShown(outcome);
+  });
+
+  it('win32 — ✕ 숨김의 경합 가드가 경합 시간 + 여유보다 오래 간다 → ① 의 다시 열기가 보이지 않아 ② 전에 멈춘다, 끝에 다시 보였다', async () => {
+    const outcome = await runScenario({ main: { guardRequestHide: true, longerRace: 1_000 } });
+    // 더 긴 가드는 blur 숨김(tray 의 경합 단계) · Esc 숨김(escHide ④)도 삼킨다
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(['tray', 'escHide', 'visibility']);
+    const problems = checkOf(outcome, 'visibility').detail.split('; ');
+    expect(problems.some((problem) => problem.startsWith('① 트레이 클릭 뒤 5000ms 안에 창이 보이지 않았다')), problems.join('\n')).toBe(true);
+    expect(problems.filter((problem) => problem.startsWith('②')), '② 는 돌지 않는다').toStrictEqual([]);
+    expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
+    expectEndsShown(outcome);
+  });
+});
+
+describe('창 파괴(R29) — 창 검사는 파괴된 창을 만지지 않고 그 검사의 판정으로 적는다(뒤의 능동 검사는 파괴된 창에서 stage 실패로 끝낸다)', () => {
+  /** 그 태그의 n 번째 페이지 호출(1부터)에서 건강한 처리기를 돈 뒤 창을 파괴한다 — throws 면 그 호출은 거부된다(파괴된 창의 페이지 호출). */
+  const destroyOn = (tag: string, n: number, { throws = false } = {}): Scenario => {
+    let calls = 0;
+    return {
+      page: {
+        [tag]: (arg, app) => {
+          calls += 1;
+          const seen = HEALTHY_PAGE[tag]?.(arg, app);
+          if (calls !== n) return seen;
+          app.destroyWindow();
+          if (throws) throw new Error('Render frame was disposed before WebFrameMain could be accessed');
+          return seen;
+        },
+      },
+    };
+  };
+  /** [사례, 시나리오(만든다), 판정으로 실패하는 창 검사, 그 검사의 상세에 들 글] */
+  const CASES: Array<[string, () => Scenario, string[], Record<string, string>]> = [
+    [
+      'theme ① 도중',
+      () => destroyOn('theme', 1),
+      ['theme', 'opacity', 'escHide', 'visibility'],
+      {
+        theme: '① getBackgroundColor() 가 "(창 파괴)" 다',
+        opacity: '64→64 전에 트레이 창이 파괴됐다 — 검사를 멈춘다',
+        escHide: '시작 전에 트레이 창이 파괴됐다 — 검사를 멈춘다',
+        visibility: '시작 전에 트레이 창이 파괴됐다 — 검사를 멈춘다',
+      },
+    ],
+    ['opacity 첫 줄 도중', () => destroyOn('opacity', 1), ['opacity', 'escHide', 'visibility'], { opacity: '64→64: 트레이 창이 파괴됐다 — getOpacity() 를 읽지 못함' }],
+    ['escHide ③ 도중(그 페이지 호출은 거부된다)', () => destroyOn('esc', 3, { throws: true }), ['escHide', 'visibility'], { escHide: '③ 도중에 트레이 창이 파괴됐다 — 검사를 멈춘다' }],
+    ['visibility ② 의 win.close() 가 창을 파괴한다(main 이 close 를 막지 않는다)', () => ({ main: { closeDestroys: true } }), ['visibility'], { visibility: '② win.close() 뒤 트레이 창이 파괴됐다 — 검사를 멈춘다' }],
+  ];
+  it.each(CASES)('%s → 판정으로 실패 · 끝에도 만지지 않는다 · 다음 능동 검사(cspMeta)가 stage 실패로 끝낸다', async (_label, scenario, failed, fragments) => {
+    const { value: outcome, lines } = await withTjLines(() => runFast(scenario()));
+    expect(outcome.result.stage).toBe('check:cspMeta');
+    expect(String(outcome.result.error)).toBe('Object has been destroyed');
+    expect(outcome.exits).toStrictEqual([1]);
+    expect(lines).toHaveLength(1);
+    // 실패 결과에도 그때까지의 검사가 실린다 — 창 검사는 던지지 않고 판정을 남겼다
+    expect(outcome.checks.map((entry) => entry.name)).toStrictEqual(BEFORE_CONDITIONAL.slice(0, BEFORE_CONDITIONAL.indexOf('cspMeta')));
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(failed);
+    for (const [name, fragment] of Object.entries(fragments)) expect(checkOf(outcome, name).detail).toContain(fragment);
+    for (const name of failed) expect(checkOf(outcome, name).detail).toContain('끝에 창을 main 의 길로 다시 보이지 못했다(트레이 창이 파괴됐다)');
   });
 });
 
@@ -1273,22 +1617,7 @@ describe('net — --net: 인증 설정 200 · Realtime 소켓 연결(join 응답
 
   it('net() 이 끝나지 않는다 → 실행기의 상한(30초)에서 check:net 으로 끝난다(감시 타이머 60초 전) · [tj] 한 줄', async () => {
     // 실행기의 fail 은 stderr(fd 2)에 '[tj] …' 를 쓴다 — 모아서 본다(시험 출력에 내보내지 않는다)
-    const nodeFs = require('node:fs') as { writeSync: (...args: unknown[]) => unknown };
-    const realWriteSync = nodeFs.writeSync;
-    const lines: string[] = [];
-    nodeFs.writeSync = (fd: unknown, data: unknown, ...rest: unknown[]): unknown => {
-      if (fd === 2 && typeof data === 'string' && data.startsWith('[tj] ')) {
-        lines.push(data);
-        return Buffer.byteLength(data);
-      }
-      return Reflect.apply(realWriteSync, nodeFs, [fd, data, ...rest]);
-    };
-    let outcome: Outcome;
-    try {
-      outcome = await runFast({ build: 'real', net: true, page: { net: () => new Promise(() => {}) } });
-    } finally {
-      nodeFs.writeSync = realWriteSync;
-    }
+    const { value: outcome, lines } = await withTjLines(() => runFast({ build: 'real', net: true, page: { net: () => new Promise(() => {}) } }));
     expect(outcome.result.stage).toBe('check:net');
     expect(String(outcome.result.error)).toBe('페이지 net(): 30000ms 안에 끝나지 않았다');
     expect(outcome.exits).toStrictEqual([1]);

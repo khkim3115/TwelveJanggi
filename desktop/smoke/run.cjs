@@ -19,12 +19,12 @@
 //   스모크가 이 PC 에 개발용 electron.exe 를 로그인 항목으로 남기지 않는다(기록만 하면 늦게 알 뿐 막지 못한다). loginItem 이 대체 함수가
 //   그대로 서 있고 쓰기를 하나도 받지 않았는지, 첫 실행 갈래가 돌아 가드에 닿았는지(양성 대조)를 판정한다.
 // - 단계(첫 did-finish-load 뒤): 장벽(페이지가 getAppInfo 왕복 뒤 표식을 콘솔에 찍고, 수집기가 그 표식을 받는다) → 수동 검사(boot ·
-//   webPreferences · sandboxEffective · bridge · ipc · mime · securityWarnings · tray · screenshot) → 창 검사(window.cjs — theme · opacity,
-//   끝에 창을 보인 채 둔다) → 능동 검사(active.cjs — cspMeta · cspHeader · protocol · ai · navigation · permissions · .invalid 빌드의
-//   connectAllowed · --net 의 net) → 장벽 → cspViolations · consoleErrors → canary 단계(cspCanary) → 마감(noNetwork · loginItem — 모든 페이지
-//   활동 뒤) → 결과 쓰기 → '종료' 클릭. connectAllowed · net 은 이번 실행의 필수 검사(requiredChecks)가 요구할 때만 돈다.
-// - 실행기의 사실 · 도우미(아래 클로저 — mark · 창을 main 의 길로 보이고 숨기기 · endShown · 설정 파일 읽기)는 창 검사 · 능동 검사에 ctx 로
-//   넘긴다(그 파일들은 run.cjs 를 require 하지 않는다 — 순환).
+//   webPreferences · sandboxEffective · bridge · ipc · mime · securityWarnings · tray · screenshot) → 창 검사(window.cjs — theme · opacity ·
+//   escHide · visibility, 끝마다 창을 보인 채 둔다) → 능동 검사(active.cjs — cspMeta · cspHeader · protocol · ai · navigation · permissions ·
+//   .invalid 빌드의 connectAllowed · --net 의 net) → 장벽 → cspViolations · consoleErrors → canary 단계(cspCanary) → 마감(noNetwork ·
+//   loginItem — 모든 페이지 활동 뒤) → 결과 쓰기 → '종료' 클릭. connectAllowed · net 은 이번 실행의 필수 검사(requiredChecks)가 요구할 때만 돈다.
+// - 실행기의 사실 · 도우미(아래 클로저 — mark · 트레이 클릭 기록 · 창을 main 의 길로 보이기 · endShown · 설정 파일 읽기)는 창 검사 · 능동
+//   검사에 ctx 로 넘긴다(그 파일들은 run.cjs 를 require 하지 않는다 — 순환).
 // - 원격 요청은 계획(remote.cjs) 하나를 따른다: 가드는 --net 의 두 요청만 통과시키고 나머지는 기록하고 취소하며, noNetwork 는 계획의 기대
 //   목록과 기록을 견준다.
 // - 실패(60초 감시 타이머 · 수집기의 render-process-gone · preload-error · unresponsive · 메인 프레임 did-fail-load · 던진 단계 · main 이
@@ -149,7 +149,12 @@ const SCREENSHOT_FILE = 'screenshot.png';
  */
 /**
  * 사실 목록의 길이 — mark() 가 잰 자리. 그 뒤에 온 것만 보려면 목록.slice(자리)다.
- * @typedef {{ window: number, sent: number, loginItem: number, hideReceipts: number, opacityReceipts: number, menus: number }} FactMark
+ * @typedef {{ window: number, sent: number, loginItem: number, hideReceipts: number, opacityReceipts: number, menus: number, trayClicks: number }} FactMark
+ */
+/**
+ * 실행기가 트레이 좌클릭을 낸 때(clickTray — 처리기를 부르기 직전의 performance.now(), 창 기록의 at 과 같은 시계). escHide ④ 가 숨김 기록과
+ * 견준다(경합 창 안의 클릭인가).
+ * @typedef {{ at: number }} TrayClick
  */
 /**
  * 프로필의 settings.json 한 번 읽은 것 — 정규화하지 않은 JSON(raw)이다. 읽지 못했으면(없음 · JSON 이 아님) error 가 그 이유다.
@@ -295,6 +300,8 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
     icon: null,
     /** @type {import('electron').Menu[]} main 이 넘긴 메뉴(넘긴 차례 — 맨 뒤가 menu) */
     menus: [],
+    /** @type {TrayClick[]} 실행기가 낸 트레이 좌클릭(낸 차례) */
+    trayClicks: [],
   };
   // 쓸 때와 같은 인자로 읽는다(Windows 의 openAtLogin 은 등록한 인자로 물을 때만 참이다) — main 의 첫 실행 기본값보다 먼저
   const loginItemAtStart = readLoginItem();
@@ -317,11 +324,11 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
     platform,
     win: trayWindow,
     menus: state.menus,
+    trayClicks: state.trayClicks,
     page,
     mark,
-    clickTray,
     openViaMain,
-    hideViaMain,
+    openPath,
     windowTrail,
     endShown,
     timingMarginMs: TIMING_MARGIN_MS,
@@ -580,16 +587,20 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
       hideReceipts: facts.hideReceipts.length,
       opacityReceipts: facts.opacityReceipts.length,
       menus: state.menus.length,
+      trayClicks: state.trayClicks.length,
     };
   }
 
   /**
-   * 트레이 좌클릭 — main 이 단 click 처리기(win32)를 Electron 의 사건 모양으로 부른다. 처리기가 있었으면 true.
+   * 트레이 좌클릭 — main 이 단 click 처리기(win32)를 Electron 의 사건 모양으로 부른다. 낼 때마다 그 시각을 state.trayClicks 에 적는다(처리기를
+   * 부르기 직전 — escHide ④ 가 숨김 기록과 견준다). 처리기가 있었으면 true.
    * @returns {boolean}
    */
   function clickTray() {
     const tray = state.tray;
-    return tray !== null && !tray.isDestroyed() && tray.emit('click', ...TRAY_CLICK_ARGS);
+    if (tray === null || tray.isDestroyed()) return false;
+    state.trayClicks.push({ at: performance.now() });
+    return tray.emit('click', ...TRAY_CLICK_ARGS);
   }
 
   /**
@@ -679,9 +690,9 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
   }
 
   /**
-   * 첫 did-finish-load 뒤 — 장벽 → 수동 검사 → 창 검사(theme · opacity — screenshot 바로 뒤, 보이는 창에서 시작하고 보이는 창으로 끝낸다) →
-   * 능동 검사(보이는 다크 창에서 돈다) → 장벽 → cspViolations · consoleErrors → canary → 마감(noNetwork · loginItem) → 결과 쓰기 → 트레이
-   * 메뉴 '종료'. 검사 하나가 던지면 거기서 끝난다(그 검사의 실패 단계).
+   * 첫 did-finish-load 뒤 — 장벽 → 수동 검사 → 창 검사(theme · opacity · escHide · visibility — screenshot 바로 뒤, 보이는 창에서 시작하고
+   * 보이는 창으로 끝낸다) → 능동 검사(보이는 다크 창에서 돈다) → 장벽 → cspViolations · consoleErrors → canary → 마감(noNetwork · loginItem)
+   * → 결과 쓰기 → 트레이 메뉴 '종료'. 검사 하나가 던지면 거기서 끝난다(그 검사의 실패 단계).
    */
   async function runChecks() {
     const opening = await step('barrier', barrier);
@@ -701,6 +712,8 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
       ['screenshot', checkScreenshot],
       ['theme', windowChecks.theme],
       ['opacity', windowChecks.opacity],
+      ['escHide', windowChecks.escHide],
+      ['visibility', windowChecks.visibility],
       ['cspMeta', active.cspMeta],
       ['cspHeader', active.cspHeader],
       ['protocol', active.protocol],

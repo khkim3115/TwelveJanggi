@@ -8,9 +8,13 @@
 //   record 로, 만든 메뉴와 아이콘을 setTray 로 넘긴다. 설정 저장은 main 처럼 가짜 시계의 300ms 예약이다(프로필의 settings.json). 메뉴 항목 ·
 //   아이콘 · 로그인 항목(Windows 흉내 — approved 포함)은 mainWiring 의 가짜 electron 과 같은 것(fakeElectron.ts 의 fakeMenuItems ·
 //   fakeImageFromPath · createFakeLoginItems)을 쓴다. 사례는 Scenario.main 으로 main 의 결함 하나를 고른다.
-// - 가짜 렌더러(src/tray/trayState.ts 흉내) — main 이 민 tj-theme 를 <html data-theme> 과 저장값(tj_theme)에 반영한다. 페이지의 테마 ·
-//   투명도 처리기는 렌더러의 send 뒤에 main 의 getState 를 부른다(같은 IPC 순서 — 앞의 send 가 먼저 처리된다). 사례는 Scenario.renderer 로
-//   렌더러의 결함 하나를 고른다.
+// - 가짜 렌더러(src/tray/trayState.ts 흉내) — main 이 민 tj-theme 를 <html data-theme> 과 저장값(tj_theme)에, tj-hidden · tj-shown 을 <html>
+//   의 tapp-hidden 에 반영한다. 페이지의 테마 · 투명도 처리기는 렌더러의 send 뒤에 main 의 getState 를 부른다(같은 IPC 순서 — 앞의 send 가
+//   먼저 처리된다). Esc 는 src/tray/esc.ts 의 처리기 그대로(window 캡처에서 대화상자를 찍고 버블에서 정한다 — 페이지의 #root 리스너는 그
+//   사이에 돈다), ✕ 는 tj-hide 다. visibilityState 는 Electron 규칙(한 번 보인 뒤 숨기고 스로틀이 켜져 있을 때만 hidden)으로 계산한다.
+//   사례는 Scenario.renderer 로 렌더러의 결함 하나를 고른다.
+// - 트레이 창은 파괴할 수 있다(FakeApp.destroyWindow · main 이 close 를 막지 않는 결함) — 그 뒤 창 · webContents 의 멤버는 isDestroyed 말고
+//   모두 TypeError('Object has been destroyed') 를 던지고(Electron), 흉내 낸 main 은 파괴된 창을 만지지 않는다(main.js 의 liveWindow).
 // - 갈래(Scenario.platform, 기본 win32)는 실행기에 넘기는 platform 과 흉내 낸 main 만 따른다. 그 전부터 있던 검사(ipc · sandboxEffective ·
 //   securityWarnings)와 AppInfo.platform 은 호스트 값 그대로다.
 // - IPC 가짜는 채널마다 리스너를 여럿 갖고(main 의 처리기 → 실행기의 수신 기록), 렌더러의 send 는 그 채널의 리스너를 모두 부른다.
@@ -35,6 +39,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, vi } from 'vitest';
 import { buildTrayBuildInfo, buildTrayCsp } from '../../scripts/trayBuild.ts';
+import { createEscHandlers, type EscInput } from '../../src/tray/esc.ts';
 import {
   createFakeLoginItems,
   fakeImageFromPath,
@@ -157,8 +162,13 @@ const SCREEN = {
   getSize: () => ({ width: 4, height: 4 }),
 };
 
-/** 가짜 렌더러가 그린 페이지 — <html data-theme> 과 저장값(localStorage.tj_theme, 없으면 null). */
-export type FakeDom = { dataTheme: string; stored: string | null };
+/**
+ * 가짜 렌더러가 그린 페이지 — <html data-theme> 과 저장값(localStorage.tj_theme, 없으면 null), <html> 의 tapp-hidden(main 이 민 tj-hidden ·
+ * tj-shown 을 따른다), 페이지가 넣은 aria-modal 요소가 있는가(escHide 의 대화상자 — 렌더러의 isDialogOpen 이 본다).
+ */
+export type FakeDom = { dataTheme: string; stored: string | null; hiddenClass: boolean; dialog: boolean };
+/** 페이지가 읽는 <html> 의 tapp-hidden 과 document.visibilityState(pageScripts.cjs 의 HIDDEN_STATE_SCRIPT). */
+export type HiddenState = { hiddenClass: boolean; visibilityState: 'visible' | 'hidden' };
 /** 가짜 앱 — 페이지 처리기가 사실을 낼 때 쓰는 자리(콘솔 · 위반 · 원격 요청 · 탐색 · 결정 기록 · 렌더러의 send · getState). */
 export type FakeApp = {
   build: TrayBuild;
@@ -181,10 +191,21 @@ export type FakeApp = {
   send(channel: string, ...payload: unknown[]): void;
   /** 렌더러의 getState()(invoke tj-get-state) — main 메모리의 스냅샷. 앞의 send 를 main 이 먼저 처리했다(같은 IPC 순서) */
   getState(): unknown;
-  /** 가짜 렌더러가 그린 페이지 — main 이 민 tj-theme 를 반영한다(Scenario.renderer 의 결함이 없으면) */
+  /** 가짜 렌더러가 그린 페이지 — main 이 민 tj-theme · tj-hidden · tj-shown 을 반영한다(Scenario.renderer 의 결함이 없으면) */
   dom: FakeDom;
+  /**
+   * 페이지가 만든 Escape keydown 을 #root 안 요소에서 보낸다 — window 캡처(렌더러의 Esc 처리기) → #root 버블(rootListener — 페이지가 단 것) →
+   * window 버블(렌더러 — 여기서 숨길지 정한다)
+   */
+  pressEscape(rootListener?: () => void): void;
+  /** 진짜 ✕(button[aria-label="숨기기"]) 를 누른다 — 렌더러의 onClick(tjDesktop.hide → tj-hide) */
+  pressHideButton(): void;
+  /** 지금의 <html> tapp-hidden 과 visibilityState */
+  hiddenState(): HiddenState;
   /** OS 가 창의 포커스를 가져간다(우연한 blur — 실행기가 일으키지 않은 숨김의 시작) */
   osBlur(): void;
+  /** 트레이 창을 파괴한다(시험 손잡이) — 그 뒤 창 · webContents 의 멤버는 isDestroyed 말고 모두 던진다 */
+  destroyWindow(): void;
   /** 이 PC 의 로그인 항목(Windows 흉내) — 실행 도중에 바꾸면 다른 프로그램 · 작업 관리자가 바꾼 것이다 */
   loginItems: FakeLoginItem[];
 };
@@ -208,6 +229,16 @@ export type MainFlaw = {
   relabelHide?: Partial<Record<HideReason, string>>;
   /** 모든 숨김의 시각을 경합 가드에 남긴다(blur 숨김만 남겨야 한다 — 토글 · 닫기 직후의 클릭을 삼킨다) */
   guardEveryHide?: boolean;
+  /** tj-hide(Esc · ✕) 숨김의 시각도 경합 가드에 남긴다 — 그 숨김 직후의 트레이 클릭을 삼킨다(토글 · 닫기는 그대로) */
+  guardRequestHide?: boolean;
+  /** 창이 숨어도 렌더러에 tj-hidden 을 밀지 않는다 */
+  noHiddenPush?: boolean;
+  /** 창이 보여도 렌더러에 tj-shown 을 밀지 않는다 */
+  noShownPush?: boolean;
+  /** close 를 막지 않는다 — win.close()(OS 닫기)가 창을 숨기지 않고 파괴한다 */
+  closeDestroys?: boolean;
+  /** close 를 막기만 하고 숨기지 않는다 — win.close() 가 아무것도 하지 않는다 */
+  closeIgnored?: boolean;
   /** 경합 가드가 없다 — 트레이 클릭은 보이면 숨기고 아니면 보인다 */
   noRaceGuard?: boolean;
   /** 경합 가드를 이만큼(ms) 더 오래 건다 */
@@ -247,12 +278,28 @@ export type MainFlaw = {
   opacityNoWindow?: boolean;
 };
 
-/** 가짜 렌더러의 결함 하나(사례가 고른다). 주지 않은 것은 src/tray/trayState.ts 와 같다(받은 테마를 data-theme · 저장값에 반영한다). */
+/**
+ * 가짜 렌더러의 결함 하나(사례가 고른다). 주지 않은 것은 src/tray 와 같다 — 받은 테마를 data-theme · 저장값에, tj-hidden · tj-shown 을
+ * tapp-hidden 에 반영하고(trayState.ts), Esc 는 esc.ts 의 캡처 · 버블 처리기, ✕ 는 tjDesktop.hide() 다(TrayApp.tsx).
+ */
 export type RendererFlaw = {
   /** 받은 테마를 저장값(localStorage.tj_theme)에 쓰지 않는다 — 처음 스냅샷 때도 */
   noStoreTheme?: boolean;
   /** 받은 테마로 <html data-theme> 을 바꾸지 않는다(첫 페인트의 dark 그대로) */
   noDataTheme?: boolean;
+  /** Esc 처리기가 없다(window 에 keydown 리스너를 걸지 않았다) */
+  noEsc?: boolean;
+  /**
+   * Esc 의 캡처 리스너가 없다 — 버블 단계에서 그때의 isDialogOpen() 으로 정한다(같은 Esc 로 먼저 닫힌 대화상자 때문에 창까지 숨는다 — 등록
+   * 순서 의존)
+   */
+  escNoCapture?: boolean;
+  /** ✕ 단추에 처리기가 없다(눌러도 tj-hide 를 보내지 않는다) */
+  noHideButton?: boolean;
+  /** <html> 의 tapp-hidden 을 tj-hidden · tj-shown 이 아니라 visibilitychange(document.visibilityState)로 바꾼다 */
+  visibilityDriven?: boolean;
+  /** tj-shown 을 받아도 tapp-hidden 을 빼지 않는다 */
+  keepHiddenClass?: boolean;
 };
 
 export type Scenario = {
@@ -293,6 +340,12 @@ export type Scenario = {
   main?: MainFlaw;
   /** 가짜 렌더러의 결함 하나 */
   renderer?: RendererFlaw;
+  /**
+   * 트레이 창 webContents 의 스로틀(기본은 Electron 처럼 켜진 채 시작하고 setBackgroundThrottling 을 따른다) — sticky: 한 번 끄면
+   * setBackgroundThrottling(true) 가 듣지 않는다(끈 스로틀이 돌아오지 않는다) · ignored: setBackgroundThrottling(false) 가 듣지 않는다(숨긴 창이
+   * hidden 이 된다) · off: 꺼진 채 시작한다(main 이 setThrottling(false) 를 부른 것과 같다 — #21 에는 부르는 곳이 없다)
+   */
+  throttle?: 'sticky' | 'ignored' | 'off';
   /** 실행기를 만든 뒤 app.setLoginItemSettings 를 원래 메서드로 되돌린다(누군가 D1 의 대체 함수를 다시 바꿔 끼웠다) */
   unplugBlocker?: boolean;
 };
@@ -311,6 +364,8 @@ export type Outcome = {
   loginItemQueries: unknown[];
   /** 원래 app.setLoginItemSettings 가 받은 인자 — 이 PC 의 로그인 항목 쓰기다(D1 이 막으면 비었다) */
   loginItemWrites: unknown[];
+  /** 끝난 때 트레이 창 webContents 의 스로틀(getBackgroundThrottling) — 창이 파괴됐으면 null */
+  throttling: boolean | null;
 };
 type Running = { fetches: string[]; ended(): boolean; finish(): Promise<Outcome> };
 type Rig = { run: SmokeRun; start(): Running };
@@ -491,6 +546,32 @@ export function healthyPage(index: FileIndex): Record<string, PageHandler> {
       app.send('tj-set-opacity', marker.nan === true ? Number.NaN : marker.value);
       return app.getState();
     },
+    // Esc 한 단계(escScript) — 태그의 인자는 대화상자 갈래: open 은 aria-modal 요소를 넣은 채, closes 는 그 요소와 그것을 동기로 지우는 #root
+    // keydown 리스너와 함께(React 커밋 대신), none 은 요소 없이. Escape 를 보낸 뒤 넣은 것을 치우고 getState() 장벽
+    esc: (arg, app) => {
+      const mode = arg as 'open' | 'closes' | 'none';
+      if (mode !== 'none') app.dom.dialog = true;
+      const dialog = app.dom.dialog;
+      let ran = false;
+      app.pressEscape(
+        mode === 'closes'
+          ? () => {
+              ran = true;
+              app.dom.dialog = false;
+            }
+          : undefined,
+      );
+      const removed = mode !== 'none' && !app.dom.dialog;
+      app.dom.dialog = false;
+      return { dialog, ran, removed, snapshot: app.getState() };
+    },
+    // ✕(숨기기) 클릭(HIDE_BUTTON_SCRIPT) — 단추를 눌러 렌더러의 onClick 뒤 getState() 장벽
+    'hide-button': (_arg, app) => {
+      app.pressHideButton();
+      return { found: true, snapshot: app.getState() };
+    },
+    // <html> 의 tapp-hidden · visibilityState(HIDDEN_STATE_SCRIPT)
+    'hidden-state': (_arg, app) => app.hiddenState(),
     'csp-meta': (_arg, app) => ({ contents: [app.build.csp.meta], inHead: [true] }),
     'csp-header': (arg, app) =>
       (arg as string[]).map((url) => ({ url, status: 200, csp: app.build.csp.header, nosniff: 'nosniff', contentType: url.endsWith('.html') ? MIME_HTML : MIME_JS })),
@@ -524,66 +605,104 @@ type RigApp = {
 /** 창 사건의 첫 인자 — close 만 막을 수 있다(main 의 처리기가 preventDefault 한다). */
 type WindowEvent = { preventDefault(): void };
 const windowEvent = (): WindowEvent => ({ preventDefault: () => {} });
+/** 트레이 창의 수명 — 창과 webContents 가 함께 본다(창을 파괴하면 webContents 도 파괴된다). */
+type WindowLife = { destroyed: boolean };
+
+/** 파괴된 창 · webContents 의 멤버는 Electron 처럼 던진다(isDestroyed 만 답한다). */
+function assertAlive(life: WindowLife): void {
+  if (life.destroyed) throw new TypeError('Object has been destroyed');
+}
 
 /**
  * 가짜 트레이 창 — 숨긴 채 만든다(show: false — main 이 ready-to-show 에 보인다). Electron 처럼 show() · hide() 는 보임이 바뀔 때 'show' ·
- * 'hide' 를 내고(hide 는 포커스도 잃는다), focus() 가 포커스를 주고, close() 는 막을 수 있는 'close' 를 낸다(막지 않으면 숨는다 — 종료 중).
+ * 'hide' 를 내고(hide 는 포커스도 잃는다), focus() 가 포커스를 주고, close() 는 막을 수 있는 'close' 를 낸다(막지 않으면 창이 파괴된다).
  * emit 은 상태를 바꾸지 않는다(실행기의 win.emit('blur') 는 포커스를 그대로 둔다 — Electron 의 emit 과 같다). OS 가 포커스를 가져간 것은
  * osBlur() 다(포커스를 끄고 blur 를 낸다). 배경색 · 투명도는 창을 만들 때의 값(main 의 backgroundColor · opacity 옵션)에서 시작한다 —
- * getBackgroundColor() 는 Electron 처럼 '#RRGGBB'(대문자)로, setOpacity 는 0–1 로 자른다.
+ * getBackgroundColor() 는 Electron 처럼 '#RRGGBB'(대문자)로, setOpacity 는 0–1 로 자른다. destroy() 뒤에는 isDestroyed() 만 답하고 그 밖의
+ * 멤버는 던진다(life — webContents 도 같다). wasShown() 은 창이 한 번이라도 보였는가다(visibilityState 의 규칙 — 창의 멤버가 아니다).
  */
-function fakeTrayWindow(webContents: unknown, initial: { backgroundColor: string; opacity: number }) {
+function fakeTrayWindow(webContents: unknown, initial: { backgroundColor: string; opacity: number }, life: WindowLife) {
   const events = new EventEmitter();
   let visible = false;
+  let shown = false;
   let focused = false;
   let background = initial.backgroundColor;
   let opacity = initial.opacity;
+  const alive = (): void => assertAlive(life);
   const win = {
     webContents,
-    isDestroyed: (): boolean => false,
-    isVisible: (): boolean => visible,
-    isFocused: (): boolean => focused,
+    isDestroyed: (): boolean => life.destroyed,
+    destroy: (): void => {
+      alive();
+      life.destroyed = true;
+    },
+    isVisible: (): boolean => {
+      alive();
+      return visible;
+    },
+    isFocused: (): boolean => {
+      alive();
+      return focused;
+    },
     setBackgroundColor: (color: string): void => {
+      alive();
       background = color;
     },
-    getBackgroundColor: (): string => background.toUpperCase(),
+    getBackgroundColor: (): string => {
+      alive();
+      return background.toUpperCase();
+    },
     setOpacity: (value: number): void => {
+      alive();
       opacity = Math.min(1, Math.max(0, value));
     },
-    getOpacity: (): number => opacity,
+    getOpacity: (): number => {
+      alive();
+      return opacity;
+    },
     show: (): void => {
+      alive();
       if (visible) return;
       visible = true;
+      shown = true;
       events.emit('show', windowEvent());
     },
     hide: (): void => {
+      alive();
       if (!visible) return;
       visible = false;
       focused = false;
       events.emit('hide', windowEvent());
     },
     focus: (): void => {
+      alive();
       focused = true;
     },
     close: (): void => {
+      alive();
       let prevented = false;
       events.emit('close', {
         preventDefault: () => {
           prevented = true;
         },
       });
-      if (!prevented) win.hide();
+      if (!prevented) win.destroy();
     },
     on: (event: string, listener: (event: WindowEvent) => void): void => {
+      alive();
       events.on(event, listener);
     },
-    emit: (event: string, ...args: unknown[]): boolean => events.emit(event, ...args),
+    emit: (event: string, ...args: unknown[]): boolean => {
+      alive();
+      return events.emit(event, ...args);
+    },
   };
   const osBlur = (): void => {
+    if (life.destroyed) return;
     focused = false;
     events.emit('blur', windowEvent());
   };
-  return { win, osBlur };
+  return { win, osBlur, wasShown: (): boolean => shown };
 }
 type FakeTrayWindow = ReturnType<typeof fakeTrayWindow>['win'];
 
@@ -633,7 +752,8 @@ function createMainLike({ platform, flaw, app, win, osBlur, deliver, run, settin
     getBounds: () => ({ x: 0, y: 0, width: 16, height: 16 }),
     emit: (event: string, ...args: unknown[]): boolean => trayEvents.emit(event, ...args),
   };
-  const live = (): boolean => !isQuitting;
+  /** main.js 의 liveWindow — 종료 중이거나 창이 파괴됐으면 창을 만지지 않는다. */
+  const live = (): boolean => !isQuitting && !win.isDestroyed();
   const managesLoginItems = (): boolean => canManageLoginItems({ isPackaged: false, smoke: true, platform, execPath: process.execPath });
 
   const clearDeferredBlur = (): void => {
@@ -684,7 +804,7 @@ function createMainLike({ platform, flaw, app, win, osBlur, deliver, run, settin
     shownIntent = false;
     clearDeferredBlur();
     win.hide();
-    if (reason === 'blur' || flaw.guardEveryHide === true) lastBlurHideAt = performance.now();
+    if (reason === 'blur' || flaw.guardEveryHide === true || (reason === 'request' && flaw.guardRequestHide === true)) lastBlurHideAt = performance.now();
     noteWindow('hide', flaw.relabelHide?.[reason] ?? reason);
   }
 
@@ -698,6 +818,7 @@ function createMainLike({ platform, flaw, app, win, osBlur, deliver, run, settin
     if (now - shownAt <= BLUR_GRACE_MS && showReason !== 'start' && deferredBlur === null) {
       deferredBlur = setTimeout(() => {
         deferredBlur = null;
+        if (!live()) return;
         const action = deferredBlurAction({ visible: shownIntent && win.isVisible(), focused: win.isFocused(), pinned: settings.pinned, devToolsOpen: false });
         if (action === 'hide') hideWindow('blur');
       }, shownAt + BLUR_GRACE_MS + 1 - now);
@@ -838,22 +959,22 @@ function createMainLike({ platform, flaw, app, win, osBlur, deliver, run, settin
       on('tj-set-opacity', (_event, percent) => applyOpacity(percent));
       on('tj-hide', () => hideWindow('request'));
     },
-    /** 창 사건 — show · hide 는 렌더러에 tj-shown · tj-hidden, blur 는 바깥 클릭, close 는 숨김(종료 중이 아니면) */
+    /** 창 사건 — show · hide 는 렌더러에 tj-shown · tj-hidden, blur 는 바깥 클릭, close 는 숨김(종료 중이 아니면 막는다) */
     attachWindow(): void {
       win.on('show', () => {
         shownIntent = true;
-        sendToTray('tj-shown');
+        if (flaw.noShownPush !== true) sendToTray('tj-shown');
       });
       win.on('hide', () => {
         shownIntent = false;
         clearDeferredBlur();
-        sendToTray('tj-hidden');
+        if (flaw.noHiddenPush !== true) sendToTray('tj-hidden');
       });
       win.on('blur', () => onBlur());
       win.on('close', (event) => {
-        if (isQuitting) return;
+        if (isQuitting || flaw.closeDestroys === true) return;
         event.preventDefault();
-        hideWindow('close');
+        if (flaw.closeIgnored !== true) hideWindow('close');
       });
     },
     /** 트레이 — win32 만 좌클릭 처리기를 달고, 시작 메뉴를 만든다(setTray) */
@@ -986,48 +1107,121 @@ export function rigScenario(scenario: Scenario = {}): Rig {
   let barriers = 0;
   const handlers: Record<string, PageHandler | undefined> = { ...healthyPage(index), ...scenario.page };
   const info = { version: APP_VERSION, electron: ELECTRON_VERSION, chrome: process.versions.chrome, platform: process.platform };
+  /** 페이지 코드 하나를 태그로 가른다 — 장벽은 여기서, 그 밖은 처리기가 답한다(처리기가 던지면 거부다). */
+  const runPage = async (code: string): Promise<unknown> => {
+    const tag = TAG_RE.exec(code);
+    if (tag === null) throw new Error(`가짜 페이지가 모르는 코드다(태그 없음): ${code.slice(0, 60)}`);
+    const [, name = '', json] = tag;
+    pageCalls.push(name);
+    const arg: unknown = json === undefined ? undefined : JSON.parse(json);
+    if (name === 'barrier') {
+      // 장벽 — getAppInfo 왕복 뒤 표식을 콘솔에 찍는다. 첫 장벽에서는 그보다 먼저 온 줄을 앞에 둔다
+      barriers += 1;
+      if (barriers === 1) for (const message of warningsBeforeMarker) events.emit('console-message', { level: 'warning', message, sourceId: '', lineNumber: 0 });
+      if (scenario.barrierMarks?.(barriers) ?? true) events.emit('console-message', { level: 'info', message: String(arg), sourceId: '', lineNumber: 1 });
+      return info;
+    }
+    const handler = handlers[name];
+    if (handler === undefined) throw new Error(`가짜 페이지에 '${name}' 처리기가 없다`);
+    return handler(arg, fakeApp);
+  };
+  // 창과 webContents 가 함께 보는 수명 — 창을 파괴하면 webContents 의 멤버도 던진다(isDestroyed 만 답한다)
+  const life: WindowLife = { destroyed: false };
+  const alive = (): void => assertAlive(life);
+  /** 숨긴 창의 렌더러 스로틀(Electron 기본 켬 — Scenario.throttle 이 바꾼다) */
+  let throttling = scenario.throttle !== 'off';
   const contents = Object.assign(events, {
     session: defaultSession,
-    isDestroyed: (): boolean => false,
-    getURL: () => currentUrl,
-    getOSProcessId: () => RENDERER_PID,
-    getLastWebPreferences: () => ({ ...WEB_PREFERENCES }),
-    capturePage: async () => SCREEN,
-    executeJavaScript: async (code: string): Promise<unknown> => {
-      const tag = TAG_RE.exec(code);
-      if (tag === null) throw new Error(`가짜 페이지가 모르는 코드다(태그 없음): ${code.slice(0, 60)}`);
-      const [, name = '', json] = tag;
-      pageCalls.push(name);
-      const arg: unknown = json === undefined ? undefined : JSON.parse(json);
-      if (name === 'barrier') {
-        // 장벽 — getAppInfo 왕복 뒤 표식을 콘솔에 찍는다. 첫 장벽에서는 그보다 먼저 온 줄을 앞에 둔다
-        barriers += 1;
-        if (barriers === 1) for (const message of warningsBeforeMarker) events.emit('console-message', { level: 'warning', message, sourceId: '', lineNumber: 0 });
-        if (scenario.barrierMarks?.(barriers) ?? true) events.emit('console-message', { level: 'info', message: String(arg), sourceId: '', lineNumber: 1 });
-        return info;
-      }
-      const handler = handlers[name];
-      if (handler === undefined) throw new Error(`가짜 페이지에 '${name}' 처리기가 없다`);
-      return handler(arg, fakeApp);
+    isDestroyed: (): boolean => life.destroyed,
+    getURL: () => {
+      alive();
+      return currentUrl;
     },
-    executeJavaScriptInIsolatedWorld: async (worldId: number, scripts: Array<{ code: string }>): Promise<unknown> => {
+    getOSProcessId: () => {
+      alive();
+      return RENDERER_PID;
+    },
+    getLastWebPreferences: () => {
+      alive();
+      return { ...WEB_PREFERENCES };
+    },
+    capturePage: (): Promise<typeof SCREEN> => {
+      alive();
+      return Promise.resolve(SCREEN);
+    },
+    setBackgroundThrottling: (allowed: boolean): void => {
+      alive();
+      if (allowed && !throttling && scenario.throttle === 'sticky') return;
+      if (!allowed && scenario.throttle === 'ignored') return;
+      throttling = allowed;
+    },
+    getBackgroundThrottling: (): boolean => {
+      alive();
+      return throttling;
+    },
+    executeJavaScript: (code: string): Promise<unknown> => {
+      alive();
+      return runPage(code);
+    },
+    executeJavaScriptInIsolatedWorld: (worldId: number, scripts: Array<{ code: string }>): Promise<unknown> => {
+      alive();
       isolatedCalls.push({ worldId, codes: scripts.map((script) => script.code) });
-      if (scenario.isolated !== undefined) return scenario.isolated(buffer);
+      if (scenario.isolated !== undefined) return Promise.resolve(scenario.isolated(buffer));
       // preload 의 격리 world 전역은 world 999 에서만 보인다
-      return worldId === 999 ? { probe: 1, buf: buffer.map((violation) => ({ ...violation })) } : { probe: undefined, buf: undefined };
+      return Promise.resolve(worldId === 999 ? { probe: 1, buf: buffer.map((violation) => ({ ...violation })) } : { probe: undefined, buf: undefined });
     },
   });
   // 창은 main 의 옵션(새 프로필 — 설정 기본값의 테마 배경 · 투명도)으로 만든다
-  const { win, osBlur } = fakeTrayWindow(contents, { backgroundColor: THEME_BACKGROUND[DEFAULT_SETTINGS.theme], opacity: DEFAULT_SETTINGS.opacity / 100 });
+  const { win, osBlur, wasShown } = fakeTrayWindow(contents, { backgroundColor: THEME_BACKGROUND[DEFAULT_SETTINGS.theme], opacity: DEFAULT_SETTINGS.opacity / 100 }, life);
   const mainFetch = scenario.mainFetch ?? (async (url: string) => ({ status: resolveAppRequest({ url, method: 'GET' }, index).status }));
   // 가짜 렌더러 — 새 프로필의 첫 화면에서 시작한다: main.tsx 가 지난 테마(없음 → dark)로 data-theme 을 칠했고, 처음 스냅샷(dark)이 저장값을
-  // 썼다. main 이 민 tj-theme 는 trayState 처럼 data-theme · 저장값에 반영한다(결함이 없으면)
+  // 썼다. main 이 민 tj-theme 는 trayState 처럼 data-theme · 저장값에, tj-hidden · tj-shown 은 <html> 의 tapp-hidden 에 반영한다(결함이 없으면)
   const rendererFlaw = scenario.renderer ?? {};
-  const dom: FakeDom = { dataTheme: 'dark', stored: rendererFlaw.noStoreTheme === true ? null : 'dark' };
+  const dom: FakeDom = { dataTheme: 'dark', stored: rendererFlaw.noStoreTheme === true ? null : 'dark', hiddenClass: false, dialog: false };
   const deliver = (channel: string, value: unknown): void => {
+    if (channel === 'tj-hidden') {
+      dom.hiddenClass = true;
+      return;
+    }
+    if (channel === 'tj-shown') {
+      if (rendererFlaw.keepHiddenClass !== true) dom.hiddenClass = false;
+      return;
+    }
     if (channel !== 'tj-theme' || typeof value !== 'string') return;
     if (rendererFlaw.noDataTheme !== true) dom.dataTheme = value;
     if (rendererFlaw.noStoreTheme !== true) dom.stored = value;
+  };
+  // 가짜 렌더러의 Esc — src/tray/esc.ts 의 처리기 그대로(window 캡처에서 그때의 대화상자를 찍고 버블에서 정한다). 대화상자는 페이지가 넣은
+  // aria-modal 요소다(dom.dialog — useDialog 의 isDialogOpen 이 querySelector 로 본다). 숨기기는 ✕ 와 같은 tjDesktop.hide() → tj-hide
+  const esc = createEscHandlers({ isDialogOpen: () => dom.dialog, hide: () => ipcSend('tj-hide') });
+  const pressEscape = (rootListener?: () => void): void => {
+    // 페이지가 만든 KeyboardEvent — 조합 · 반복 · 조합키는 기본값(거짓)이다
+    const event: EscInput & { preventDefault(): void } = {
+      key: 'Escape',
+      isComposing: false,
+      repeat: false,
+      ctrlKey: false,
+      altKey: false,
+      metaKey: false,
+      defaultPrevented: false,
+      preventDefault: () => {
+        event.defaultPrevented = true;
+      },
+    };
+    const keyboard = event as unknown as KeyboardEvent;
+    const installed = rendererFlaw.noEsc !== true;
+    if (installed && rendererFlaw.escNoCapture !== true) esc.onCapture(keyboard); // window 캡처 — 어떤 처리기보다 먼저
+    rootListener?.(); // #root 의 버블 — window 보다 먼저
+    if (installed) esc.onBubble(keyboard); // window 버블 — 여기서 숨길지 정한다
+  };
+  // 가짜 렌더러의 ✕ — TrayApp 의 onClick(desktop()?.hide()) → tj-hide
+  const pressHideButton = (): void => {
+    if (rendererFlaw.noHideButton !== true) ipcSend('tj-hide');
+  };
+  const hiddenState = (): HiddenState => {
+    // Electron: show:false 로 만든 창은 처음 보이기 전에는 visible 이고, 스로틀을 끄면 숨겨도 visible 이다
+    const visibilityState = wasShown() && !win.isVisible() && throttling ? 'hidden' : 'visible';
+    return { hiddenClass: rendererFlaw.visibilityDriven === true ? visibilityState === 'hidden' : dom.hiddenClass, visibilityState };
   };
 
   // main 의 onReady 순서 — 실행기(D1 이 맨 먼저 선다) → 첫 실행 갈래 → 가드 → IPC(main 채널 → 실행기) → 창(수집기) → 트레이(시작 메뉴)
@@ -1071,7 +1265,11 @@ export function rigScenario(scenario: Scenario = {}): Rig {
     send: ipcSend,
     getState: () => main.getState(),
     dom,
+    pressEscape,
+    pressHideButton,
+    hiddenState,
     osBlur,
+    destroyWindow: () => win.destroy(),
     loginItems: loginItems.items,
   };
   // 사례의 onBeforeRequest — main 의 순서대로 가드가 먼저다. null 이면 붙이지 않는다
@@ -1114,6 +1312,7 @@ export function rigScenario(scenario: Scenario = {}): Rig {
             windows: main.windows,
             loginItemQueries,
             loginItemWrites,
+            throttling: life.destroyed ? null : throttling,
           };
         },
       };
