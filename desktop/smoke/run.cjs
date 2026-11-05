@@ -989,6 +989,11 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
       problems.push(`${how} 뒤 이유 ${show(reason)} 의 숨김 기록을 받지 못했다(${WAIT_MS}ms) — 마지막 창 기록 ${show(windowTrail())}`);
       return false;
     }
+    // main 은 win.hide() 뒤에 숨김을 기록한다 — 기록이 왔는데도 보이면 다음 열기는 이미 보이는 창을 '연' 것이라 아무것도 증명하지 못한다
+    if (win.isVisible()) {
+      problems.push(`${how} 의 숨김 기록(${reason}) 뒤에도 창이 보인다 — 열기 경로를 증명하지 못함`);
+      return false;
+    }
     const gap = `${(performance.now() - hidden.at).toFixed(1)}ms`;
     const { how: opener, missing } = openPath();
     if (!openViaMain()) {

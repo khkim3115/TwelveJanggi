@@ -225,6 +225,8 @@ export type MainFlaw = {
   icon?: 'missing' | 'unresized';
   /** showWindow 가 focus() 를 부르지 않는다 */
   noFocus?: boolean;
+  /** 트레이 토글이 숨김을 기록만 하고 창을 숨기지 않는다(토글 갈래만 win.hide() 를 건너뛴다 — 다음 클릭이 이미 보이는 창을 '연다') */
+  toggleRecordsOnly?: boolean;
   /** 숨김을 다른 이유로 기록한다(실제 이유 → 기록하는 이유). 동작은 실제 이유를 따른다 */
   relabelHide?: Partial<Record<HideReason, string>>;
   /** 모든 숨김의 시각을 경합 가드에 남긴다(blur 숨김만 남겨야 한다 — 토글 · 닫기 직후의 클릭을 삼킨다) */
@@ -808,7 +810,7 @@ function createMainLike({ platform, flaw, app, win, osBlur, deliver, run, settin
     if (!live()) return;
     shownIntent = false;
     clearDeferredBlur();
-    win.hide();
+    if (reason !== 'toggle' || flaw.toggleRecordsOnly !== true) win.hide();
     if (reason === 'blur' || flaw.guardEveryHide === true || (reason === 'request' && flaw.guardRequestHide === true)) lastBlurHideAt = performance.now();
     noteWindow('hide', flaw.relabelHide?.[reason] ?? reason);
   }

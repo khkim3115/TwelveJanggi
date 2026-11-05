@@ -361,6 +361,16 @@ describe('tray — 최신 메뉴(새 프로필) · main 이 붙인 아이콘 · 
     expectEndsShown(outcome);
   });
 
+  it('win32 — 트레이 토글이 숨김을 기록만 하고 창을 숨기지 않는다 → 실패(숨김 기록 뒤에도 창이 보인다), 열지 않고 멈춘다 — 이미 보이는 창을 열어 통과하지 않는다', async () => {
+    const outcome = await runScenario({ main: { toggleRecordsOnly: true } });
+    const check = expectOnlyFailure(outcome, 'tray', ['트레이 클릭(토글) 의 숨김 기록(toggle) 뒤에도 창이 보인다 — 열기 경로를 증명하지 못함']);
+    // 끝의 규칙(마지막 창 기록이 show)도 어긋난다 — main 은 숨겼다고 기록했고, 보이는 창은 다시 열지 않는다
+    expect(check.detail).toContain('끝에 창을 main 의 길로 보인 채 두지 못했다(보임 true · 마지막 창 기록 ["show:start","hide:toggle"])');
+    // 숨김 기록 뒤 트레이 클릭을 내지 않았다 — 다음 창 기록은 escHide ③ 의 Esc 숨김이다(뒤 검사는 보이는 창에서 돈다)
+    expect(outcome.windows.slice(0, 3).map(({ action, reason }) => `${action}:${reason}`)).toStrictEqual(['show:start', 'hide:toggle', 'hide:request']);
+    expectEndsShown(outcome);
+  });
+
   it('win32 — 모든 숨김에 경합 가드를 켠다(곧바로 연 클릭을 삼킨다) → tray 실패 · Esc 숨김 직후의 클릭도 삼켜 escHide ④ 실패, 끝에는 경합 시간 뒤에 main 의 길로 다시 보였다', async () => {
     const outcome = await runScenario({ main: { guardEveryHide: true } });
     expect(failing(outcome).map(([name]) => name)).toStrictEqual(['tray', 'escHide']);
