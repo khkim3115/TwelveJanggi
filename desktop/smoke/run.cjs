@@ -1002,7 +1002,7 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
     }
     const opened = await until(() => win.isVisible() && win.isFocused(), WAIT_MS);
     if (!opened) {
-      problems.push(`숨김(${reason}) 기록 ${gap} 뒤의 ${opener} 뒤 창이 보이고 포커스를 받지 않았다(보임 ${win.isVisible()} · 포커스 ${win.isFocused()} · 마지막 창 기록 ${show(windowTrail())})`);
+      problems.push(`숨김(${reason}) 기록 ${gap} 뒤의 ${opener} 뒤 창이 보임 · 포커스가 되지 않았다(보임 ${win.isVisible()} · 포커스 ${win.isFocused()} · 마지막 창 기록 ${show(windowTrail())})`);
       return false;
     }
     notes.push(`열기: ${how} → 숨김(${reason}) → ${gap} 뒤 ${opener} → 보임 · 포커스`);

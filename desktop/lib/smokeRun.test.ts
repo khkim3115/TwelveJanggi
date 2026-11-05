@@ -358,7 +358,7 @@ describe('tray — 최신 메뉴(새 프로필) · main 이 붙인 아이콘 · 
 
   it.each(PLATFORMS)('%s — 연 창이 포커스를 받지 않는다(main 이 focus 를 부르지 않는다) → 실패', async (platform) => {
     const outcome = await runScenario({ platform, main: { noFocus: true } });
-    expectOnlyFailure(outcome, 'tray', ['창이 보이고 포커스를 받지 않았다(보임 true · 포커스 false']);
+    expectOnlyFailure(outcome, 'tray', ['창이 보임 · 포커스가 되지 않았다(보임 true · 포커스 false']);
     expectEndsShown(outcome);
   });
 
@@ -375,7 +375,7 @@ describe('tray — 최신 메뉴(새 프로필) · main 이 붙인 아이콘 · 
   it('win32 — 모든 숨김에 경합 가드를 켠다(곧바로 연 클릭을 삼킨다) → tray 실패 · Esc 숨김 직후의 클릭도 삼켜 escHide ④ 실패, 끝에는 경합 시간 뒤에 main 의 길로 다시 보였다', async () => {
     const outcome = await runScenario({ main: { guardEveryHide: true } });
     expect(failing(outcome).map(([name]) => name)).toStrictEqual(['tray', 'escHide']);
-    expect(checkOf(outcome, 'tray').detail).toContain('숨김(toggle) 기록 0.0ms 뒤의 트레이 클릭 뒤 창이 보이고 포커스를 받지 않았다(보임 false');
+    expect(checkOf(outcome, 'tray').detail).toContain('숨김(toggle) 기록 0.0ms 뒤의 트레이 클릭 뒤 창이 보임 · 포커스가 되지 않았다(보임 false');
     expect(checkOf(outcome, 'escHide').detail).toContain('④ 트레이 클릭 뒤 5000ms 안에 창이 보이지 않았다');
     expect(outcome.windows.slice(0, 3).map(({ action, reason }) => `${action}:${reason}`)).toStrictEqual(['show:start', 'hide:toggle', 'show:tray']);
     expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
