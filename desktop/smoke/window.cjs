@@ -71,6 +71,11 @@ const OPACITY_TABLE = Object.freeze([
  * @typedef {{ hiddenClass: boolean, visibilityState: unknown }} HiddenState
  */
 /**
+ * tapp-hidden 기다림(waitHiddenClass)의 결과 — 기다린 것(want — 붙기 true · 빠지기 false)과 상한(ms), 되었는가(ok), 페이지가 답한 수
+ * (answers) · 마지막에 본 것(last) · 마지막 답을 받은 때(lastAt — performance.now(), 답이 없으면 null).
+ * @typedef {{ want: boolean, ms: number, ok: boolean, answers: number, last: HiddenState | null, lastAt: number | null }} ClassWait
+ */
+/**
  * 기다리지 않고 시작한 페이지 호출이 끝난 모양 — 값 또는 거부.
  * @typedef {{ kind: 'resolved', value: unknown } | { kind: 'rejected', error: unknown }} PageOutcome
  */
@@ -152,6 +157,21 @@ function checkedNow(item) {
  */
 function labelled(label, problems) {
   return problems.map((problem) => `${label} ${problem}`);
+}
+
+/**
+ * tapp-hidden 기다림이 되지 않았을 때의 글 — 페이지가 한 번도 답하지 않았는가(읽지 못했다 — 숨긴 창의 렌더러가 늦거나 멈췄다)와, 답했지만
+ * 붙지 · 빠지지 않았는가(렌더러가 클래스를 바꾸지 않았다)를 가른다. extra 는 괄호 안에 덧붙이는 사실(시각 · 설명)이다.
+ * @param {ClassWait} wait
+ * @param {readonly string[]} [extra]
+ * @returns {string}
+ */
+function classMiss(wait, extra = []) {
+  if (wait.answers === 0) {
+    return `<html> 의 tapp-hidden 을 ${wait.ms}ms 동안 읽지 못했다 — 페이지가 한 번도 답하지 않았다${extra.length === 0 ? '' : `(${extra.join(' · ')})`}`;
+  }
+  const head = wait.want ? `<html> 에 tapp-hidden 이 ${wait.ms}ms 안에 붙지 않았다` : `<html> 의 tapp-hidden 이 ${wait.ms}ms 안에 빠지지 않았다`;
+  return `${head} — 페이지는 ${wait.answers}번 답했다(${[`마지막에 본 것 ${show(wait.last)}`, ...extra].join(' · ')})`;
 }
 
 /**
@@ -768,14 +788,17 @@ function createWindowChecks(ctx) {
   }
 
   /**
-   * <html> 의 tapp-hidden 이 want 가 될 때까지 WAIT_MS 까지 페이지를 다시 읽는다(렌더러는 tj-hidden · tj-shown push 로 단다). 창이 파괴되면 그만
-   * 기다린다(R29 — 그 페이지 호출이 파괴로 거부돼도 같다. 그 밖의 거부는 그 단계의 실패다). 되었는가(ok)와 마지막에 본 것(last).
+   * <html> 의 tapp-hidden 이 want 가 될 때까지 ms(기본 WAIT_MS)까지 페이지를 다시 읽는다(렌더러는 tj-hidden · tj-shown push 로 단다). 창이
+   * 파괴되면 그만 기다린다(R29 — 그 페이지 호출이 파괴로 거부돼도 같다. 그 밖의 거부는 그 단계의 실패다). 페이지가 답한 수와 마지막 답의
+   * 때도 돌려준다 — 되지 않았을 때 '한 번도 답하지 않았다' 와 '답했지만 붙지 · 빠지지 않았다' 를 가른다(classMiss). ms 는 페이지 호출 한
+   * 번의 상한(PAGE_MS)을 넘지 않는다 — 넘으면 그 호출의 거부가 기다림의 시간 초과보다 먼저 와서 판정 대신 단계의 실패가 된다.
    * @param {boolean} want
-   * @returns {Promise<{ ok: boolean, last: HiddenState | null }>}
+   * @param {number} [ms]
+   * @returns {Promise<ClassWait>}
    */
-  async function waitHiddenClass(want) {
-    /** @type {{ last: HiddenState | null }} 콜백이 바꾼다(지역 변수는 TS 흐름 분석이 콜백의 변경을 놓친다) */
-    const seen = { last: null };
+  async function waitHiddenClass(want, ms = WAIT_MS) {
+    /** @type {{ last: HiddenState | null, answers: number, lastAt: number | null }} 콜백이 바꾼다(지역 변수는 TS 흐름 분석이 콜백의 변경을 놓친다) */
+    const seen = { last: null, answers: 0, lastAt: null };
     const done = await untilAsync(
       async () => {
         if (destroyed() !== null) return true;
@@ -785,18 +808,23 @@ function createWindowChecks(ctx) {
           if (destroyed() !== null) return true;
           throw err;
         }
+        seen.answers += 1;
+        seen.lastAt = performance.now();
         return seen.last?.hiddenClass === want;
       },
-      WAIT_MS,
+      ms,
       `<html> 의 tapp-hidden 을 기다리기(${want ? '붙기' : '빠지기'})`,
     );
-    return { ok: done && destroyed() === null && seen.last?.hiddenClass === want, last: seen.last };
+    const { last, answers, lastAt } = seen; // 상한 뒤에 늦게 온 답은 넣지 않는다
+    return { want, ms, ok: done && destroyed() === null && last?.hiddenClass === want, answers, last, lastAt };
   }
 
   /**
    * ① 진짜 ✕ 단추를 페이지에서 누른다 → tj-hide 수신 1 · 숨김 1('request') · 새 tj-hidden 전달 1 · <html> 에 tapp-hidden ·
    * getBackgroundThrottling() === true(기본 켬) · 파괴 안 됨 → 그 숨김에서 경합 시간 + 여유가 지난 뒤(R13) main 의 길로 다시 연다 → tj-shown 전달
-   * 1 · 클래스 빠짐. 문제는 ① 표식을 붙여 problems 에. ② 를 해도 되면(창이 살아 있고 보인다) true.
+   * 1 · 클래스 빠짐. 숨긴(스로틀 켠) 창의 tapp-hidden 은 페이지 호출 한 번의 상한(PAGE_MS)까지 읽고, ✕ 의 답과 tapp-hidden 을 본 때(못 봤으면
+   * 마지막 답)를 숨김 기록에서 재어 통과 · 실패 글에 싣는다 — 숨긴 창의 렌더러는 늦을 수 있어(실측 한 번 약 3초) 흔들리면 이 값으로 늦음과
+   * 결함을 가른다. 문제는 ① 표식을 붙여 problems 에. ② 를 해도 되면(창이 살아 있고 보인다) true.
    * @param {string[]} problems
    * @param {string[]} notes
    * @returns {Promise<boolean>}
@@ -808,6 +836,7 @@ function createWindowChecks(ctx) {
     const fail = (text) => problems.push(`① ${text}`);
     const before = ctx.mark();
     const pressed = await ctx.page(HIDE_BUTTON_SCRIPT, '✕(숨기기) 클릭');
+    const answeredAt = performance.now();
     if (stopped(problems, '①', '도중에')) return false;
     if (!isRecord(pressed) || pressed.found !== true) {
       fail(`✕ 단추(button[aria-label="숨기기"])를 찾지 못했다: ${show(pressed)}`);
@@ -820,13 +849,17 @@ function createWindowChecks(ctx) {
       fail(`숨김 기록이 없다 — ✕ 로 창이 숨지 않았다(보임 ${ctx.win().isVisible()})`);
       return ctx.win().isVisible();
     }
-    const added = await waitHiddenClass(true);
+    const added = await waitHiddenClass(true, PAGE_MS);
     if (stopped(problems, '①', '도중에')) return false;
+    const hideAt = early.at;
+    /** @param {number} at 숨김 기록에서 그때까지 */
+    const sinceHide = (at) => `${(at - hideAt).toFixed(1)}ms`;
+    const answered = `숨김 기록 뒤 ✕ 응답 ${sinceHide(answeredAt)}`;
     // 전달 수는 클래스를 기다린 뒤에 센다 — main 은 창의 hide 사건에서 밀고 그 뒤에 기록하며, 렌더러는 받은 뒤에야 클래스를 단다(그 사건이
     // 늦게 와도 헛실패하지 않는다)
     const pushed = pushesSince(before, HIDDEN_CHANNEL);
     if (pushed !== 1) fail(`새 ${HIDDEN_CHANNEL} 전달이 ${pushed}번이다(기대 1번)`);
-    if (!added.ok) fail(`<html> 에 tapp-hidden 이 ${WAIT_MS}ms 안에 붙지 않았다(마지막에 본 것 ${show(added.last)})`);
+    if (!added.ok) fail(classMiss(added, added.lastAt === null ? [answered] : [answered, `마지막 답 ${sinceHide(added.lastAt)}`]));
     const throttling = ctx.win().webContents.getBackgroundThrottling();
     if (throttling !== true) fail(`숨긴 동안 getBackgroundThrottling() 이 ${show(throttling)} 다(기대 true — 기본 켬)`);
     // 그 숨김에서 경합 시간 + 여유가 지난 뒤 다시 연다(R13 — 경합 창은 tray · escHide ④ 만 잰다)
@@ -850,15 +883,16 @@ function createWindowChecks(ctx) {
     if (stopped(problems, '①', '다시 연 뒤')) return false;
     const shownPushes = pushesSince(open.from, SHOWN_CHANNEL); // 클래스를 기다린 뒤에 센다(위의 tj-hidden 과 같다)
     if (shownPushes !== 1) fail(`다시 보인 뒤 ${SHOWN_CHANNEL} 전달이 ${shownPushes}번이다(기대 1번)`);
-    if (!removed.ok) fail(`다시 보인 뒤 <html> 의 tapp-hidden 이 ${WAIT_MS}ms 안에 빠지지 않았다(마지막에 본 것 ${show(removed.last)})`);
+    if (!removed.ok) fail(`다시 보인 뒤 ${classMiss(removed)}`);
     const stray = strayHide(open.from, '다시 보인 뒤 ');
     if (stray !== null) {
       fail(stray);
       return false;
     }
     if (problems.length === count) {
+      const seenAt = added.lastAt === null ? '?' : sinceHide(added.lastAt); // 통과했으면 답이 있었다
       notes.push(
-        `① ✕ → tj-hide 수신 1 · 숨김 1(request) · ${HIDDEN_CHANNEL} 전달 1 · <html> tapp-hidden · getBackgroundThrottling() true · 파괴 안 됨 → ${waited} 뒤 ${open.how} → 보임(${shown.reason}) · ${SHOWN_CHANNEL} 전달 1 · tapp-hidden 빠짐`,
+        `① ✕ → tj-hide 수신 1 · 숨김 1(request) · ${HIDDEN_CHANNEL} 전달 1 · <html> tapp-hidden · getBackgroundThrottling() true · 파괴 안 됨 · ${answered} · tapp-hidden 확인 ${seenAt} → ${waited} 뒤 ${open.how} → 보임(${shown.reason}) · ${SHOWN_CHANNEL} 전달 1 · tapp-hidden 빠짐`,
       );
     }
     return true;
@@ -897,7 +931,7 @@ function createWindowChecks(ctx) {
     if (visibilityState !== 'visible') {
       fail(`스로틀을 끈 숨긴 창의 visibilityState 가 ${show(visibilityState)} 다(기대 "visible" — 양성 기록이 없어 visibilitychange 로 움직이는 렌더러를 가르지 못함)`);
     }
-    if (!added.ok) fail(`visibilityState ${show(visibilityState)} 인 채 <html> 에 tapp-hidden 이 ${WAIT_MS}ms 안에 붙지 않았다(렌더러는 visibilitychange 가 아니라 ${HIDDEN_CHANNEL} 으로 단다)`);
+    if (!added.ok) fail(`visibilityState ${show(visibilityState)} 인 채 ${classMiss(added, [`렌더러는 visibilitychange 가 아니라 ${HIDDEN_CHANNEL} 으로 단다`])}`);
     // 그 숨김에서 경합 시간 + 여유가 지난 뒤 다시 연다(R13)
     await waitElapsed(early.at, CLICK_RACE_MS + ctx.timingMarginMs);
     if (stopped(problems, '②', '도중에')) return;
@@ -917,7 +951,7 @@ function createWindowChecks(ctx) {
     }
     const removed = await waitHiddenClass(false);
     if (stopped(problems, '②', '다시 연 뒤')) return;
-    if (!removed.ok) fail(`다시 보인 뒤 <html> 의 tapp-hidden 이 ${WAIT_MS}ms 안에 빠지지 않았다(마지막에 본 것 ${show(removed.last)})`);
+    if (!removed.ok) fail(`다시 보인 뒤 ${classMiss(removed)}`);
     const contents = ctx.win().webContents;
     contents.setBackgroundThrottling(true);
     throttle.off = false;

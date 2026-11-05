@@ -267,8 +267,9 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
       // win32 는 'request' 숨김 기록을 보자마자(같은 시각) 트레이 클릭 — 경합 창 안의 클릭이 열었다
       expect(escHide).toContain(platform === 'win32' ? "④ 'request' 숨김 기록 0.0ms 뒤 트레이 클릭 → 보임(tray)" : `④ ${reopen}`);
       const visibility = checkOf(outcome, 'visibility').detail;
+      // ① 의 시각은 숨김 기록에서 잰다 — ✕ 의 답과 tapp-hidden 을 본 때(가짜 페이지는 곧바로 답한다)
       expect(visibility).toContain(
-        `① ✕ → tj-hide 수신 1 · 숨김 1(request) · tj-hidden 전달 1 · <html> tapp-hidden · getBackgroundThrottling() true · 파괴 안 됨 → 300.0ms 뒤 ${reopen} · tj-shown 전달 1 · tapp-hidden 빠짐`,
+        `① ✕ → tj-hide 수신 1 · 숨김 1(request) · tj-hidden 전달 1 · <html> tapp-hidden · getBackgroundThrottling() true · 파괴 안 됨 · 숨김 기록 뒤 ✕ 응답 0.0ms · tapp-hidden 확인 0.0ms → 300.0ms 뒤 ${reopen} · tj-shown 전달 1 · tapp-hidden 빠짐`,
       );
       expect(visibility).toContain(`② 스로틀 끔 → win.close() → 숨김(close) · visibilityState "visible" 인데 tapp-hidden → 300.0ms 뒤 ${reopen} · tapp-hidden 빠짐 → 스로틀 켬 · getBackgroundThrottling() true`);
       // 창 검사는 페이지에 테마 네 단계 · 투명도 여덟 줄 · Esc 세 번 · ✕ 와 숨김 상태 다섯 번을 묻는다 — screenshot 의 frames 다음, cspMeta 앞이다
@@ -717,11 +718,16 @@ describe('visibility — ① 진짜 ✕ → 숨김(request) · tj-hidden · tapp
     ],
     ['✕ 단추에 처리기가 없다 — ① 이 숨지 않는다(② 는 돈다)', { renderer: { noHideButton: true } }, ['① tj-hide 수신이 0번이다(기대 1번)', '① 숨김 기록이 없다'], ['②'], []],
     [
-      'main 이 숨어도 tj-hidden 을 밀지 않는다 — 전달 기록이 없고 클래스가 따라오지 않는다',
+      'main 이 숨어도 tj-hidden 을 밀지 않는다 — 전달 기록이 없고 클래스가 따라오지 않는다(페이지는 답했다 — 읽지 못한 것과 가른다)',
       { main: { noHiddenPush: true } },
-      ['① 새 tj-hidden 전달이 0번이다(기대 1번)', '① <html> 에 tapp-hidden 이 5000ms 안에 붙지 않았다', '② visibilityState "visible" 인 채 <html> 에 tapp-hidden 이 5000ms 안에 붙지 않았다'],
+      [
+        '① 새 tj-hidden 전달이 0번이다(기대 1번)',
+        '① <html> 에 tapp-hidden 이 10000ms 안에 붙지 않았다 — 페이지는 ',
+        '번 답했다(마지막에 본 것 {"hiddenClass":false,"visibilityState":"hidden"} · 숨김 기록 뒤 ✕ 응답 0.0ms · 마지막 답 ',
+        '② visibilityState "visible" 인 채 <html> 에 tapp-hidden 이 5000ms 안에 붙지 않았다 — 페이지는 ',
+      ],
       [],
-      [],
+      ['읽지 못했다', '한 번도 답하지 않았다'],
     ],
     [
       'main 이 보여도 tj-shown 을 밀지 않는다 — 다시 보인 뒤 클래스가 빠지지 않는다(앞의 숨김에서 붙은 것도 남았다)',
@@ -773,6 +779,43 @@ describe('visibility — ① 진짜 ✕ → 숨김(request) · tj-hidden · tapp
     for (const text of absent) expect(check.detail).not.toContain(text);
     // 이 검사가 끈 스로틀은 — 다시 켜기 전에 멈춰도(win.close() 가 숨기지 않는다) — 끝에 다시 켰다('sticky' 는 켜지지 않아 실패로 적었다)
     expect(outcome.throttling).toBe(scenario.throttle !== 'sticky');
+    expectEndsShown(outcome);
+  });
+
+  /**
+   * 숨긴(스로틀 켠) 창의 렌더러가 늦다 — ✕ 의 페이지 호출은 hideMs 뒤에(0 이면 곧바로) 답하고, ① 의 tapp-hidden 읽기(visibility 의 둘째
+   * 읽기)는 readMs 뒤에 답한다(null 이면 끝내 답하지 않는다). 숨김 · 전달 · 클래스는 제때 일어난다 — 늦는 것은 페이지의 답뿐이다(실측 한
+   * 번의 약 3초가 이 모양이다).
+   */
+  const slowHiddenPage = (hideMs: number, readMs: number | null): Scenario => {
+    let reads = 0;
+    const later = (ms: number, answer: () => unknown): Promise<unknown> => new Promise((resolve) => setTimeout(() => resolve(answer()), ms));
+    return {
+      page: {
+        'hide-button': (arg, app) => {
+          const seen = HEALTHY_PAGE['hide-button']?.(arg, app);
+          return hideMs === 0 ? seen : later(hideMs, () => seen);
+        },
+        'hidden-state': (arg, app) => {
+          reads += 1;
+          if (reads !== 2) return HEALTHY_PAGE['hidden-state']?.(arg, app);
+          return readMs === null ? new Promise(() => {}) : later(readMs, () => HEALTHY_PAGE['hidden-state']?.(arg, app));
+        },
+      },
+    };
+  };
+
+  it('숨긴 창의 렌더러가 늦다 — ✕ 는 숨김 기록 2초 뒤, ① 의 tapp-hidden 읽기는 그 뒤 6초에 답한다(WAIT_MS 를 넘는다) → PAGE_MS 까지 읽어 ok, 상세에 숨김 기록에서 잰 시각', async () => {
+    const outcome = await runScenario(slowHiddenPage(2_000, 6_000));
+    expect(failing(outcome)).toStrictEqual([]);
+    expect(checkOf(outcome, 'visibility').detail).toContain('파괴 안 됨 · 숨김 기록 뒤 ✕ 응답 2000.0ms · tapp-hidden 확인 8000.0ms → 8000.0ms 뒤 트레이 클릭 → 보임(tray)');
+  });
+
+  it('① 의 tapp-hidden 읽기에 페이지가 끝내 답하지 않는다 → ① 실패 — 읽지 못했다(한 번도 답하지 않았다)로, 렌더러가 붙이지 않은 실패와 가른다 · 숨김 기록에서 잰 ✕ 응답', async () => {
+    const outcome = await runScenario(slowHiddenPage(0, null));
+    const check = expectOnlyFailure(outcome, 'visibility', ['① <html> 의 tapp-hidden 을 10000ms 동안 읽지 못했다 — 페이지가 한 번도 답하지 않았다(숨김 기록 뒤 ✕ 응답 0.0ms)']);
+    expect(check.detail).not.toContain('붙지 않았다');
+    expect(check.detail.split('; ').filter((problem) => problem.startsWith('②')), '② 는 통과한다').toStrictEqual([]);
     expectEndsShown(outcome);
   });
 
