@@ -1,9 +1,10 @@
-// 트레이 화면 상태(trayState)의 계약(설계 §5.4 · §5.3) — 구독 다섯을 먼저 걸고 그 뒤에만 묻는다 · 받은 값(push · 스냅샷)만 반영한다 ·
-// ☀️ · 슬라이더 처리 함수는 main 에 청하기만 하고 미리 바꾸지 않는다 · 숨김은 <html> 의 tapp-hidden · 브리지가 없으면 아무것도 하지 않는다.
+// 트레이 화면 상태(trayState)의 계약(설계 §5.4 · §5.3) — 구독 다섯(브리지의 on* 키 모두 — TJ_DESKTOP_KEYS 에 묶는다)을 먼저 걸고 그 뒤에만
+// 묻는다 · 받은 값(push · 스냅샷)만 반영한다 · ☀️ · 슬라이더 처리 함수는 main 에 청하기만 하고 미리 바꾸지 않는다 · 숨김은 <html> 의
+// tapp-hidden · 브리지가 없으면 아무것도 하지 않는다.
 // 모듈 최상위에 상태가 있어 사례마다 vi.resetModules() 뒤 새로 불러온다. document · localStorage 는 가짜다(node 환경).
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Theme } from '../lib/theme';
-import type { TjDesktop, TrayMode, TrayState } from './desktop';
+import { TJ_DESKTOP_KEYS, type TjDesktop, type TrayMode, type TrayState } from './desktop';
 
 type TrayStateModule = typeof import('./trayState');
 
@@ -173,6 +174,27 @@ describe('connectBridge · requestSnapshot — 먼저 구독하고 그 뒤에만
     tray.requestSnapshot(rig.bridge);
     await settle();
     expect(rig.calls).toEqual([...SUBSCRIPTIONS, 'getState']);
+  });
+
+  it('connectBridge 는 브리지의 on* 키(TJ_DESKTOP_KEYS)를 하나도 빠짐없이 한 번씩 구독하고 그 밖의 키는 부르지 않는다 — 채널을 더하면(#22 tj-compat) 구독도 더해야 통과한다', async () => {
+    const { tray } = await fresh();
+    const called: string[] = [];
+    // TJ_DESKTOP_KEYS 에서 만든 브리지 — 키를 더하면 이 브리지도 그 키를 갖는다(손으로 적은 가짜와 달리 빠뜨릴 수 없다)
+    const bridge = Object.fromEntries(
+      TJ_DESKTOP_KEYS.map((key) => [
+        key,
+        () => {
+          called.push(key);
+          return key.startsWith('on') ? () => {} : Promise.resolve(SNAPSHOT);
+        },
+      ]),
+    ) as unknown as TjDesktop;
+
+    tray.connectBridge(bridge);
+
+    const subscriptions = TJ_DESKTOP_KEYS.filter((key) => key.startsWith('on'));
+    expect(subscriptions.length).toBeGreaterThan(0);
+    expect([...called].sort()).toEqual([...subscriptions].sort());
   });
 
   it('스냅샷은 네 값을 모두 반영한다 — 테마는 <html data-theme> · 저장값에도, visible false 면 tapp-hidden', async () => {
