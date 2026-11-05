@@ -50,7 +50,8 @@ const { isNonEmptyString, isRecord } = guards;
  */
 
 /**
- * 모든 스모크가 요구하는 검사 — 설계 §5.10 표에서 조건부 둘(connectAllowed · net)을 뺀 20개. 순서는 표를 따른다.
+ * 모든 스모크가 요구하는 검사 — #20 설계 §5.10 표에서 조건부 둘(connectAllowed · net)을 뺀 20개에 #21 설계 §5.5 의 창 검사(theme ·
+ * opacity)를 screenshot 바로 뒤에 더한 22개. 순서는 표를 따른다.
  * 얼려 있다 — 부르는 쪽이 고칠 수 없다(requiredChecks 는 복사본을 낸다).
  * @type {readonly string[]}
  */
@@ -72,6 +73,8 @@ const BASE_REQUIRED = Object.freeze([
   'loginItem',
   'tray',
   'screenshot',
+  'theme',
+  'opacity',
   'cspViolations',
   'consoleErrors',
   'cspCanary',
@@ -144,7 +147,7 @@ function isInvalidHostOrigin(value) {
  */
 
 /**
- * 이번 실행이 요구하는 검사 이름 — BASE_REQUIRED 20개 + (.invalid 빌드면) connectAllowed + (--net 이면) net. 런처가 자기 값으로
+ * 이번 실행이 요구하는 검사 이름 — BASE_REQUIRED 22개 + (.invalid 빌드면) connectAllowed + (--net 이면) net. 런처가 자기 값으로
  * 정한다. 호출마다 새 배열이다.
  * @param {RequiredOptions} [options]
  * @returns {string[]}

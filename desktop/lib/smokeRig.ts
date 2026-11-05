@@ -3,10 +3,14 @@
 // 부터 결과 · 최신 메뉴의 '종료' 까지 돌린다. electron 은 import · require 하지 않는다(import type 포함 — 루트 검사는 desktop/node_modules
 // 없이 돈다). 이름이 *.test.ts 가 아니어서 vitest 가 시험으로 모으지 않는다. 사례마다의 준비 · 정리는 시험 파일 최상위에서
 // installRigLifecycle() 을 한 번 불러 건다.
-// - 흉내 낸 main(main.js 의 창 · 트레이 · 첫 실행 갈래) — 실제 lib(windowPolicy · trayMenu · autostart · pushChannels, 첫 실행 표시를 쓰는
-//   settings)로 돌고, 창 보이기 · 숨기기 · 렌더러로 민 채널 · 로그인 항목 요청을 실행기의 record 로, 만든 메뉴와 아이콘을 setTray 로
-//   넘긴다. 메뉴 항목 · 아이콘 · 로그인 항목(Windows 흉내 — approved 포함)은 mainWiring 의 가짜 electron 과 같은 것(fakeElectron.ts 의
-//   fakeMenuItems · fakeImageFromPath · createFakeLoginItems)을 쓴다. 사례는 Scenario.main 으로 main 의 결함 하나를 고른다.
+// - 흉내 낸 main(main.js 의 창 · 트레이 · 첫 실행 갈래 · 테마 · 투명도 · getState) — 실제 lib(windowPolicy · trayMenu · autostart ·
+//   pushChannels · theme · opacity, 설정 파일을 쓰는 settings)로 돌고, 창 보이기 · 숨기기 · 렌더러로 민 채널 · 로그인 항목 요청을 실행기의
+//   record 로, 만든 메뉴와 아이콘을 setTray 로 넘긴다. 설정 저장은 main 처럼 가짜 시계의 300ms 예약이다(프로필의 settings.json). 메뉴 항목 ·
+//   아이콘 · 로그인 항목(Windows 흉내 — approved 포함)은 mainWiring 의 가짜 electron 과 같은 것(fakeElectron.ts 의 fakeMenuItems ·
+//   fakeImageFromPath · createFakeLoginItems)을 쓴다. 사례는 Scenario.main 으로 main 의 결함 하나를 고른다.
+// - 가짜 렌더러(src/tray/trayState.ts 흉내) — main 이 민 tj-theme 를 <html data-theme> 과 저장값(tj_theme)에 반영한다. 페이지의 테마 ·
+//   투명도 처리기는 렌더러의 send 뒤에 main 의 getState 를 부른다(같은 IPC 순서 — 앞의 send 가 먼저 처리된다). 사례는 Scenario.renderer 로
+//   렌더러의 결함 하나를 고른다.
 // - 갈래(Scenario.platform, 기본 win32)는 실행기에 넘기는 platform 과 흉내 낸 main 만 따른다. 그 전부터 있던 검사(ipc · sandboxEffective ·
 //   securityWarnings)와 AppInfo.platform 은 호스트 값 그대로다.
 // - IPC 가짜는 채널마다 리스너를 여럿 갖고(main 의 처리기 → 실행기의 수신 기록), 렌더러의 send 는 그 채널의 리스너를 모두 부른다.
@@ -50,8 +54,10 @@ const { isPermissionAllowed } = require('./permissions.cjs') as typeof import('.
 const { AUTOSTART_NAME, autostartChecked, canManageLoginItems, firstRunAutostart, loginItemQuery, loginItemSettings } =
   require('./autostart.cjs') as typeof import('./autostart.cjs');
 const { FEEDBACK_URL, WEB_URL } = require('./links.cjs') as typeof import('./links.cjs');
-const { PUSH_CHANNELS } = require('./pushChannels.cjs') as typeof import('./pushChannels.cjs');
+const { DEFAULT_OPACITY, normalizeOpacity } = require('./opacity.cjs') as typeof import('./opacity.cjs');
+const { PUSH_CHANNELS, buildSnapshot } = require('./pushChannels.cjs') as typeof import('./pushChannels.cjs');
 const { DEFAULT_SETTINGS, SETTINGS_FILE, writeSettings } = require('./settings.cjs') as typeof import('./settings.cjs');
+const { THEME_BACKGROUND, normalizeTheme } = require('./theme.cjs') as typeof import('./theme.cjs');
 const { buildTrayMenuTemplate } = require('./trayMenu.cjs') as typeof import('./trayMenu.cjs');
 const { BLUR_GRACE_MS, deferredBlurAction, shouldHideOnBlur, trayClickAction } = require('./windowPolicy.cjs') as typeof import('./windowPolicy.cjs');
 
@@ -96,6 +102,18 @@ export const RIG_FAKE_TIMERS: Parameters<typeof vi.useFakeTimers>[0] = { toFake:
 export const DEFAULT_PLATFORM: FakePlatform = 'win32';
 /** 흉내 낸 main 이 트레이에 붙이는 아이콘 크기(main.js 의 createTray). */
 const TRAY_ICON_SIZE = { width: 16, height: 16 } as const;
+/** main 의 저장 예약(main.js 의 SAVE_DELAY_MS — 설계 §5.1) — 가짜 시계에서 돈다. */
+const SAVE_DELAY_MS = 300;
+/** '받은 값을 나중에 저장' 하는 결함의 예약 — 실행기가 settings.json 을 기다리는 상한(support.cjs 의 WAIT_MS 5초)보다 길다. */
+const LATE_SAVE_MS = 10_000;
+/**
+ * 페이지의 배경 — index.css 의 --bg 토큰과 Chromium 이 계산한 body 배경(getComputedStyle 의 모양). <html data-theme> 이 'light' 면 라이트
+ * 토큰이고, 그 밖(없음 · 'dark' · 모르는 이름)은 :root 의 다크 토큰이다.
+ */
+const PAGE_BACKGROUND = {
+  dark: { bgToken: '#0d1117', bodyBackground: 'rgb(13, 17, 23)' },
+  light: { bgToken: '#f5f6f8', bodyBackground: 'rgb(245, 246, 248)' },
+} as const;
 /** Electron 이 가드의 취소로 탐침을 거부할 때의 글(실제 스모크가 본 그대로). */
 export const BLOCKED = 'net::ERR_BLOCKED_BY_CLIENT';
 export const NOT_RESOLVED = 'net::ERR_NAME_NOT_RESOLVED';
@@ -139,7 +157,9 @@ const SCREEN = {
   getSize: () => ({ width: 4, height: 4 }),
 };
 
-/** 가짜 앱 — 페이지 처리기가 사실을 낼 때 쓰는 자리(콘솔 · 위반 · 원격 요청 · 탐색 · 결정 기록). */
+/** 가짜 렌더러가 그린 페이지 — <html data-theme> 과 저장값(localStorage.tj_theme, 없으면 null). */
+export type FakeDom = { dataTheme: string; stored: string | null };
+/** 가짜 앱 — 페이지 처리기가 사실을 낼 때 쓰는 자리(콘솔 · 위반 · 원격 요청 · 탐색 · 결정 기록 · 렌더러의 send · getState). */
 export type FakeApp = {
   build: TrayBuild;
   /** main 이 webContents 에 거는 탐색 가드 — 실행기의 record · open 에 잇는다 */
@@ -159,6 +179,12 @@ export type FakeApp = {
   url(): string;
   /** 렌더러의 send — 그 채널의 리스너(main 의 처리기 → 실행기의 수신 기록)를 모두 부른다 */
   send(channel: string, ...payload: unknown[]): void;
+  /** 렌더러의 getState()(invoke tj-get-state) — main 메모리의 스냅샷. 앞의 send 를 main 이 먼저 처리했다(같은 IPC 순서) */
+  getState(): unknown;
+  /** 가짜 렌더러가 그린 페이지 — main 이 민 tj-theme 를 반영한다(Scenario.renderer 의 결함이 없으면) */
+  dom: FakeDom;
+  /** OS 가 창의 포커스를 가져간다(우연한 blur — 실행기가 일으키지 않은 숨김의 시작) */
+  osBlur(): void;
   /** 이 PC 의 로그인 항목(Windows 흉내) — 실행 도중에 바꾸면 다른 프로그램 · 작업 관리자가 바꾼 것이다 */
   loginItems: FakeLoginItem[];
 };
@@ -167,6 +193,8 @@ export type PageHandler = (arg: unknown, app: FakeApp) => unknown;
 export type MenuTemplate = Array<Record<string, unknown>>;
 /** main 의 숨김 이유(main.js 의 HideReason). */
 type HideReason = 'blur' | 'request' | 'close' | 'toggle' | 'menu';
+/** 설정의 테마(settings.cjs 의 Settings.theme). */
+type Theme = 'dark' | 'light';
 
 /** 흉내 낸 main 의 결함 하나(사례가 고른다 — 그 검사의 음성 갈래). 주지 않은 것은 main.js 와 같다. */
 export type MainFlaw = {
@@ -194,6 +222,37 @@ export type MainFlaw = {
   noFirstRunFlag?: boolean;
   /** 로그인 항목 가드가 샌다 — 스모크인데 관리한다고 보고 app.setLoginItemSettings 를 부른다(메뉴의 '자동 실행' 켜짐은 그대로) */
   leakLoginItem?: boolean;
+  /** 테마를 바꿔도(IPC · 메뉴의 '라이트 모드') 메뉴를 다시 만들지 않는다 */
+  themeNoRefresh?: boolean;
+  /** 테마 상태를 바꾸기 전에 메뉴를 다시 만든다 — 새 메뉴의 '라이트 모드' 가 낡은 값이다 */
+  themeRefreshFirst?: boolean;
+  /** 메뉴의 '라이트 모드' 처리기가 item.checked 대신 지금 상태를 뒤집는다 — 낡은 메뉴의 클릭이 사용자가 본 것과 반대로 간다 */
+  lightFlipsState?: boolean;
+  /**
+   * normalizeTheme 을 거치지 않는다 — 'purple' 같은 글도 상태 · 렌더러 · 메뉴 · 저장에 쓴다. 창 배경은 표에 있는 이름일 때만 바꾼다
+   * (Electron 의 setBackgroundColor 는 색이 아닌 값에 던진다 — 이 결함은 던지지 않는 쪽이다)
+   */
+  themeAcceptsAny?: boolean;
+  /** 테마를 바꿔도 창 배경(setBackgroundColor)을 그대로 둔다 */
+  themeNoBackground?: boolean;
+  /** 테마를 바꿔도 저장을 예약하지 않는다 */
+  themeNoSave?: boolean;
+  /** 투명도에 숫자 글('70')도 받는다(Number 로 바꾼 뒤 거른다) */
+  opacityAcceptsString?: boolean;
+  /** 받지 않는 투명도를 무시하지 않고 기본값(100)으로 바꾼다 */
+  opacityDefaultsInvalid?: boolean;
+  /** 받은 투명도를 나중에 저장한다 — 저장 예약(LATE_SAVE_MS)이 실행기의 기다림보다 길다 */
+  opacitySavesLater?: boolean;
+  /** 투명도를 바꿔도 창(setOpacity)은 그대로 둔다 — 스냅샷은 맞고 창은 틀리다 */
+  opacityNoWindow?: boolean;
+};
+
+/** 가짜 렌더러의 결함 하나(사례가 고른다). 주지 않은 것은 src/tray/trayState.ts 와 같다(받은 테마를 data-theme · 저장값에 반영한다). */
+export type RendererFlaw = {
+  /** 받은 테마를 저장값(localStorage.tj_theme)에 쓰지 않는다 — 처음 스냅샷 때도 */
+  noStoreTheme?: boolean;
+  /** 받은 테마로 <html data-theme> 을 바꾸지 않는다(첫 페인트의 dark 그대로) */
+  noDataTheme?: boolean;
 };
 
 export type Scenario = {
@@ -232,6 +291,8 @@ export type Scenario = {
   loginItems?: readonly FakeLoginItem[];
   /** 흉내 낸 main 의 결함 하나 */
   main?: MainFlaw;
+  /** 가짜 렌더러의 결함 하나 */
+  renderer?: RendererFlaw;
   /** 실행기를 만든 뒤 app.setLoginItemSettings 를 원래 메서드로 되돌린다(누군가 D1 의 대체 함수를 다시 바꿔 끼웠다) */
   unplugBlocker?: boolean;
 };
@@ -411,11 +472,25 @@ export function canaryLikeChromium(app: FakeApp, { policies = ['meta', 'header']
 /** 실제 앱이 낼 페이지 사실 — 태그마다. 장벽은 rig 가 따로 본다(표식을 콘솔에 찍는다). */
 export function healthyPage(index: FileIndex): Record<string, PageHandler> {
   return {
-    boot: () => ({ rootChildren: 1, title: '십이장기', version: APP_VERSION, bodyBackground: 'rgb(13, 17, 23)', bgToken: '#0d1117', colorScheme: 'dark' }),
+    boot: () => ({ rootChildren: 1, title: '십이장기', version: APP_VERSION, ...PAGE_BACKGROUND.dark, colorScheme: 'dark' }),
     'main-world': () => ({ isoProbe: 'undefined', cspBuffer: 'undefined', require: 'undefined', process: 'undefined' }),
     'disable-warnings': () => false,
     bridge: () => ({ keys: ['getAppInfo'], contract: ['getAppInfo'] }),
     frames: () => true,
+    // 테마 한 단계(pageScripts.cjs 의 themeScript) — 테마가 있으면 렌더러의 send(tj-set-theme) 뒤, 없으면(null — 메뉴를 누른 뒤) 곧바로
+    // getState() 장벽. 장벽 뒤의 페이지(가짜 렌더러가 그린 data-theme · 저장값과 그 data-theme 의 --bg · body 배경)를 돌려준다
+    theme: (arg, app) => {
+      if (arg !== null) app.send('tj-set-theme', arg);
+      const snapshot = app.getState();
+      const { dataTheme, stored } = app.dom;
+      return { snapshot, dataTheme, ...PAGE_BACKGROUND[dataTheme === 'light' ? 'light' : 'dark'], stored };
+    },
+    // 투명도 한 줄(opacityScript) — 태그의 인자는 표식이다: { nan: true } 면 페이지 코드가 만든 NaN 을, 그 밖은 { value } 를 보낸 뒤 장벽
+    opacity: (arg, app) => {
+      const marker = arg as { nan?: boolean; value?: unknown };
+      app.send('tj-set-opacity', marker.nan === true ? Number.NaN : marker.value);
+      return app.getState();
+    },
     'csp-meta': (_arg, app) => ({ contents: [app.build.csp.meta], inHead: [true] }),
     'csp-header': (arg, app) =>
       (arg as string[]).map((url) => ({ url, status: 200, csp: app.build.csp.header, nosniff: 'nosniff', contentType: url.endsWith('.html') ? MIME_HTML : MIME_JS })),
@@ -454,17 +529,28 @@ const windowEvent = (): WindowEvent => ({ preventDefault: () => {} });
  * 가짜 트레이 창 — 숨긴 채 만든다(show: false — main 이 ready-to-show 에 보인다). Electron 처럼 show() · hide() 는 보임이 바뀔 때 'show' ·
  * 'hide' 를 내고(hide 는 포커스도 잃는다), focus() 가 포커스를 주고, close() 는 막을 수 있는 'close' 를 낸다(막지 않으면 숨는다 — 종료 중).
  * emit 은 상태를 바꾸지 않는다(실행기의 win.emit('blur') 는 포커스를 그대로 둔다 — Electron 의 emit 과 같다). OS 가 포커스를 가져간 것은
- * osBlur() 다(포커스를 끄고 blur 를 낸다).
+ * osBlur() 다(포커스를 끄고 blur 를 낸다). 배경색 · 투명도는 창을 만들 때의 값(main 의 backgroundColor · opacity 옵션)에서 시작한다 —
+ * getBackgroundColor() 는 Electron 처럼 '#RRGGBB'(대문자)로, setOpacity 는 0–1 로 자른다.
  */
-function fakeTrayWindow(webContents: unknown) {
+function fakeTrayWindow(webContents: unknown, initial: { backgroundColor: string; opacity: number }) {
   const events = new EventEmitter();
   let visible = false;
   let focused = false;
+  let background = initial.backgroundColor;
+  let opacity = initial.opacity;
   const win = {
     webContents,
     isDestroyed: (): boolean => false,
     isVisible: (): boolean => visible,
     isFocused: (): boolean => focused,
+    setBackgroundColor: (color: string): void => {
+      background = color;
+    },
+    getBackgroundColor: (): string => background.toUpperCase(),
+    setOpacity: (value: number): void => {
+      opacity = Math.min(1, Math.max(0, value));
+    },
+    getOpacity: (): number => opacity,
     show: (): void => {
       if (visible) return;
       visible = true;
@@ -509,6 +595,8 @@ type MainLikeInput = {
   win: FakeTrayWindow;
   /** OS 가 창의 포커스를 가져간다(우연한 blur) */
   osBlur(): void;
+  /** 렌더러로 민 값을 가짜 렌더러에 건넨다(main 의 webContents.send) */
+  deliver(channel: string, value: unknown): void;
   run: SmokeRun;
   /** <프로필>/settings.json — main 이 userData 로 쓰는 프로필 */
   settingsFile: string;
@@ -517,14 +605,15 @@ type MainLikeInput = {
 };
 
 /**
- * 흉내 낸 main — main.js 의 첫 실행 갈래(loadSettings) · tj-hide 처리기 · 창 사건(show · hide · blur · close) · 보이기 · 숨기기 · 트레이(좌클릭 ·
- * 메뉴 · setTray) · 종료(before-quit)를 실제 lib(windowPolicy · trayMenu · autostart · pushChannels · settings)로 흉내 낸다. 시각은
- * performance.now() 다(RIG_FAKE_TIMERS 가 가짜로 돌린다 — 실행기의 at 과 같은 시계). 기록은 실행기의 record 로, 메뉴 · 아이콘은 setTray 로
- * 넘기고, 창 기록은 windows 에도 남긴다(시험이 본다). flaw 가 결함 하나를 넣는다.
- * 흉내 내지 않는 것: 테마 · 투명도 · 레이아웃 IPC, 저장 예약, 창 배경 · 배치, 우클릭(실행기가 내지 않는다), macOS 의 메뉴 붙이기 · D6 —
- * 메뉴의 라이트 모드 · 창 고정 · 위치 초기화 · 자동 실행은 상태만 바꾸고 메뉴를 다시 만든다(이 장치의 검사가 누르지 않는다).
+ * 흉내 낸 main — main.js 의 첫 실행 갈래(loadSettings) · IPC 처리기(tj-get-state · tj-set-theme · tj-set-opacity · tj-hide) · 테마 ·
+ * 투명도(applyTheme · applyOpacity) · 저장 예약 · 창 사건(show · hide · blur · close) · 보이기 · 숨기기 · 트레이(좌클릭 · 메뉴 · setTray) ·
+ * 종료(before-quit — 예약된 저장을 비운다)를 실제 lib(windowPolicy · trayMenu · autostart · pushChannels · theme · opacity · settings)로 흉내
+ * 낸다. 시각은 performance.now() 다(RIG_FAKE_TIMERS 가 가짜로 돌린다 — 실행기의 at 과 같은 시계). 기록은 실행기의 record 로, 메뉴 ·
+ * 아이콘은 setTray 로, 민 값은 deliver 로(가짜 렌더러) 넘기고, 창 기록은 windows 에도 남긴다(시험이 본다). flaw 가 결함 하나를 넣는다.
+ * 흉내 내지 않는 것: 레이아웃 IPC, 창 배치, 우클릭(실행기가 내지 않는다), macOS 의 메뉴 붙이기 · D6, rename 재시도 — 메뉴의 창 고정 ·
+ * 위치 초기화 · 자동 실행은 상태만 바꾸고 메뉴를 다시 만든다(이 장치의 검사가 누르지 않는다).
  */
-function createMainLike({ platform, flaw, app, win, osBlur, run, settingsFile, iconFile }: MainLikeInput) {
+function createMainLike({ platform, flaw, app, win, osBlur, deliver, run, settingsFile, iconFile }: MainLikeInput) {
   const settings = { ...DEFAULT_SETTINGS };
   let isQuitting = false;
   let shownIntent = false;
@@ -533,6 +622,8 @@ function createMainLike({ platform, flaw, app, win, osBlur, run, settingsFile, i
   let lastBlurHideAt = -Infinity;
   let deferredBlur: ReturnType<typeof setTimeout> | null = null;
   let strayBlurPending = flaw.strayBlurAfterTrayShow !== undefined;
+  let mode: 'solo' | 'online' = 'solo';
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
   const windows: Outcome['windows'] = [];
   const source = fakeImageFromPath(iconFile);
   const icon = flaw.icon === 'unresized' ? source : source.resize(TRAY_ICON_SIZE);
@@ -549,9 +640,24 @@ function createMainLike({ platform, flaw, app, win, osBlur, run, settingsFile, i
     if (deferredBlur !== null) clearTimeout(deferredBlur);
     deferredBlur = null;
   };
-  const sendToTray = (channel: string): void => {
+  /** main 의 sendToTray — PUSH_CHANNELS 의 채널만 렌더러에 민 뒤(webContents.send) 'sent' 를 기록한다. */
+  const sendToTray = (channel: string, value?: unknown): void => {
     if (!Object.hasOwn(PUSH_CHANNELS, channel) || !live()) return;
+    deliver(channel, value);
     run.record({ kind: 'sent', channel });
+  };
+  /** 지금의 설정을 프로필의 settings.json 에 쓴다(settings.cjs — 임시 파일에 쓰고 rename). */
+  const writeNow = (): void => {
+    const error = writeSettings(settingsFile, settings);
+    if (error !== null) throw error;
+  };
+  /** main 의 saveSettingsSoon — 앞선 예약을 덮고 delay 뒤에 그때의 설정을 쓴다. */
+  const saveSoon = (delay: number = SAVE_DELAY_MS): void => {
+    if (saveTimer !== null) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      writeNow();
+    }, delay);
   };
   const noteWindow = (action: 'show' | 'hide', reason: string): void => {
     windows.push({ action, reason });
@@ -621,6 +727,39 @@ function createMainLike({ platform, flaw, app, win, osBlur, run, settingsFile, i
     for (let i = 0; i < times; i += 1) run.record({ kind: 'login-item', on, managed });
   }
 
+  /**
+   * 테마 — main.js 의 applyTheme: normalizeTheme(받지 않는 값은 무시) → 설정 · 저장 예약 → 창 배경(THEME_BACKGROUND) → tj-theme → 메뉴
+   * 다시 만들기. 같은 값이어도 한다(낡은 메뉴의 클릭도 메뉴를 새로 만든다).
+   */
+  function applyTheme(theme: unknown): void {
+    const value = flaw.themeAcceptsAny === true && typeof theme === 'string' ? theme : normalizeTheme(theme);
+    if (value === null || !live()) return;
+    if (flaw.themeRefreshFirst === true) refreshTrayMenu();
+    settings.theme = value as Theme; // themeAcceptsAny 결함이면 표에 없는 글도 들어간다
+    if (flaw.themeNoSave !== true) saveSoon();
+    const background = (THEME_BACKGROUND as Readonly<Record<string, string | undefined>>)[value];
+    if (flaw.themeNoBackground !== true && background !== undefined) win.setBackgroundColor(background);
+    sendToTray('tj-theme', value);
+    if (flaw.themeNoRefresh !== true && flaw.themeRefreshFirst !== true) refreshTrayMenu();
+  }
+
+  /** 투명도 — main.js 의 applyOpacity: normalizeOpacity(반올림 · 30–100, 받지 않는 값은 무시) → 창 투명도 → 설정 · 저장 예약 → tj-opacity(자른 값). */
+  function applyOpacity(percent: unknown): void {
+    const given = flaw.opacityAcceptsString === true && typeof percent === 'string' ? Number(percent) : percent;
+    const value = normalizeOpacity(given) ?? (flaw.opacityDefaultsInvalid === true ? DEFAULT_OPACITY : null);
+    if (value === null || !live()) return;
+    if (flaw.opacityNoWindow !== true) win.setOpacity(value / 100);
+    settings.opacity = value;
+    saveSoon(flaw.opacitySavesLater === true ? LATE_SAVE_MS : SAVE_DELAY_MS);
+    sendToTray('tj-opacity', value);
+  }
+
+  /** 메뉴의 '라이트 모드' 가 청하는 테마 — item.checked(Electron 이 click 전에 뒤집은 값)다. lightFlipsState 결함이면 지금 상태를 뒤집는다. */
+  function lightRequest(on: boolean): Theme {
+    if (flaw.lightFlipsState === true) return settings.theme === 'light' ? 'dark' : 'light';
+    return on ? 'light' : 'dark';
+  }
+
   function refreshTrayMenu(): void {
     if (!live()) return;
     const loginItem = platform === 'win32' ? app.getLoginItemSettings(loginItemQuery(platform)) : {};
@@ -635,17 +774,15 @@ function createMainLike({ platform, flaw, app, win, osBlur, run, settingsFile, i
       },
       {
         open: () => thenRefresh(() => showWindow('menu')),
-        solo: () => thenRefresh(() => setMode()),
-        online: () => thenRefresh(() => setMode()),
+        solo: () => thenRefresh(() => setMode('solo')),
+        online: () => thenRefresh(() => setMode('online')),
         setAutostart: (on) =>
           thenRefresh(() => {
             setLoginItem(on);
             if (platform === 'darwin') settings.autostart = on;
           }),
-        setLight: (on) =>
-          thenRefresh(() => {
-            settings.theme = on ? 'light' : 'dark';
-          }),
+        // main.js 처럼 applyTheme 이 끝에서 스스로 메뉴를 다시 만든다(thenRefresh 를 거치지 않는다)
+        setLight: (on) => applyTheme(lightRequest(on)),
         setPinned: (on) =>
           thenRefresh(() => {
             settings.pinned = on;
@@ -666,18 +803,27 @@ function createMainLike({ platform, flaw, app, win, osBlur, run, settingsFile, i
     action();
     refreshTrayMenu();
   };
-  /** 혼자 하기 · 온라인 대전 — 렌더러에 tj-mode 를 민 뒤 보인다(모드 값은 흉내 내지 않는다 — getState 가 없다). */
-  function setMode(): void {
-    sendToTray('tj-mode');
+  /** 혼자 하기 · 온라인 대전 — 모드를 바꾸고 렌더러에 tj-mode 를 민 뒤 보인다(main.js 의 setMode). */
+  function setMode(next: 'solo' | 'online'): void {
+    mode = next;
+    sendToTray('tj-mode', next);
     showWindow('menu');
   }
 
   app.on('before-quit', () => {
     isQuitting = true;
     clearDeferredBlur();
+    // main 의 비우기(flushSettings) — 예약된 저장을 곧바로 쓴다
+    if (saveTimer !== null) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      writeNow();
+    }
   });
   return {
     windows,
+    /** main 의 tj-get-state(invoke) — main 메모리의 스냅샷(buildSnapshot — visible 은 shownIntent) */
+    getState: (): unknown => buildSnapshot({ settings, mode, visible: shownIntent }),
     /** 첫 실행(새 프로필) — win32 는 자동 실행 기본값(setLoginItem(true) — 스모크는 관리하지 않아 기록만 남는다), 그 밖은 끈 채. 표시하고 곧바로 쓴다 */
     loadSettings(): void {
       if (firstRunAutostart(platform)) setLoginItem(true);
@@ -686,8 +832,10 @@ function createMainLike({ platform, flaw, app, win, osBlur, run, settingsFile, i
       const error = writeSettings(settingsFile, settings);
       if (error !== null) throw error;
     },
-    /** main 채널 중 흉내 내는 것 — tj-hide(Esc · ✕) */
+    /** main 채널 중 send 로 받는 것(main.js 의 차례 — tj-set-layout 은 흉내 내지 않는다). tj-get-state 는 invoke 라 getState 로 따로 준다 */
     registerIpc(on: (channel: string, listener: IpcListener) => void): void {
+      on('tj-set-theme', (_event, theme) => applyTheme(theme));
+      on('tj-set-opacity', (_event, percent) => applyOpacity(percent));
       on('tj-hide', () => hideWindow('request'));
     },
     /** 창 사건 — show · hide 는 렌더러에 tj-shown · tj-hidden, blur 는 바깥 클릭, close 는 숨김(종료 중이 아니면) */
@@ -840,6 +988,7 @@ export function rigScenario(scenario: Scenario = {}): Rig {
   const info = { version: APP_VERSION, electron: ELECTRON_VERSION, chrome: process.versions.chrome, platform: process.platform };
   const contents = Object.assign(events, {
     session: defaultSession,
+    isDestroyed: (): boolean => false,
     getURL: () => currentUrl,
     getOSProcessId: () => RENDERER_PID,
     getLastWebPreferences: () => ({ ...WEB_PREFERENCES }),
@@ -868,8 +1017,18 @@ export function rigScenario(scenario: Scenario = {}): Rig {
       return worldId === 999 ? { probe: 1, buf: buffer.map((violation) => ({ ...violation })) } : { probe: undefined, buf: undefined };
     },
   });
-  const { win, osBlur } = fakeTrayWindow(contents);
+  // 창은 main 의 옵션(새 프로필 — 설정 기본값의 테마 배경 · 투명도)으로 만든다
+  const { win, osBlur } = fakeTrayWindow(contents, { backgroundColor: THEME_BACKGROUND[DEFAULT_SETTINGS.theme], opacity: DEFAULT_SETTINGS.opacity / 100 });
   const mainFetch = scenario.mainFetch ?? (async (url: string) => ({ status: resolveAppRequest({ url, method: 'GET' }, index).status }));
+  // 가짜 렌더러 — 새 프로필의 첫 화면에서 시작한다: main.tsx 가 지난 테마(없음 → dark)로 data-theme 을 칠했고, 처음 스냅샷(dark)이 저장값을
+  // 썼다. main 이 민 tj-theme 는 trayState 처럼 data-theme · 저장값에 반영한다(결함이 없으면)
+  const rendererFlaw = scenario.renderer ?? {};
+  const dom: FakeDom = { dataTheme: 'dark', stored: rendererFlaw.noStoreTheme === true ? null : 'dark' };
+  const deliver = (channel: string, value: unknown): void => {
+    if (channel !== 'tj-theme' || typeof value !== 'string') return;
+    if (rendererFlaw.noDataTheme !== true) dom.dataTheme = value;
+    if (rendererFlaw.noStoreTheme !== true) dom.stored = value;
+  };
 
   // main 의 onReady 순서 — 실행기(D1 이 맨 먼저 선다) → 첫 실행 갈래 → 가드 → IPC(main 채널 → 실행기) → 창(수집기) → 트레이(시작 메뉴)
   const run = createSmokeRun({
@@ -884,7 +1043,7 @@ export function rigScenario(scenario: Scenario = {}): Rig {
     platform,
   });
   if (scenario.unplugBlocker === true) app.setLoginItemSettings = realSetLoginItemSettings;
-  const main = createMainLike({ platform, flaw, app, win, osBlur, run, settingsFile: join(profile, SETTINGS_FILE), iconFile });
+  const main = createMainLike({ platform, flaw, app, win, osBlur, deliver, run, settingsFile: join(profile, SETTINGS_FILE), iconFile });
   main.loadSettings();
   const fakeApp: FakeApp = {
     build: trayBuild,
@@ -910,6 +1069,9 @@ export function rigScenario(scenario: Scenario = {}): Rig {
     },
     url: () => currentUrl,
     send: ipcSend,
+    getState: () => main.getState(),
+    dom,
+    osBlur,
     loginItems: loginItems.items,
   };
   // 사례의 onBeforeRequest — main 의 순서대로 가드가 먼저다. null 이면 붙이지 않는다

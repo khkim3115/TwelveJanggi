@@ -2,7 +2,7 @@
 // 스모크가 페이지에서 돌리는 코드(설계 §5.10) — 실행기(run.cjs)와 능동 검사(active.cjs)가 executeJavaScript(main world)로 보내고, preload 의
 // 격리 world 는 executeJavaScriptInIsolatedWorld 로 읽는다. 코드는 글이라 타입 검사 밖이다 — 작게 두고, 밖에서 넣는 값은 JSON 으로만 넣는다.
 // main world 코드는 모두 태그 주석(/* tj-smoke:<이름> <인자 JSON> */)으로 시작한다. 페이지는 주석을 무시하고, 단위 시험의 가짜 페이지
-// (desktop/lib/smokeRun.test.ts)는 이 주석으로 코드를 가르고 인자를 읽는다 — 코드 본문을 해석하지 않는다.
+// (desktop/lib/smokeRig.ts)는 이 주석으로 코드를 가르고 인자를 읽는다 — 코드 본문을 해석하지 않는다.
 // 페이지 쪽 실패(fetch 거부 · 권한 API 의 예외)는 던지지 않고 값으로 돌려준다 — 판정은 실행기가 한다.
 // electron 을 require 하지 않는다.
 
@@ -80,6 +80,57 @@ const FRAMES_SCRIPT = tagged(
   requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
 })`,
 );
+
+/**
+ * 테마 한 단계의 페이지 쪽(창 검사 theme) — theme 이 있으면 브리지로 setTheme(theme) 을 보내고(값은 고치지 않는다 — 'purple' 도. 거르는
+ * 것은 main 이다), null 이면(메뉴를 누른 뒤) 보내지 않는다. 그다음 getState() 를 왕복한다 — 순서 장벽이다(앞의 send 와 main 이 민 tj-theme 가
+ * 응답보다 먼저 처리된다). 장벽 뒤의 스냅샷 · <html data-theme> · --bg 토큰 · body 배경(계산값) · 저장값(localStorage.tj_theme)을 돌려준다.
+ * @param {string | null} theme
+ * @returns {string}
+ */
+function themeScript(theme) {
+  const request = theme === null ? '' : `window.tjDesktop.setTheme(${JSON.stringify(theme)});\n  `;
+  return tagged(
+    'theme',
+    `(async () => {
+  ${request}const snapshot = await window.tjDesktop.getState();
+  const root = document.documentElement;
+  let stored;
+  try {
+    stored = localStorage.getItem('tj_theme');
+  } catch (err) {
+    stored = 'error: ' + String(err);
+  }
+  return {
+    snapshot,
+    dataTheme: root.dataset.theme ?? null,
+    bgToken: getComputedStyle(root).getPropertyValue('--bg').trim(),
+    bodyBackground: getComputedStyle(document.body).backgroundColor,
+    stored,
+  };
+})()`,
+    theme,
+  );
+}
+
+/**
+ * 투명도 한 줄의 페이지 쪽(창 검사 opacity) — 브리지로 setOpacity(value) 를 보낸 뒤(값은 고치지 않는다 — '70' · null 도) getState() 를 왕복하고
+ * (순서 장벽) 그 스냅샷을 돌려준다. NaN 은 JSON 이 null 로 바꾸므로 코드 안에서 만든다 — 태그의 인자는 표식 { nan: true } 이고(가짜 페이지가
+ * 읽는다), 그 밖은 { value } 다. value 는 JSON 으로 쓸 수 있는 값이거나 NaN 이다(실행기의 투명도 표).
+ * @param {unknown} value
+ * @returns {string}
+ */
+function opacityScript(value) {
+  const nan = typeof value === 'number' && Number.isNaN(value);
+  return tagged(
+    'opacity',
+    `(async () => {
+  window.tjDesktop.setOpacity(${nan ? 'Number.NaN' : JSON.stringify(value)});
+  return window.tjDesktop.getState();
+})()`,
+    nan ? { nan: true } : { value },
+  );
+}
 
 /** preload 의 격리 world — Electron 이 contextIsolation 에 쓰는 world 번호. */
 const ISOLATED_WORLD_ID = 999;
@@ -228,6 +279,8 @@ module.exports = {
   DISABLE_WARNINGS_SCRIPT,
   BRIDGE_SCRIPT,
   FRAMES_SCRIPT,
+  themeScript,
+  opacityScript,
   CSP_META_SCRIPT,
   headersScript,
   protocolScript,

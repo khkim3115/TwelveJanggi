@@ -5,9 +5,10 @@
 // 스모크가 보고, 여기서는 가짜가 내놓는 사실이 바뀔 때 검사가 판정을 바꾸는지 본다. 음성 사례는 아직 일부 검사에만 있다 —
 // webPreferences · sandboxEffective · bridge · ipc · mime · screenshot 은 여기서 양성 갈래만 탄다(webPreferences · screenshot 의 판정 함수
 // evaluateWebPreferences · countDistinctColors 는 smokeChecks.test.ts 가 음성까지 본다).
-// - 가짜 Electron 장치(rigScenario — 가짜 페이지 · 기본 세션 · 흉내 낸 main · 시계)와 사례마다의 준비 · 정리(installRigLifecycle)는
-//   smokeRig.ts 에 있다(#36 T6-8 · T11-5). 사례는 손잡이 하나 — 페이지 처리기(Scenario.page) · main 의 결함(Scenario.main) · 갈래 ·
-//   로그인 항목 — 를 바꿔 그 검사의 음성 갈래를 탄다(#36 runner-N1 의 tray · boot · loginItem).
+// - 가짜 Electron 장치(rigScenario — 가짜 페이지 · 기본 세션 · 흉내 낸 main · 가짜 렌더러 · 시계)와 사례마다의 준비 · 정리
+//   (installRigLifecycle)는 smokeRig.ts 에 있다(#36 T6-8 · T11-5). 사례는 손잡이 하나 — 페이지 처리기(Scenario.page) · main 의 결함
+//   (Scenario.main) · 렌더러의 결함(Scenario.renderer) · 갈래 · 로그인 항목 — 를 바꿔 그 검사의 음성 갈래를 탄다(#36 runner-N1 의 tray ·
+//   boot · loginItem, 창 검사 theme · opacity).
 // - 건강한 흐름은 세 갈래(win32 · darwin · linux)를 호스트와 상관없이 돈다(필수 check 는 ubuntu 에서 Windows 갈래를 덮는다).
 // - securityWarnings: 플랫폼마다 다른 켜짐 규칙은 securityWarningsArming 을 바로 불러 본다.
 import { createRequire } from 'node:module';
@@ -79,8 +80,29 @@ const REPO_URL = 'https://github.com/khkim3115/TwelveJanggi';
 const HUB_URL = 'https://khkim3115.github.io/';
 /** 격리 world 버퍼를 읽는 코드(브리프의 값 그대로). */
 const ISOLATED_CODE = '({ probe: globalThis.__tjIsoProbe, buf: globalThis.__tjCspBuffer })';
-/** 실행기가 결과에 싣는 검사(실행 순서) — 조건부 검사(.invalid 빌드의 connectAllowed · --net 의 net)는 permissions 뒤에 온다. */
-const BEFORE_CONDITIONAL = ['boot', 'webPreferences', 'sandboxEffective', 'bridge', 'ipc', 'mime', 'securityWarnings', 'tray', 'screenshot', 'cspMeta', 'cspHeader', 'protocol', 'ai', 'navigation', 'permissions'];
+/**
+ * 실행기가 결과에 싣는 검사(실행 순서) — 창 검사(theme · opacity)는 screenshot 바로 뒤, 조건부 검사(.invalid 빌드의 connectAllowed · --net 의
+ * net)는 permissions 뒤에 온다.
+ */
+const BEFORE_CONDITIONAL = [
+  'boot',
+  'webPreferences',
+  'sandboxEffective',
+  'bridge',
+  'ipc',
+  'mime',
+  'securityWarnings',
+  'tray',
+  'screenshot',
+  'theme',
+  'opacity',
+  'cspMeta',
+  'cspHeader',
+  'protocol',
+  'ai',
+  'navigation',
+  'permissions',
+];
 const AFTER_CONDITIONAL = ['cspViolations', 'consoleErrors', 'cspCanary', 'noNetwork', 'loginItem'];
 /** 갈래 — 실행기에 넘기는 platform(흉내 낸 main 도 따른다). 호스트 값이 아니다. */
 const PLATFORMS = ['win32', 'darwin', 'linux'] as const;
@@ -121,7 +143,7 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
   const requiredFor = (build: keyof typeof SUPABASE_URLS, net: boolean): string[] =>
     requiredChecks({ net, supabaseOrigin: buildTrayCsp(SUPABASE_URLS[build]).supabaseOrigin }).sort();
 
-  it("기본 빌드 — 20개가 실행 순서대로 모두 ok · stage · error 없음 · 메모 필드는 ai() 와 canary 전 위반 수 · 붙은 메뉴 '종료' 한 번", async () => {
+  it("기본 빌드 — 22개가 실행 순서대로 모두 ok · stage · error 없음 · 메모 필드는 ai() 와 canary 전 위반 수 · 붙은 메뉴 '종료' 한 번", async () => {
     const outcome = await runScenario();
     expect(outcome.checks.map((entry) => entry.name)).toStrictEqual([...BEFORE_CONDITIONAL, ...AFTER_CONDITIONAL]);
     expect([...outcome.checks.map((entry) => entry.name)].sort()).toStrictEqual(requiredFor('default', false));
@@ -170,7 +192,7 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
   });
 
   it.each(PLATFORMS)(
-    "%s — 20개 ok · 최신 메뉴의 '종료' 한 번 · 창은 main 의 길로만 숨고 보였다 · getLoginItemSettings 는 모두 loginItemQuery(갈래) 로 · 원래 setLoginItemSettings 0회",
+    "%s — 22개 ok · 최신 메뉴의 '종료' 한 번 · 창은 main 의 길로만 숨고 보였다 · getLoginItemSettings 는 모두 loginItemQuery(갈래) 로 · 원래 setLoginItemSettings 0회 · 테마 네 단계 · 투명도 표",
     async (platform) => {
       const outcome = await runScenario({ platform });
       expect(outcome.checks.map((entry) => entry.name)).toStrictEqual([...BEFORE_CONDITIONAL, ...AFTER_CONDITIONAL]);
@@ -185,6 +207,14 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
       expect(tray).toContain(platform === 'win32' ? '경합: 표시 350.0ms 뒤 blur → 숨김(blur) → 같은 턴의 트레이 클릭 무시 → 300.0ms 뒤 트레이 클릭 → 보임(tray)' : `경합 단계 건너뜀(${platform}`);
       expect(tray).toContain('아이콘 16×16');
       expect(checkOf(outcome, 'loginItem').detail).toContain(`로그인 항목 요청 기록 ${JSON.stringify(platform === 'win32' ? [{ kind: 'login-item', on: true, managed: false }] : [])}(${platform})`);
+      const theme = checkOf(outcome, 'theme').detail;
+      expect(theme).toContain(`① setTheme('light') → 스냅샷 · data-theme · tj_theme "light" · body 배경 = --bg = getBackgroundColor() = "rgb(245, 246, 248)"`);
+      expect(theme).toContain("③ ① 전의 낡은 메뉴의 '라이트 모드' 체크 false → true(Electron 이 click 전에 뒤집었다)");
+      expect(theme).toContain('④');
+      expect(checkOf(outcome, 'opacity').detail).toContain('64→64 · 5→30 · 64.4→64 · "70"→64 · NaN→64 · null→64 · 150→100 · 100→100');
+      // 창 검사는 페이지에 테마 네 단계 · 투명도 여덟 줄을 묻는다 — screenshot 의 frames 다음, cspMeta 앞이다
+      const calls = outcome.pageCalls;
+      expect(calls.slice(calls.indexOf('frames') + 1, calls.indexOf('csp-meta'))).toStrictEqual([...Array(4).fill('theme'), ...Array(8).fill('opacity')]);
       expectEndsShown(outcome);
     },
   );
@@ -227,8 +257,18 @@ describe('tray — 최신 메뉴(새 프로필) · main 이 붙인 아이콘 · 
     expectOnlyFailure(await runScenario({ main: { template: patchItem(label, { enabled: true }) } }), 'tray', [`꺼져 있어야 할 항목이 켜졌다: ${label}`]);
   });
 
-  it.each(['자동 실행', '라이트 모드', '창 고정'])('새 프로필인데 %s 가 체크됐다 → 실패', async (label) => {
+  it.each(['자동 실행', '창 고정'])('새 프로필인데 %s 가 체크됐다 → 실패', async (label) => {
     expectOnlyFailure(await runScenario({ main: { template: patchItem(label, { checked: true }) } }), 'tray', [`새 프로필인데 체크된 항목이 있다: ${label}`]);
+  });
+
+  it("새 프로필인데 '라이트 모드' 가 체크됐다(늘 체크로 그린다) → tray 실패 — 그 체크를 읽는 theme 도 낡은 메뉴의 전제 · ④ 의 체크 해제에서 잡는다", async () => {
+    const outcome = await runScenario({ main: { template: patchItem('라이트 모드', { checked: true }) } });
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(['tray', 'theme']);
+    expect(checkOf(outcome, 'tray').detail).toContain('새 프로필인데 체크된 항목이 있다: 라이트 모드');
+    const theme = checkOf(outcome, 'theme').detail;
+    expect(theme).toContain("③ ① 전의 메뉴의 '라이트 모드' 가 이미 체크돼 있다(dark 에서 만든 메뉴가 아니다) — 낡은 메뉴 단계를 증명하지 못함");
+    expect(theme).toContain("④ 새 메뉴의 '라이트 모드' 체크가 true 다(기대 false)");
+    expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
   });
 
   it('아이콘 파일이 없다(빈 이미지) → 실패', async () => {
@@ -286,6 +326,124 @@ describe('tray — 최신 메뉴(새 프로필) · main 이 붙인 아이콘 · 
   it('win32 — 경합 가드가 1초 더 길다(경합 시간 뒤의 클릭도 삼킨다) → 실패, 끝에는 main 의 길로 다시 보였다', async () => {
     const outcome = await runScenario({ main: { longerRace: 1_000 } });
     expectOnlyFailure(outcome, 'tray', ['blur 숨김 300.0ms 뒤의 트레이 클릭이 창을 열지 않았다(기대 보임 — 이유 "tray") — 새 창 기록 [] · 보임 false']);
+    expectEndsShown(outcome);
+  });
+});
+
+describe("theme — ① setTheme('light') ② 'purple' 은 아무것도 바꾸지 않는다 ③ 낡은 메뉴(Electron 이 체크를 먼저 뒤집는다) ④ 최신 메뉴로 dark", () => {
+  /** [사례, 시나리오(결함 하나), detail 에 들 글, detail 에 없어야 할 단계] — theme 만 실패한다(다른 검사 · 종료 경로는 그대로). */
+  const CASES: Array<[string, Scenario, string[], string[]]> = [
+    [
+      'main 이 메뉴를 다시 만들지 않는다',
+      { main: { themeNoRefresh: true } },
+      ['① 새로 전달된 메뉴가 0개다(기대 1개)', '③ 새로 전달된 메뉴가 0개다(기대 1개)', '④ 새로 전달된 메뉴가 0개다(기대 1개)'],
+      ['②'],
+    ],
+    [
+      "'라이트 모드' 처리기가 item.checked 대신 상태를 뒤집는다 — ③ 이 잡는다(④ 도 반대로 간다)",
+      { main: { lightFlipsState: true } },
+      [
+        '③ 스냅샷 theme 이 "dark" 다(기대 "light")',
+        "③ 새 메뉴의 '라이트 모드' 체크가 false 다(기대 true)",
+        '④ 스냅샷 theme 이 "light" 다(기대 "dark")',
+        '④ settings.json 의 theme 값을 5000ms 기다렸지만 "light" 다(기대 "dark")',
+      ],
+      ['①', '②'],
+    ],
+    [
+      "main 이 'purple' 을 받는다 — ② 가 잡는다(메모리 · 페이지가 바뀌고 메뉴를 다시 만들고 tj-theme 를 민다)",
+      { main: { themeAcceptsAny: true } },
+      ['② 스냅샷 theme 이 "light" 에서 "purple" 로 바뀌었다', '② data-theme 이 "light" 에서 "purple" 로 바뀌었다', '② 새로 전달된 메뉴가 1개다(기대 0개)', '② tj-theme 전달이 1번이다(기대 0번)'],
+      ['①', '③', '④'],
+    ],
+    [
+      'main 이 창 배경(setBackgroundColor)을 바꾸지 않는다',
+      { main: { themeNoBackground: true } },
+      ['① getBackgroundColor() 가 "rgb(13, 17, 23)" 다(기대 "rgb(245, 246, 248)")', '③ getBackgroundColor() 가 "rgb(13, 17, 23)" 다(기대 "rgb(245, 246, 248)")'],
+      ['②', '④'],
+    ],
+    [
+      '렌더러가 tj_theme 를 쓰지 않는다',
+      { renderer: { noStoreTheme: true } },
+      ['① localStorage.tj_theme 이 null 다(기대 "light")', '④ localStorage.tj_theme 이 null 다(기대 "dark")'],
+      ['②'],
+    ],
+    [
+      'main 이 저장하지 않는다 → 기다림의 시간 초과를 판정으로 적는다(stage 실패가 아니다)',
+      { main: { themeNoSave: true } },
+      ['① settings.json 의 theme 값을 5000ms 기다렸지만 "dark" 다(기대 "light")'],
+      ['②', '③', '④'],
+    ],
+    [
+      '페이지가 data-theme 을 바꾸지 않는다',
+      { renderer: { noDataTheme: true } },
+      ['① data-theme 이 "dark" 다(기대 "light")', '① body 배경이 "rgb(13, 17, 23)" 다(기대 "rgb(245, 246, 248)")', '① --bg 가 "rgb(13, 17, 23)" 다(기대 "rgb(245, 246, 248)")'],
+      ['②', '④'],
+    ],
+    [
+      "새 메뉴의 '라이트 모드' 가 낡은 값이다(상태를 바꾸기 전에 메뉴를 만든다)",
+      { main: { themeRefreshFirst: true } },
+      ["① 새 메뉴의 '라이트 모드' 체크가 false 다(기대 true)", "④ 새 메뉴의 '라이트 모드' 체크가 true 다(기대 false)"],
+      ['②', '③'],
+    ],
+    [
+      "'라이트 모드' 가 체크박스가 아니다(click 이 checked 를 뒤집지 않는다) — 낡은 메뉴 단계가 Electron 의 뒤집기를 직접 본다",
+      { main: { template: (template) => template.map((entry) => (entry.label === '라이트 모드' ? { ...entry, type: 'normal' } : entry)) } },
+      ["③ 낡은 메뉴의 '라이트 모드' 를 누른 뒤에도 그 항목의 checked 가 false 다(Electron 이 click 전에 뒤집지 않았다)", '③ 스냅샷 theme 이 "dark" 다(기대 "light")'],
+      ['①', '②', '④'],
+    ],
+  ];
+  it.each(CASES)('%s → 실패', async (_label, scenario, fragments, quietSteps) => {
+    const check = expectOnlyFailure(await runScenario(scenario), 'theme', fragments);
+    // 실패 detail 은 단계 표식으로 시작하는 문제들을 '; ' 로 이은 것이다
+    const problems = check.detail.split('; ');
+    for (const step of quietSteps) expect(problems.filter((problem) => problem.startsWith(step)), `${step} 단계는 통과한다`).toStrictEqual([]);
+  });
+});
+
+describe('opacity — 실행기 안의 글자 표(64→64 · 5→30 · 64.4→64 · "70"→64 · NaN→64 · null→64 · 150→100 · 100→100), 어긋난 줄에서 멈춘다', () => {
+  /** [사례, 시나리오(결함 하나), detail 에 들 글, detail 에 없어야 할 글] — opacity 만 실패한다. */
+  const CASES: Array<[string, Scenario, string[], string[]]> = [
+    ["main 이 '70' 을 받는다", { main: { opacityAcceptsString: true } }, ['"70"→64: 스냅샷 opacity 가 70 다(기대 64)', '"70"→64: 창 투명도 round(getOpacity() × 100) 이 70 다(기대 64)'], ['NaN→64']],
+    ['main 이 잘못된 값을 기본값으로 바꾼다 — 64 에서 보내므로 무시와 갈린다', { main: { opacityDefaultsInvalid: true } }, ['"70"→64: 스냅샷 opacity 가 100 다(기대 64)'], ['NaN→64']],
+    ['main 이 받은 값을 나중에 저장한다(실행기의 기다림보다 늦다)', { main: { opacitySavesLater: true } }, ['64→64: settings.json 의 opacity 값을 5000ms 기다렸지만 100 다(기대 64)'], ['스냅샷', '창 투명도', '5→30']],
+    ['main 이 창 투명도(setOpacity)를 바꾸지 않는다 — 스냅샷은 맞고 창은 틀리다', { main: { opacityNoWindow: true } }, ['64→64: 창 투명도 round(getOpacity() × 100) 이 100 다(기대 64)'], ['스냅샷']],
+  ];
+  it.each(CASES)('%s → 실패', async (_label, scenario, fragments, absent) => {
+    const check = expectOnlyFailure(await runScenario(scenario), 'opacity', fragments);
+    for (const text of absent) expect(check.detail).not.toContain(text);
+  });
+
+  it('NaN 줄에 페이지가 NaN 대신 null 을 보낸다(JSON 으로 넘긴 것과 같다) → 수신 기록으로만 실패 — main 은 둘 다 무시해 스냅샷 · 창은 맞다', async () => {
+    const opacity = healthyPage({ files: new Map(), unmapped: [] }).opacity;
+    const outcome = await runScenario({ page: { opacity: (arg, app) => opacity?.((arg as { nan?: boolean }).nan === true ? { value: null } : arg, app) } });
+    const check = expectOnlyFailure(outcome, 'opacity', ['NaN→64: 실행기의 tj-set-opacity 수신 기록이 [null] 다(기대 ["NaN"])']);
+    expect(check.detail).not.toContain('스냅샷');
+    expect(check.detail).not.toContain('창 투명도');
+  });
+});
+
+describe('창 검사의 끝(R13) — theme · opacity 에는 숨김 규칙이 없고, 끝에 창이 숨어 있으면 main 의 길로 다시 보인다', () => {
+  it.each(['theme', 'opacity'] as const)('%s 도중 OS 가 포커스를 가져갔다(우연한 blur → 숨김) → ok, 끝에 경합 시간 뒤 트레이 클릭으로 다시 보였다', async (name) => {
+    const healthy = healthyPage({ files: new Map(), unmapped: [] })[name];
+    let blurred = false;
+    const outcome = await runScenario({
+      page: {
+        [name]: (arg, app) => {
+          if (!blurred) {
+            blurred = true;
+            app.osBlur();
+          }
+          return healthy?.(arg, app);
+        },
+      },
+    });
+    expect(failing(outcome)).toStrictEqual([]);
+    expect(outcome.windows.slice(HEALTHY_WINDOWS.win32.length)).toStrictEqual([
+      { action: 'hide', reason: 'blur' },
+      { action: 'show', reason: 'tray' },
+    ]);
+    expect(checkOf(outcome, name).detail).toContain('끝에 숨어 있던 창을 main 의 길로 다시 보였다');
     expectEndsShown(outcome);
   });
 });

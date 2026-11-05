@@ -19,10 +19,12 @@
 //   스모크가 이 PC 에 개발용 electron.exe 를 로그인 항목으로 남기지 않는다(기록만 하면 늦게 알 뿐 막지 못한다). loginItem 이 대체 함수가
 //   그대로 서 있고 쓰기를 하나도 받지 않았는지, 첫 실행 갈래가 돌아 가드에 닿았는지(양성 대조)를 판정한다.
 // - 단계(첫 did-finish-load 뒤): 장벽(페이지가 getAppInfo 왕복 뒤 표식을 콘솔에 찍고, 수집기가 그 표식을 받는다) → 수동 검사(boot ·
-//   webPreferences · sandboxEffective · bridge · ipc · mime · securityWarnings · tray · screenshot) → 능동 검사(active.cjs — cspMeta ·
-//   cspHeader · protocol · ai · navigation · permissions · .invalid 빌드의 connectAllowed · --net 의 net) → 장벽 → cspViolations ·
-//   consoleErrors → canary 단계(cspCanary) → 마감(noNetwork · loginItem — 모든 페이지 활동 뒤) → 결과 쓰기 → '종료' 클릭.
-//   connectAllowed · net 은 이번 실행의 필수 검사(requiredChecks)가 요구할 때만 돈다.
+//   webPreferences · sandboxEffective · bridge · ipc · mime · securityWarnings · tray · screenshot) → 창 검사(window.cjs — theme · opacity,
+//   끝에 창을 보인 채 둔다) → 능동 검사(active.cjs — cspMeta · cspHeader · protocol · ai · navigation · permissions · .invalid 빌드의
+//   connectAllowed · --net 의 net) → 장벽 → cspViolations · consoleErrors → canary 단계(cspCanary) → 마감(noNetwork · loginItem — 모든 페이지
+//   활동 뒤) → 결과 쓰기 → '종료' 클릭. connectAllowed · net 은 이번 실행의 필수 검사(requiredChecks)가 요구할 때만 돈다.
+// - 실행기의 사실 · 도우미(아래 클로저 — mark · 창을 main 의 길로 보이고 숨기기 · endShown · 설정 파일 읽기)는 창 검사 · 능동 검사에 ctx 로
+//   넘긴다(그 파일들은 run.cjs 를 require 하지 않는다 — 순환).
 // - 원격 요청은 계획(remote.cjs) 하나를 따른다: 가드는 --net 의 두 요청만 통과시키고 나머지는 기록하고 취소하며, noNetwork 는 계획의 기대
 //   목록과 기록을 견준다.
 // - 실패(60초 감시 타이머 · 수집기의 render-process-gone · preload-error · unresponsive · 메인 프레임 did-fail-load · 던진 단계 · main 이
@@ -42,6 +44,7 @@ const { failureResult, writeResultAtomic } = require('../lib/smokeOut.cjs');
 const { requiredChecks } = require('../lib/smokeResult.cjs');
 const { BLUR_GRACE_MS, CLICK_RACE_MS } = require('../lib/windowPolicy.cjs');
 const { createActiveChecks } = require('./active.cjs');
+const { createWindowChecks } = require('./window.cjs');
 const {
   BRIDGE_SCRIPT,
   DISABLE_WARNINGS_SCRIPT,
@@ -147,6 +150,10 @@ const SCREENSHOT_FILE = 'screenshot.png';
 /**
  * 사실 목록의 길이 — mark() 가 잰 자리. 그 뒤에 온 것만 보려면 목록.slice(자리)다.
  * @typedef {{ window: number, sent: number, loginItem: number, hideReceipts: number, opacityReceipts: number, menus: number }} FactMark
+ */
+/**
+ * 프로필의 settings.json 한 번 읽은 것 — 정규화하지 않은 JSON(raw)이다. 읽지 못했으면(없음 · JSON 이 아님) error 가 그 이유다.
+ * @typedef {{ file: string, raw: unknown, error: string | null }} SettingsRead
  */
 /** @typedef {import('../main.js').MainRecord} MainRecord */
 /** @typedef {import('./support.cjs').ConsoleEntry} ConsoleEntry */
@@ -305,6 +312,22 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
     isolated,
     barrier,
   });
+  const windowChecks = createWindowChecks({
+    facts,
+    platform,
+    win: trayWindow,
+    menus: state.menus,
+    page,
+    mark,
+    clickTray,
+    openViaMain,
+    hideViaMain,
+    windowTrail,
+    endShown,
+    timingMarginMs: TIMING_MARGIN_MS,
+    rgbOfHex,
+    readSettings: readProfileSettings,
+  });
 
   const watchdog = setTimeout(() => fail('watchdog', `${WATCHDOG_MS / 1000}초 안에 끝나지 않았다 — 진행 중: ${state.step}`), WATCHDOG_MS);
   app.on('will-quit', () => clearTimeout(watchdog));
@@ -360,6 +383,21 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
       return { openAtLogin, executableWillLaunchAtLogin };
     } catch (err) {
       return `읽지 못했다(${errorText(err)})`;
+    }
+  }
+
+  /**
+   * 프로필의 settings.json 을 정규화하지 않은 그대로 읽는다(settings.cjs 의 readSettings 는 못 읽는 파일 · 틀린 값을 기본값으로 바꾼다 — 판정은
+   * 파일에 실제로 든 값을 본다). 프로필은 스모크 인자의 것이다(main 이 userData 로 정한다 — 다른 곳에 썼으면 여기서 없다). loginItem 의 첫 실행
+   * 표시와 창 검사의 저장 기다림이 함께 쓴다.
+   * @returns {SettingsRead}
+   */
+  function readProfileSettings() {
+    const file = path.join(args.profile, SETTINGS_FILE);
+    try {
+      return { file, raw: JSON.parse(fs.readFileSync(file, 'utf8')), error: null };
+    } catch (err) {
+      return { file, raw: undefined, error: errorText(err) };
     }
   }
 
@@ -633,8 +671,9 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
   }
 
   /**
-   * 첫 did-finish-load 뒤 — 장벽 → 수동 검사 → 능동 검사 → 장벽 → cspViolations · consoleErrors → canary → 마감(noNetwork · loginItem) →
-   * 결과 쓰기 → 트레이 메뉴 '종료'. 검사 하나가 던지면 거기서 끝난다(그 검사의 실패 단계).
+   * 첫 did-finish-load 뒤 — 장벽 → 수동 검사 → 창 검사(theme · opacity — screenshot 바로 뒤, 보이는 창에서 시작하고 보이는 창으로 끝낸다) →
+   * 능동 검사(보이는 다크 창에서 돈다) → 장벽 → cspViolations · consoleErrors → canary → 마감(noNetwork · loginItem) → 결과 쓰기 → 트레이
+   * 메뉴 '종료'. 검사 하나가 던지면 거기서 끝난다(그 검사의 실패 단계).
    */
   async function runChecks() {
     const opening = await step('barrier', barrier);
@@ -652,6 +691,8 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
       ['securityWarnings', checkSecurityWarnings],
       ['tray', checkTray],
       ['screenshot', checkScreenshot],
+      ['theme', windowChecks.theme],
+      ['opacity', windowChecks.opacity],
       ['cspMeta', active.cspMeta],
       ['cspHeader', active.cspHeader],
       ['protocol', active.protocol],
@@ -997,20 +1038,36 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
   }
 
   /**
-   * tray 의 끝 — 창을 main 의 길로 보인 채 둔다(마지막 창 기록이 show 이고 보인다). 숨어 있으면 마지막 숨김 기록의 at 에서 경합 시간 +
-   * 여유가 지난 뒤(blur 숨김이었어도 가드에 막히지 않게) openViaMain 한다. 그래도 그 모양이 아니면 실패로 적는다.
+   * 창을 main 의 길로 보인 채 둔다(R13 '보인 채 끝내기') — 숨어 있으면 마지막 숨김 기록의 at 에서 경합 시간 + 여유가 지난 뒤(blur 숨김이었어도
+   * 가드에 막히지 않게) openViaMain 하고, 보이고 그 뒤의 보이기 기록이 올 때까지 WAIT_MS 까지 기다린다(던지지 않는다). 다시 보였으면 notes 에
+   * 적는다. 파괴된 창은 만지지 않는다. 끝에 보이면 true. tray 의 끝(trayEndShown)과 창 검사(window.cjs)의 끝(finally)이 함께 쓴다 — 판정은
+   * 부른 쪽이 한다(theme · opacity 는 보임을 판정하지 않는다).
+   * @param {string[]} notes
+   * @returns {Promise<boolean>}
+   */
+  async function endShown(notes) {
+    const win = trayWindow();
+    if (win.isDestroyed()) return false;
+    if (!win.isVisible()) {
+      const lastHide = facts.window.findLast((entry) => entry.action === 'hide');
+      if (lastHide !== undefined) await waitElapsed(lastHide.at, CLICK_RACE_MS + TIMING_MARGIN_MS);
+      const from = facts.window.length;
+      if (openViaMain()) await until(() => !win.isDestroyed() && win.isVisible() && facts.window.slice(from).some((entry) => entry.action === 'show'), WAIT_MS);
+      const shown = !win.isDestroyed() && win.isVisible();
+      notes.push(shown ? '끝에 숨어 있던 창을 main 의 길로 다시 보였다' : `끝에 숨어 있던 창을 main 의 길로 다시 보이지 못했다(마지막 창 기록 ${show(windowTrail())})`);
+      return shown;
+    }
+    return true;
+  }
+
+  /**
+   * tray 의 끝 — endShown 뒤 마지막 창 기록이 show 이고 보여야 한다(tray 는 열기 경로를 증명하는 검사다). 그 모양이 아니면 실패로 적는다.
    * @param {string[]} problems
    * @param {string[]} notes
    */
   async function trayEndShown(problems, notes) {
     const win = trayWindow();
-    if (!win.isVisible()) {
-      const lastHide = facts.window.findLast((entry) => entry.action === 'hide');
-      if (lastHide !== undefined) await waitElapsed(lastHide.at, CLICK_RACE_MS + TIMING_MARGIN_MS);
-      const from = facts.window.length;
-      if (openViaMain()) await until(() => win.isVisible() && facts.window.slice(from).some((entry) => entry.action === 'show'), WAIT_MS);
-      notes.push('끝에 숨어 있던 창을 main 의 길로 다시 보였다');
-    }
+    await endShown(notes);
     const last = facts.window.at(-1);
     if (!win.isVisible() || last?.action !== 'show') {
       problems.push(`끝에 창을 main 의 길로 보인 채 두지 못했다(보임 ${win.isVisible()} · 마지막 창 기록 ${show(windowTrail())})`);
@@ -1135,20 +1192,13 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
   }
 
   /**
-   * 프로필의 settings.json 에 첫 실행 표시(autostartDefaultApplied: true)가 있는가 — 있으면 null, 없으면 그 이유(글). 프로필은 스모크 인자의
-   * 것이다(main 이 userData 로 정한다 — 다른 곳에 썼으면 여기서 없다). 정규화하지 않은 그대로의 JSON 을 본다(settings.cjs 의 readSettings 는
-   * 못 읽는 파일을 '첫 실행 아님' 으로 바꾼다).
+   * 프로필의 settings.json 에 첫 실행 표시(autostartDefaultApplied: true)가 있는가 — 있으면 null, 없으면 그 이유(글). 정규화하지 않은 그대로의
+   * JSON 을 본다(readProfileSettings — settings.cjs 의 readSettings 는 못 읽는 파일을 '첫 실행 아님' 으로 바꾼다).
    * @returns {string | null}
    */
   function firstRunFlagProblem() {
-    const file = path.join(args.profile, SETTINGS_FILE);
-    /** @type {unknown} */
-    let raw;
-    try {
-      raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-    } catch (err) {
-      return `${file} 을 읽지 못했다(${errorText(err)}) — 첫 실행 갈래가 돌지 않았다`;
-    }
+    const { file, raw, error } = readProfileSettings();
+    if (error !== null) return `${file} 을 읽지 못했다(${error}) — 첫 실행 갈래가 돌지 않았다`;
     if (isRecord(raw) && raw.autostartDefaultApplied === true) return null;
     return `${file} 의 autostartDefaultApplied 가 ${show(isRecord(raw) ? raw.autostartDefaultApplied : raw)} 다(기대 true — 첫 실행 갈래가 돌지 않았다)`;
   }
