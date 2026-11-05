@@ -366,6 +366,11 @@ export type Outcome = {
   loginItemWrites: unknown[];
   /** 끝난 때 트레이 창 webContents 의 스로틀(getBackgroundThrottling) — 창이 파괴됐으면 null */
   throttling: boolean | null;
+  /**
+   * capturePage() 를 부를 때마다 그때 창이 보였는가(차례대로) — 숨긴 창을 캡처하면 페이지가 visible 로 바뀌어 visibility ② 의 양성 기록을
+   * 흐린다(설계 §5.5 '숨긴 동안 capturePage 를 하지 않는다')
+   */
+  captures: boolean[];
 };
 type Running = { fetches: string[]; ended(): boolean; finish(): Promise<Outcome> };
 type Rig = { run: SmokeRun; start(): Running };
@@ -1130,6 +1135,8 @@ export function rigScenario(scenario: Scenario = {}): Rig {
   const alive = (): void => assertAlive(life);
   /** 숨긴 창의 렌더러 스로틀(Electron 기본 켬 — Scenario.throttle 이 바꾼다) */
   let throttling = scenario.throttle !== 'off';
+  /** capturePage 를 부를 때마다 그때 창이 보였는가(Outcome.captures) */
+  const captures: boolean[] = [];
   const contents = Object.assign(events, {
     session: defaultSession,
     isDestroyed: (): boolean => life.destroyed,
@@ -1147,6 +1154,7 @@ export function rigScenario(scenario: Scenario = {}): Rig {
     },
     capturePage: (): Promise<typeof SCREEN> => {
       alive();
+      captures.push(win.isVisible());
       return Promise.resolve(SCREEN);
     },
     setBackgroundThrottling: (allowed: boolean): void => {
@@ -1313,6 +1321,7 @@ export function rigScenario(scenario: Scenario = {}): Rig {
             loginItemQueries,
             loginItemWrites,
             throttling: life.destroyed ? null : throttling,
+            captures: [...captures],
           };
         },
       };

@@ -281,6 +281,9 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
         'hide-button',
         ...Array(4).fill('hidden-state'),
       ]);
+      // 숨긴 동안 capturePage 를 하지 않는다(캡처하면 페이지가 visible 로 바뀐다 — 설계 §5.5). screenshot 은 보이는 창을 캡처했다(양성 대조)
+      expect(outcome.captures.length, 'capturePage 호출 수').toBeGreaterThan(0);
+      expect(outcome.captures.filter((visible) => !visible), '숨긴 창의 capturePage').toStrictEqual([]);
       expectEndsShown(outcome);
     },
   );
@@ -771,6 +774,36 @@ describe('visibility — ① 진짜 ✕ → 숨김(request) · tj-hidden · tapp
     expect(problems.some((problem) => problem.startsWith('① 트레이 클릭 뒤 5000ms 안에 창이 보이지 않았다')), problems.join('\n')).toBe(true);
     expect(problems.filter((problem) => problem.startsWith('②')), '② 는 돌지 않는다').toStrictEqual([]);
     expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
+    expectEndsShown(outcome);
+  });
+
+  /**
+   * 'hidden-state'(<html> 의 tapp-hidden · visibilityState 읽기)의 n 번째 호출에서 건강한 답을 만든 뒤 렌더러가 tj-hide 를 하나 더 보낸다 — 이
+   * 검사가 일으키지 않은 숨김(이유 'request')이다(R14). visibility 의 읽기 차례는 1 시작 · 2 ① 붙음 · 3 ① 빠짐 · 4 ② 붙음 · 5 ② 빠짐이다.
+   */
+  const strayOn = (n: number): Scenario => {
+    let calls = 0;
+    return {
+      page: {
+        'hidden-state': (arg, app) => {
+          calls += 1;
+          const seen = HEALTHY_PAGE['hidden-state']?.(arg, app);
+          if (calls === n) app.send('tj-hide');
+          return seen;
+        },
+      },
+    };
+  };
+  /** [읽기 차례, detail 에 들 글, 문제가 없어야 할 단계(돌지 않았거나 통과했다)] */
+  const STRAYS: Array<[number, string, string[]]> = [
+    [1, '시작 때 우연한 숨김(이유 "request") — 이 검사가 일으키지 않은 숨김이다', ['①', '②']],
+    [3, '① 다시 보인 뒤 우연한 숨김(이유 "request") — 이 검사가 일으키지 않은 숨김이다', ['②']],
+    [5, '② 다시 보인 뒤 우연한 숨김(이유 "request") — 이 검사가 일으키지 않은 숨김이다', []],
+  ];
+  it.each(STRAYS)("'hidden-state' 의 %i 번째 읽기 뒤 이 검사가 일으키지 않은 숨김(request) → 그 이유를 상세에 적고 멈춘다(R14), 끝에 다시 보였다", async (n, fragment, quietSteps) => {
+    const outcome = await runScenario(strayOn(n));
+    const problems = expectOnlyFailure(outcome, 'visibility', [fragment]).detail.split('; ');
+    for (const step of quietSteps) expect(problems.filter((problem) => problem.startsWith(step)), `${step} 단계에는 문제가 없다`).toStrictEqual([]);
     expectEndsShown(outcome);
   });
 });
