@@ -172,7 +172,7 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
     ]);
   });
 
-  it('.invalid 빌드 — connectAllowed 까지 21개 ok, noNetwork 는 탐침 + connectProbe 두 주소, consoleErrors 는 취소된 소켓의 오류를 뺀다', async () => {
+  it('.invalid 빌드 — connectAllowed 까지 23개 ok, noNetwork 는 탐침 + connectProbe 두 주소, consoleErrors 는 취소된 소켓의 오류를 뺀다', async () => {
     const outcome = await runScenario({ build: 'invalid' });
     expect(outcome.checks.map((entry) => entry.name)).toStrictEqual([...BEFORE_CONDITIONAL, 'connectAllowed', ...AFTER_CONDITIONAL]);
     expect([...outcome.checks.map((entry) => entry.name)].sort()).toStrictEqual(requiredFor('invalid', false));
@@ -182,7 +182,7 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
     expect(checkOf(outcome, 'consoleErrors').detail).toContain('connectProbe 의 취소된 요청 오류 1건은 뺐다');
   });
 
-  it('--net · 실제 값 빌드 — net 까지 21개 ok, noNetwork 는 탐침 + 인증 설정 · Realtime 소켓(가드가 통과시켰다)', async () => {
+  it('--net · 실제 값 빌드 — net 까지 23개 ok, noNetwork 는 탐침 + 인증 설정 · Realtime 소켓(가드가 통과시켰다)', async () => {
     const outcome = await runScenario({ build: 'real', net: true });
     expect(outcome.checks.map((entry) => entry.name)).toStrictEqual([...BEFORE_CONDITIONAL, 'net', ...AFTER_CONDITIONAL]);
     expect([...outcome.checks.map((entry) => entry.name)].sort()).toStrictEqual(requiredFor('real', true));
@@ -423,7 +423,7 @@ describe('opacity — 실행기 안의 글자 표(64→64 · 5→30 · 64.4→64
   });
 });
 
-describe('창 검사의 끝(R13) — theme · opacity 에는 숨김 규칙이 없고, 끝에 창이 숨어 있으면 main 의 길로 다시 보인다', () => {
+describe('창 검사의 끝(R13) — theme · opacity 에는 숨김 규칙이 없고, 끝에 창이 숨어 있으면 main 의 길로 다시 보인다(못 보이면 그 검사가 실패한다)', () => {
   it.each(['theme', 'opacity'] as const)('%s 도중 OS 가 포커스를 가져갔다(우연한 blur → 숨김) → ok, 끝에 경합 시간 뒤 트레이 클릭으로 다시 보였다', async (name) => {
     const healthy = healthyPage({ files: new Map(), unmapped: [] })[name];
     let blurred = false;
@@ -445,6 +445,37 @@ describe('창 검사의 끝(R13) — theme · opacity 에는 숨김 규칙이 �
     ]);
     expect(checkOf(outcome, name).detail).toContain('끝에 숨어 있던 창을 main 의 길로 다시 보였다');
     expectEndsShown(outcome);
+  });
+
+  /** darwin 메뉴에서 '열기' 를 뺀다 — 숨은 창을 main 의 길로 열 것이 없다(tray 도 실패한다). */
+  const NO_OPEN_ITEM: Scenario = { platform: 'darwin', main: { template: (template) => template.filter((entry) => entry.label !== '열기') } };
+  /** win32 의 경합 가드가 3초 더 길다 — blur 숨김 뒤의 트레이 클릭을 삼켜, 다시 보이기를 기다리다 시간이 다 된다(tray 의 경합 단계도 실패한다). */
+  const LONG_GUARD: Scenario = { main: { longerRace: 3_000 } };
+  /** [끝에 다시 보이지 못하는 길, 검사, 시나리오, 이유 조각, 실패하는 검사] */
+  const NO_REOPEN: Array<[string, 'theme' | 'opacity', Scenario, string, string[]]> = [
+    ["누를 것이 없다(darwin 메뉴에 '열기' 없음)", 'theme', NO_OPEN_ITEM, "최신 메뉴에 '열기' 가 없다", ['tray', 'theme', 'opacity']], // 창이 숨은 채라 opacity 의 끝도 못 연다
+    ["누를 것이 없다(darwin 메뉴에 '열기' 없음)", 'opacity', NO_OPEN_ITEM, "최신 메뉴에 '열기' 가 없다", ['tray', 'opacity']],
+    ['눌러도 보이지 않는다(win32 경합 가드가 3초 더 길다 — 기다림의 시간 초과)', 'theme', LONG_GUARD, '트레이 클릭 뒤 5000ms 안에 보이지 않았다', ['tray', 'theme']], // opacity 의 끝은 가드가 풀린 뒤라 다시 연다
+    ['눌러도 보이지 않는다(win32 경합 가드가 3초 더 길다 — 기다림의 시간 초과)', 'opacity', LONG_GUARD, '트레이 클릭 뒤 5000ms 안에 보이지 않았다', ['tray', 'opacity']],
+  ];
+  it.each(NO_REOPEN)('%s · %s 도중 우연한 blur → 끝에 창을 다시 보이지 못해 그 검사가 실패한다(R13 · R12 — 숨은 창을 다음 검사로 넘기지 않는다)', async (_path, name, scenario, why, failed) => {
+    const healthy = healthyPage({ files: new Map(), unmapped: [] })[name];
+    let calls = 0;
+    const outcome = await runScenario({
+      ...scenario,
+      page: {
+        [name]: (arg, app) => {
+          calls += 1;
+          // 그 검사의 둘째 페이지 호출에서 — 첫 단계(줄)의 settings.json 기다림 뒤라 마지막 표시의 유예가 지났다(시작 표시의 유예 안
+          // blur 는 숨기지 않는다)
+          if (calls === 2) app.osBlur();
+          return healthy?.(arg, app);
+        },
+      },
+    });
+    expect(failing(outcome).map(([failedName]) => failedName)).toStrictEqual(failed);
+    expect(checkOf(outcome, name).detail).toContain(`끝에 창을 main 의 길로 다시 보이지 못했다(${why}`);
+    expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
   });
 });
 

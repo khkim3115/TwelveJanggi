@@ -7,8 +7,10 @@
 // - 색 · 투명도의 기대값은 여기 적은 글자다(설계 §5.1 · §5.5 — lib 값으로 계산하지 않는다: 같은 값을 두 곳이 계산하면 틀려도 같다).
 // - 기다림(settings.json)의 시간 초과는 그 검사의 판정(ok false · detail)이다 — 던지지 않는다(R12). 창 · webContents 가 파괴됐으면 만지지
 //   않고 판정으로 적은 뒤 그 검사를 멈춘다(R29 — 파괴된 창을 만지면 던져서 실행 전체가 stage 실패가 된다).
-// - 각 검사는 끝에 — 실패 길에서도(finally) — 창을 main 의 길로 보인 채 돌려놓는다(R13 — 실행기의 endShown). theme · opacity 에는 '우연한
-//   숨김' 규칙을 두지 않는다(보임과 상관없는 검사라 흔들림만 늘린다). 스모크에서 창을 고정하지 않는다(고정은 저장되고 tray 가 체크 false 를
+// - 각 검사는 끝에 — 실패 길에서도(finally) — 창을 main 의 길로 보인 채 돌려놓는다(R13 — 실행기의 endShown). 돌려놓지 못하면(누를 것이
+//   없다 · 기다림의 시간 초과) 그 검사의 실패다(R12 — 뒤 검사는 보이는 창을 전제로 한다, 설계 §5.5). 판정은 '지금 보이는가' 만 본다 — 앞
+//   검사가 남긴 창 기록('마지막 기록이 show')은 보지 않는다(그 규칙은 tray 에만 있다). theme · opacity 에는 '우연한 숨김' 규칙(검사 도중의
+//   숨김)을 두지 않는다(보임과 상관없는 검사라 흔들림만 늘린다). 스모크에서 창을 고정하지 않는다(고정은 저장되고 tray 가 체크 false 를
 //   요구한다).
 // - 실행기의 사실 · 도우미(createSmokeRun 의 클로저)는 ctx 로 받는다 — 능동 검사의 ActiveContext 와 같은 모양이고 베끼지 않는다. 공용
 //   도우미(support.cjs)와 페이지 코드(pageScripts.cjs)는 active.cjs 처럼 직접 가져온다. run.cjs 는 require 하지 않는다(순환). electron 도
@@ -65,7 +67,8 @@ const OPACITY_TABLE = Object.freeze([
  * @property {() => boolean} openViaMain main 의 길로 연다(win32 트레이 클릭 · 그 밖 최신 메뉴의 '열기'). 누를 것이 있었으면 true
  * @property {() => Promise<WindowFact | null>} hideViaMain main 의 길로 숨긴다 — 그 이유의 새 숨김 기록, 아니면 null(던지지 않는다)
  * @property {(records?: readonly WindowFact[]) => string[]} windowTrail 마지막 창 기록 몇 건(action:reason) — 실패 글에 싣는다
- * @property {(notes: string[]) => Promise<boolean>} endShown 창을 main 의 길로 보인 채 둔다(R13) — 다시 보였으면 notes 에 적는다. 보이면 true
+ * @property {(notes: string[]) => Promise<string | null>} endShown 창을 main 의 길로 보인 채 둔다(R13) — 다시 보였으면 notes 에 적는다. 끝에
+ *   보이면 null, 아니면 그 이유(누를 것이 없다 · 기다림의 시간 초과 · 창 파괴)
  * @property {number} timingMarginMs 시각을 재는 기다림의 여유(ms — 기록의 at 은 main 이 시각을 잰 뒤에 붙어 조금 늦다)
  * @property {(hex: unknown) => string | null} rgbOfHex '#rrggbb' · '#rgb' → getComputedStyle 의 'rgb(r, g, b)', 그 모양이 아니면 null
  * @property {() => import('./run.cjs').SettingsRead} readSettings 프로필의 settings.json(정규화하지 않은 그대로)
@@ -154,6 +157,18 @@ function createWindowChecks(ctx) {
     if (gone === null) return false;
     problems.push(`${label} 전에 ${gone} — 검사를 멈춘다`);
     return true;
+  }
+
+  /**
+   * 검사의 끝(finally) — 창을 main 의 길로 보인 채 돌려놓고(R13 — ctx.endShown), 그래도 보이지 않으면 그 이유로 그 검사의 실패를 적는다(R12).
+   * '지금 보이는가' 만 본다(앞 검사가 남긴 창 기록은 보지 않는다).
+   * @param {string[]} problems
+   * @param {string[]} notes
+   * @returns {Promise<void>}
+   */
+  async function restoreShown(problems, notes) {
+    const why = await ctx.endShown(notes);
+    if (why !== null) problems.push(`끝에 창을 main 의 길로 다시 보이지 못했다(${why})`);
   }
 
   /**
@@ -342,7 +357,7 @@ function createWindowChecks(ctx) {
    * settings.json light(기다린다) ② setTheme('purple') → 장벽: ① 뒤와 하나도 다르지 않다(메모리 · 페이지 · 창 — 파일은 보지 않는다), 새 메뉴 ·
    * tj-theme 없음 ③ ① 전에 받아 둔 낡은 메뉴의 '라이트 모드'(꺼진 체크)를 누른다 → Electron 이 click 전에 체크를 뒤집어 '켜기' 가 되므로 light
    * 그대로 + 새 메뉴(체크) — 실제 Menu.buildFromTemplate 의 메뉴에서 그 뒤집기를 직접 본다 ④ 최신 메뉴의 '라이트 모드' → 모두 dark + 새 메뉴
-   * (체크 해제) + settings.json dark. 끝에(실패 길에서도) 창을 main 의 길로 보인 채 둔다.
+   * (체크 해제) + settings.json dark. 끝에(실패 길에서도) 창을 main 의 길로 보인 채 둔다 — 못 하면 실패다(restoreShown).
    * @returns {Promise<CheckVerdict>}
    */
   async function theme() {
@@ -353,7 +368,7 @@ function createWindowChecks(ctx) {
     try {
       await themeSteps(problems, notes);
     } finally {
-      await ctx.endShown(notes);
+      await restoreShown(problems, notes);
     }
     return verdictOf(problems, notes.join(' · '));
   }
@@ -392,7 +407,7 @@ function createWindowChecks(ctx) {
 
   /**
    * opacity(설계 §5.5 표) — 실행기 안의 글자 표(OPACITY_TABLE)를 그 차례로 돈다(opacityRow). 한 줄이 어긋나면 거기서 멈춘다 — 뒤 줄은 앞
-   * 줄이 남긴 값을 전제로 한다(잘못된 값은 64 에서 보낸다). 끝에(실패 길에서도) 창을 main 의 길로 보인 채 둔다.
+   * 줄이 남긴 값을 전제로 한다(잘못된 값은 64 에서 보낸다). 끝에(실패 길에서도) 창을 main 의 길로 보인 채 둔다 — 못 하면 실패다(restoreShown).
    * @returns {Promise<CheckVerdict>}
    */
   async function opacity() {
@@ -411,7 +426,7 @@ function createWindowChecks(ctx) {
         }
       }
     } finally {
-      await ctx.endShown(notes);
+      await restoreShown(problems, notes);
     }
     const saved = OPACITY_TABLE.filter((row) => row.saves).map((row) => row.expect);
     return verdictOf(problems, [

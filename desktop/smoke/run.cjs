@@ -606,6 +606,14 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
   }
 
   /**
+   * main 의 길로 여는 법(openViaMain) — 누르는 것과, 누를 것이 없을 때의 글. win32 는 트레이 좌클릭, 그 밖은 최신 메뉴의 '열기'.
+   * @returns {{ how: string, missing: string }}
+   */
+  function openPath() {
+    return platform === 'win32' ? { how: '트레이 클릭', missing: '트레이 click 처리기가 없다' } : { how: "메뉴의 '열기'", missing: "최신 메뉴에 '열기' 가 없다" };
+  }
+
+  /**
    * main 의 길로 숨기는 법 — win32 는 트레이 좌클릭(보이는 창이면 토글 — 이유 'toggle'), 그 밖은 win.close()(OS 닫기 — 이유 'close').
    * @returns {{ how: string, reason: 'toggle' | 'close' }}
    */
@@ -969,9 +977,9 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
       return false;
     }
     const gap = `${(performance.now() - hidden.at).toFixed(1)}ms`;
-    const opener = platform === 'win32' ? '트레이 클릭' : "메뉴의 '열기'";
+    const { how: opener, missing } = openPath();
     if (!openViaMain()) {
-      problems.push(`${platform === 'win32' ? '트레이 click 처리기가 없다' : "최신 메뉴에 '열기' 가 없다"} — 숨긴 창을 main 의 길로 열 수 없다`);
+      problems.push(`${missing} — 숨긴 창을 main 의 길로 열 수 없다`);
       return false;
     }
     const opened = await until(() => win.isVisible() && win.isFocused(), WAIT_MS);
@@ -1040,24 +1048,27 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
   /**
    * 창을 main 의 길로 보인 채 둔다(R13 '보인 채 끝내기') — 숨어 있으면 마지막 숨김 기록의 at 에서 경합 시간 + 여유가 지난 뒤(blur 숨김이었어도
    * 가드에 막히지 않게) openViaMain 하고, 보이고 그 뒤의 보이기 기록이 올 때까지 WAIT_MS 까지 기다린다(던지지 않는다). 다시 보였으면 notes 에
-   * 적는다. 파괴된 창은 만지지 않는다. 끝에 보이면 true. tray 의 끝(trayEndShown)과 창 검사(window.cjs)의 끝(finally)이 함께 쓴다 — 판정은
-   * 부른 쪽이 한다(theme · opacity 는 보임을 판정하지 않는다).
+   * 적는다. 파괴된 창은 만지지 않는다. 끝에 보이면 null, 아니면 그 이유(누를 것이 없다 · 눌렀지만 기다림의 시간 초과 · 창 파괴)다.
+   * tray 의 끝(trayEndShown)과 창 검사(window.cjs)의 끝(finally)이 함께 쓰고, 판정은 부른 쪽이 한다: 창 검사는 이유가 있으면 그 검사의 실패로
+   * 적는다('지금 보이는가' 만 본다 — R12 · R13), tray 는 그 위에 '마지막 창 기록이 show' 도 요구한다(앞 검사가 남긴 기록을 보는 규칙은 tray
+   * 에만 있다 — 창 검사에 두면 앞 검사의 기록 없는 보이기 · 실패가 번진다).
    * @param {string[]} notes
-   * @returns {Promise<boolean>}
+   * @returns {Promise<string | null>}
    */
   async function endShown(notes) {
     const win = trayWindow();
-    if (win.isDestroyed()) return false;
-    if (!win.isVisible()) {
-      const lastHide = facts.window.findLast((entry) => entry.action === 'hide');
-      if (lastHide !== undefined) await waitElapsed(lastHide.at, CLICK_RACE_MS + TIMING_MARGIN_MS);
-      const from = facts.window.length;
-      if (openViaMain()) await until(() => !win.isDestroyed() && win.isVisible() && facts.window.slice(from).some((entry) => entry.action === 'show'), WAIT_MS);
-      const shown = !win.isDestroyed() && win.isVisible();
-      notes.push(shown ? '끝에 숨어 있던 창을 main 의 길로 다시 보였다' : `끝에 숨어 있던 창을 main 의 길로 다시 보이지 못했다(마지막 창 기록 ${show(windowTrail())})`);
-      return shown;
-    }
-    return true;
+    if (win.isDestroyed()) return '트레이 창이 파괴됐다';
+    if (win.isVisible()) return null;
+    const lastHide = facts.window.findLast((entry) => entry.action === 'hide');
+    if (lastHide !== undefined) await waitElapsed(lastHide.at, CLICK_RACE_MS + TIMING_MARGIN_MS);
+    const { how, missing } = openPath();
+    const from = facts.window.length;
+    if (!openViaMain()) return `${missing} — 마지막 창 기록 ${show(windowTrail())}`;
+    await until(() => !win.isDestroyed() && win.isVisible() && facts.window.slice(from).some((entry) => entry.action === 'show'), WAIT_MS);
+    if (win.isDestroyed()) return '트레이 창이 파괴됐다';
+    if (!win.isVisible()) return `${how} 뒤 ${WAIT_MS}ms 안에 보이지 않았다 — 마지막 창 기록 ${show(windowTrail())}`;
+    notes.push('끝에 숨어 있던 창을 main 의 길로 다시 보였다');
+    return null;
   }
 
   /**
