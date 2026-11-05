@@ -1,5 +1,5 @@
 'use strict';
-// 십이장기 트레이 앱의 main 프로세스(설계 §5.5 · §5.7). 트레이 빌드(개발 <repo>/dist-tray · 패키지 resources/renderer)를
+// 십이장기 트레이 앱의 main 프로세스(#20 설계 §5.5 · §5.7). 트레이 빌드(개발 <repo>/dist-tray · 패키지 resources/renderer)를
 // app://twelvejanggi/tray.html 로 연다. 판정은 lib/ 의 순수 모듈이 하고(시험도 거기서 한다), 이 파일은 Electron 에 잇기만 한다.
 // - 최상위(ready 전, 동기)는 순서가 의미를 가진다: 스모크 인자 → userData → enableSandbox → 스킴 특권 → 단일 인스턴스 잠금.
 //   userData 를 만들거나 정하지 못하면 '[tj] userData: …' 를 남기고 그 자리에서 끝낸다.
@@ -9,9 +9,9 @@
 // - IPC 처리기는 createGuardedIpc 로만 등록한다(ipcMain 의 등록 함수를 직접 부르지 않는다). 처리기는 모두 창을 만들기 전에,
 //   사이에 await 없이 건다. 배선은 두 시험이 본다 — desktop/lib/mainSource.test.ts 는 이 파일의 글로, mainWiring.test.ts 는
 //   가짜 electron 위에서 이 파일을 돌려서.
-// - hooks 는 스모크 실행기(설계 §5.10, smoke/run.cjs)의 연결점이다. 스모크에서만 ready 뒤 처리기보다 먼저 꽂고(plugSmokeRun),
+// - hooks 는 스모크 실행기(#20 설계 §5.10, smoke/run.cjs)의 연결점이다. 스모크에서만 ready 뒤 처리기보다 먼저 꽂고(plugSmokeRun),
 //   비스모크에서는 모두 null 이라 없는 것처럼 동작한다.
-// - 트레이 창(설계 §5.2): 보이기 · 숨기기 · 배치 · 설정 바꾸기는 각각 한 함수(showWindow · hideWindow · placeNow · apply*)로만 하고,
+// - 트레이 창(#21 설계 §5.2): 보이기 · 숨기기 · 배치 · 설정 바꾸기는 각각 한 함수(showWindow · hideWindow · placeNow · apply*)로만 하고,
 //   창은 liveWindow() 로만 만진다 — 없거나 파괴됐거나 종료 중이면 아무것도 하지 않는다. 렌더러로는 sendToTray 로만 민다.
 //   설정(<userData>/settings.json)은 ready 뒤 한 번 동기로 읽고, 바뀌면 묶어서(300ms) 쓰고, 종료 · 세션 끝에 남은 것을 비운다.
 //   시각은 모두 performance.now() 한 시계로 잰다(부를 때마다 읽는다).
@@ -97,14 +97,15 @@ const { trayWindowPreferences } = require('./lib/windowPrefs.cjs');
  */
 /**
  * 스모크 실행기의 연결점. 값이 있을 때만 부르고, 결정은 늘 실제 처리기가 내린다 — 바꿔 끼우지 않고 감싸서 기록만 하게 해서
- * 스모크가 실제 코드와 같게 한다(설계 §5.10). 예외는 하나다(D1): 실행기는 app.setLoginItemSettings 를 기록만 하고 앞으로 보내지 않는
+ * 스모크가 실제 코드와 같게 한다(#20 설계 §5.10). 예외는 하나다(D1): 실행기는 app.setLoginItemSettings 를 기록만 하고 앞으로 보내지 않는
  * 대체 함수로 바꿔 끼운다 — 로그인 항목(HKCU Run)은 격리 프로필 밖이라, setLoginItem 의 가드에 버그가 있으면 기록만으로는 이 PC 에
  * 남는 것을 막지 못한다. 트레이 메뉴는 '붙은' 메뉴가 아니라 최신 메뉴를 넘긴다(D4 — Windows 는 메뉴를 트레이에 붙이지 않는다).
  * @typedef {object} MainHooks
  * @property {((entry: MainRecord) => void) | null} record 기록기 — 탐색 · 권한 결정, 창 보이기 · 숨기기, 렌더러로 민 채널, 로그인 항목 요청
  * @property {((href: string) => unknown) | null} open 허용 목록 주소를 여는 함수 — 없으면 시스템 브라우저
  * @property {((win: import('electron').BrowserWindow) => void) | null} beforeLoad 창을 만든 뒤 loadURL 전에 동기로 부른다(수집기)
- * @property {((ipc: import('./lib/ipcGuard.cjs').GuardedIpc) => void) | null} registerIpc tj-app-info 다음에 IPC 를 더 등록한다
+ * @property {((ipc: import('./lib/ipcGuard.cjs').GuardedIpc) => void) | null} registerIpc 창을 만들기 전, main 채널을 모두 등록한 뒤 부른다
+ *   — 스모크 채널(tj-smoke-preload · tj-smoke-csp)과 tj-hide · tj-set-opacity 의 수신 기록(같은 채널의 둘째 리스너)을 더 등록한다
  * @property {((details: import('electron').OnBeforeRequestListenerDetails, callback: (response: import('electron').CallbackResponse) => void) => void) | null} networkGuard
  *   기본 세션의 webRequest.onBeforeRequest 처리기(원격 요청 기록 · 취소)
  * @property {((tray: import('electron').Tray, menu: import('electron').Menu, icon: import('electron').NativeImage) => void) | null} setTray
@@ -187,7 +188,7 @@ let deferredBlurTimer = null;
  * @type {import('./lib/position.cjs').Point | null}
  */
 let moveBaseline = null;
-/** placeNow 가 setBounds 하는 중이다 — 그 안에서 동기로 온 moved(macOS)는 사용자 이동이 아니다. */
+/** placeNow 가 setBounds 하는 중이다 — 그 안에서 동기로 온 moved(macOS 미확인)는 사용자 이동이 아니다. */
 let placing = false;
 /** 마지막 배치 뒤에 will-move 를 받았다 — 사용자가 끈 이동만 저장한다(will-move 는 setBounds 로는 오지 않는다). */
 let manualMoveSeen = false;
@@ -302,7 +303,7 @@ function onReady(smoke) {
   // 스모크는 늘 거짓). macOS 는 wasOpenedAtLogin 이다(macOS 미확인 — 스모크는 묻지 않는다: 늘 로그인 실행이 아니다), linux 는 늘 아니다.
   const loginItem = process.platform === 'darwin' && !smoke.enabled ? app.getLoginItemSettings() : {};
   loginLaunch = launchedAtLogin({ platform: process.platform, argv: hiddenArg ? [HIDDEN_ARG] : [], loginItem });
-  // macOS — 메뉴 막대 앱이라 Dock 아이콘을 두지 않는다. 창을 만들기 전에 숨긴다: 만든 뒤에 숨기면 Dock 이 깜빡인다.
+  // macOS — 메뉴 막대 앱이라 Dock 아이콘을 두지 않는다. 창을 만들기 전에 숨긴다: 만든 뒤에 숨기면 Dock 이 깜빡인다(macOS 미확인).
   if (process.platform === 'darwin') app.dock?.hide();
   protocol.handle(APP_SCHEME, (request) => serveApp(request, index, cspHeader));
   guardSession();
@@ -404,7 +405,7 @@ function plugSmokeRun(smoke, root, renderer) {
 }
 
 /**
- * 트레이 빌드를 못 읽었다 — 처리기 · 창 · 트레이를 만들지 않고 끝낸다(설계 §5.3 fail-closed). 빈 창 대신 이유를 알린다.
+ * 트레이 빌드를 못 읽었다 — 처리기 · 창 · 트레이를 만들지 않고 끝낸다(#20 설계 §5.3 fail-closed). 빈 창 대신 이유를 알린다.
  * stderr 에 '[tj] …' 한 줄 → 스모크는 결과(stage 'tray-build')를 쓰고 exit 1, 아니면 오류 상자 뒤 종료한다 — 트레이 전용 앱이
  * 조용히 끝나면 멈춘 것처럼 보인다.
  * @param {SmokeMode} smoke
@@ -535,7 +536,7 @@ function guardWebContents(contents) {
 /**
  * IPC 처리기 — createGuardedIpc 로만 등록한다. 발신자는 메시지마다 트레이 창의 메인 프레임인지 본다(창이 없거나 파괴됐으면 거부).
  * 응답 모양은 src/tray/desktop.ts 의 AppInfo · TrayState 다. 받은 값은 preload 가 고치지 않고 넘기므로 여기 도우미의 정규화가
- * 유일한 방어다(틀린 값은 무시). 순서: main 채널(설계 §5.3 표) 다음 hooks.registerIpc(스모크).
+ * 유일한 방어다(틀린 값은 무시). 순서: main 채널(#21 설계 §5.3 표) 다음 hooks.registerIpc(스모크).
  */
 function registerIpc() {
   const ipc = createGuardedIpc(ipcMain, () => (trayWindow !== null && !trayWindow.isDestroyed() ? trayWindow.webContents : null));
@@ -554,7 +555,7 @@ function registerIpc() {
  * - 크기는 레이아웃 'solo' 의 콘텐츠 크기, 크기 조절 · 최대화 · 최소화 · 전체 화면 불가(작업표시줄 단추가 없어 최소화하면 되찾을 길이
  *   트레이뿐이다), 작업표시줄에 없고 늘 위다. 투명은 쓰지 않는다 — 투명도는 opacity 로만 한다.
  * - 첫 페인트 전 배경과 투명도는 설정(테마 · opacity)에서 온다. webPreferences 는 공장 하나에서만 온다(스모크와 바이트까지 같다).
- * - macOS 는 만든 뒤 'screen-saver' 단계(메뉴 막대 · Dock 보다 위)로 올린다 — alwaysOnTop 의 기본 단계는 floating 이다.
+ * - macOS 는 만든 뒤 'screen-saver' 단계(메뉴 막대 · Dock 보다 위)로 올린다(macOS 미확인) — alwaysOnTop 의 기본 단계는 floating 이다.
  * - 창 사건: show · hide → 렌더러에 tj-shown · tj-hidden(어느 경로로 보이든 숨든 — OS · 스모크의 직접 호출 포함), blur → 바깥 클릭
  *   숨김, will-move · moved → 사용자가 옮긴 위치 저장, session-end(Windows 의 로그오프 · 종료 — before-quit 이 오지 않는다) → 설정 비우기.
  * - 콘솔 중계는 개발 실행(비패키지 · 비스모크)에서만 단다 — 수집기(hooks.beforeLoad) 뒤에. 패키지는 stdout 이 없고 스모크는 자기
@@ -578,7 +579,7 @@ function createWindow(smoke) {
     opacity: settings.opacity / 100,
     webPreferences: trayWindowPreferences(path.join(__dirname, 'preload.js')),
   });
-  if (process.platform === 'darwin') win.setAlwaysOnTop(true, 'screen-saver');
+  if (process.platform === 'darwin') win.setAlwaysOnTop(true, 'screen-saver'); // macOS 미확인
   trayWindow = win;
   // 첫 판단 — 로그인 실행이면 숨긴 채 둔다. 그 전에 온 macOS activate(다시 실행)는 로그인 실행이어도 보인다.
   win.once('ready-to-show', () => {
@@ -674,7 +675,7 @@ function refreshTrayMenu() {
 }
 
 /**
- * 메뉴 항목 하나의 동작 뒤에 메뉴를 다시 만든다 — 메뉴를 누를 때마다(바뀐 것이 없어도) 정확히 한 번이다(설계 §5.1). 스스로 다시 만드는
+ * 메뉴 항목 하나의 동작 뒤에 메뉴를 다시 만든다 — 메뉴를 누를 때마다(바뀐 것이 없어도) 정확히 한 번이다(#21 설계 §5.1). 스스로 다시 만드는
  * applyTheme · setPinned · resetPosition 은 이것을 거치지 않는다.
  * @param {() => void} action
  */
@@ -812,8 +813,8 @@ function liveWindow() {
 
 /**
  * 트레이 창을 보이고 앞으로 가져온다 — 보이기는 모두 이 함수다. 시각 · 이유를 먼저 정하고(blur 유예가 읽는다) → 다시 배치(숨긴
- * 동안 모니터 · 해상도 · 아이콘 자리가 바뀌었을 수 있다) → show → focus. macOS 는 그 전에 앱을 앞으로 가져온다(메뉴 막대 앱은 창을
- * 보여도 앱이 활성화되지 않아 blur 숨김 · Esc 가 듣지 않을 수 있다). 화면(렌더러) 상태는 바꾸지 않는다.
+ * 동안 모니터 · 해상도 · 아이콘 자리가 바뀌었을 수 있다) → show → focus. macOS 는 그 전에 앱을 앞으로 가져온다(macOS 미확인 — 메뉴
+ * 막대 앱은 창을 보여도 앱이 활성화되지 않아 blur 숨김 · Esc 가 듣지 않을 수 있다). 화면(렌더러) 상태는 바꾸지 않는다.
  * @param {ShowReason} reason
  */
 function showWindow(reason) {
@@ -824,7 +825,7 @@ function showWindow(reason) {
   shownIntent = true;
   clearDeferredBlur();
   placeNow(layoutSize(layout));
-  if (process.platform === 'darwin') app.focus({ steal: true });
+  if (process.platform === 'darwin') app.focus({ steal: true }); // macOS 미확인
   win.show();
   win.focus();
   recordEntry({ kind: 'window', action: 'show', reason });
@@ -889,7 +890,7 @@ function clearDeferredBlur() {
 /**
  * 창을 놓는다 — 배치는 모두 이 함수다(placeWindow 가 계산한다). 저장 위치가 있으면 그 위치와 가장 많이 겹치는 디스플레이(떼어 낸
  * 모니터면 남은 디스플레이)의 작업영역 안으로, 없으면 아이콘이 있는 디스플레이(아이콘 자리를 모르면 주 디스플레이)에서 아이콘 쪽에
- * 붙인다. 놓는 동안(setBounds 안의 동기 moved — macOS)은 사용자 이동이 아니고, 놓은 뒤의 위치가 이동 판별의 기준이 된다.
+ * 붙인다. 놓는 동안(setBounds 안의 동기 moved — macOS 미확인)은 사용자 이동이 아니고, 놓은 뒤의 위치가 이동 판별의 기준이 된다.
  * 위치와 함께 레이아웃 크기를 넘긴다: 위치만 넘기면 Electron 이 빠진 크기를 getBounds() 로 채우는데, Windows 소수 배율에서는
  * DIP↔픽셀 반올림이 바깥쪽이라 열 때마다 창이 조금씩 자란다(스모크 실측 510×603 → 516×606).
  * @param {import('./lib/position.cjs').Size} size 콘텐츠 크기(프레임 없는 창이라 창 크기와 같다)
@@ -920,7 +921,7 @@ function placeIfShown() {
 
 /**
  * moved — 마지막 배치 뒤 will-move 를 받았고(사용자가 끈 이동) 기준에서 허용 오차보다 벗어났으면, 그 위치를 저장 위치로 삼고
- * 기준을 그 자리로 옮긴 뒤 저장을 예약한다. macOS 의 moved 는 move 의 별칭이라 끄는 동안 계속 온다 — 저장 예약이 쓰기를 묶는다.
+ * 기준을 그 자리로 옮긴 뒤 저장을 예약한다. macOS 의 moved 는 move 의 별칭이라(macOS 미확인) 끄는 동안 계속 온다 — 저장 예약이 쓰기를 묶는다.
  * 메뉴는 '위치 초기화' 의 켜짐이 바뀔 때(저장 위치가 처음 생길 때)만 다시 만든다 — 끄는 동안 메뉴를 거듭 만들지 않게.
  */
 function onMoved() {

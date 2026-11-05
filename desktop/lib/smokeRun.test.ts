@@ -1,6 +1,6 @@
 // desktop/smoke/run.cjs(앱 안 스모크 실행기) 시험 — createSmokeRun 에 구조 타입의 가짜 Electron 객체를 넘겨, main 의 순서(가드 →
 // registerIpc → beforeLoad → setTray)로 꽂고 첫 did-finish-load 부터 장벽 → 수동 검사 → 능동 검사 → 장벽 → cspViolations · consoleErrors →
-// canary → noNetwork · loginItem → 결과 → 붙은 메뉴 '종료' 까지 실제로 돌린다.
+// canary → noNetwork · loginItem → 결과 → 최신 메뉴 '종료' 까지 실제로 돌린다.
 // 앱은 띄우지 않고 electron 은 import · require 하지 않는다(실행기도 하지 않는다 — Electron 객체는 main 이 넘긴다). 실제 바이너리의 판정은
 // 스모크가 보고, 여기서는 가짜가 내놓는 사실이 바뀔 때 검사가 판정을 바꾸는지 본다. 음성 사례는 아직 일부 검사에만 있다 —
 // webPreferences · sandboxEffective · bridge · ipc · mime · screenshot 은 여기서 양성 갈래만 탄다(webPreferences · screenshot 의 판정 함수
@@ -190,7 +190,7 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
   const requiredFor = (build: keyof typeof SUPABASE_URLS, net: boolean): string[] =>
     requiredChecks({ net, supabaseOrigin: buildTrayCsp(SUPABASE_URLS[build]).supabaseOrigin }).sort();
 
-  it("기본 빌드 — 24개가 실행 순서대로 모두 ok · stage · error 없음 · 메모 필드는 ai() 와 canary 전 위반 수 · 붙은 메뉴 '종료' 한 번", async () => {
+  it("기본 빌드 — 24개가 실행 순서대로 모두 ok · stage · error 없음 · 메모 필드는 ai() 와 canary 전 위반 수 · 최신 메뉴 '종료' 한 번", async () => {
     const outcome = await runScenario();
     expect(outcome.checks.map((entry) => entry.name)).toStrictEqual([...BEFORE_CONDITIONAL, ...AFTER_CONDITIONAL]);
     expect([...outcome.checks.map((entry) => entry.name)].sort()).toStrictEqual(requiredFor('default', false));

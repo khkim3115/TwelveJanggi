@@ -52,6 +52,9 @@ npm --prefix desktop run smoke -- --net  # + 실제 Supabase 연결 — 공유 �
 - **`src/core`·`src/engine` 에는 React/DOM import 가 없다** — `node` 환경 vitest 로 테스트한다(`src/**/*.test.ts`).
 - **트레이 앱 출처는 동결 계약이다** — `app://twelvejanggi`(진입 `tray.html`, 스모크는 `tray.html?smoke`). localStorage · 익명 세션이 이 출처에 묶여
   바꾸면 저장된 설정과 세션이 끊긴다(`desktop/lib/appProtocol.cjs` 의 `APP_ORIGIN`).
+- **트레이 앱 AUMID 도 동결 계약이다** — `com.khkim.twelvejanggi`(`desktop/lib/autostart.cjs` 의 `AUTOSTART_NAME` — main.js 는 이 상수로만 쓴다).
+  Windows 로그인 항목(HKCU `Run`)의 값 이름이기도 해서 바꾸면 옛 이름의 항목이 남는다 — 끄기는 새 이름에만 쓰고 체크는 이름이 아니라 실행 파일 경로를
+  보므로 설치본의 자동 실행을 메뉴로 끌 수 없다(#22 의 설치 제거도 이 이름에 기댄다).
 - **표기**: 비슷한 3×4 변형 게임의 상표명을 코드·문서·화면 어디에도 쓰지 않는다(`src/naming.test.ts` 가 막는다).
 
 ## Layering
@@ -72,8 +75,10 @@ src/store/     Zustand — appStore(화면) · gameStore(혼자 하기) · multi
 src/ui/        React 컴포넌트 (표현 전담, 상태는 스토어에서)
 src/lib/       supabase.ts(클라이언트 — 동적 import 전용) · env.ts(설정 여부만) · chat · feedback
                · loadSupabase.ts(supabase.ts 를 동적 import 하는 약속 하나 — 스토어 · 트레이 스모크 공용)
+               · theme.ts(테마 저장 · 적용 — 웹 · 트레이 공용, 최상위 부작용 없음)
 src/data/      changelog(패치노트 단일 진실원본) · links
 src/tray/      트레이 앱 화면(tray.html 진입) — 웹 전용 모듈 import 금지 · desktop.ts(window.tjDesktop 접근자) · smoke.ts(?smoke 때만)
+               · trayState.ts(브리지 구독 · 화면 상태) · esc.ts(Esc 두 리스너)
 desktop/       Electron 셸 — main.js · preload.js · smoke/(앱 안 스모크 실행기) · scripts/smoke.cjs(런처)
   lib/           순수 .cjs 모듈 + 시험 — electron 을 import 하지 않는다(루트 검사는 desktop 설치 없이 통과해야 한다)
 supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
@@ -154,9 +159,10 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
 
 - 구조: `tray.html` 과 `src/tray/` 를 `vite.tray.config.ts`(웹 설정과 따로 — PWA 없음, 도구 `scripts/trayBuild.ts`)로 `dist-tray/` 에
   빌드하고 `desktop/` 의 Electron 이 `app://twelvejanggi/tray.html` 로 연다(사용법 · 스모크 표 · 문제 해결은 `desktop/README.md`, Windows 만 검증).
-  개발은 `npm run dev` → `/tray.html`(CSP 없음 · `window.tjDesktop` 은 스텁), 앱은 `build:tray` → `npm --prefix desktop ci` →
-  `npm --prefix desktop start`. 설치는 `ci` 로만 한다 — `--prefix` 와 인자 없는 `install` 은 Windows 에서 저장소 루트를 `desktop/node_modules`
-  에 링크하고, node_modules 정션을 따라간 삭제는 진짜 폴더를 지운 적이 있다(다른 정션이었다). lock 은 `desktop/` 안에서 `npm install` 로만 다시 쓴다.
+  개발은 `npm run dev` → `/tray.html`(CSP 없음 · `window.tjDesktop` 없음 — 흐름은 하나라 브리지를 쓰는 단추 · Esc 는 아무것도 하지 않는다), 앱은
+  `build:tray` → `npm --prefix desktop ci` → `npm --prefix desktop start`. 설치는 `ci` 로만 한다 — `--prefix` 와 인자 없는 `install` 은 Windows 에서
+  저장소 루트를 `desktop/node_modules` 에 링크하고, node_modules 정션을 따라간 삭제는 진짜 폴더를 지운 적이 있다(다른 정션이었다). lock 은 `desktop/`
+  안에서 `npm install` 로만 다시 쓴다.
 - 스킴 특권은 `{ standard, secure, supportFetchAPI }` 뿐이다 — `supportFetchAPI` 는 제품 코드가 아니라 스모크의 페이지 안 fetch 검사용이고,
   `corsEnabled`(다른 출처가 app:// 응답을 읽게 된다) · `stream` · `bypassCSP` 는 넣지 않는다.
 - 처리기: app:// 는 시작할 때 만든 파일 색인에서만 내주고(요청 문자열은 경로 계산에 넣지 않는다 · 호스트 정확 일치 · GET/HEAD 만, 그 밖은 405 ·
@@ -174,14 +180,15 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
   `liveWindow()`(없거나 파괴됐거나 종료 중이면 null)로만 만진다. `hideWindow` 는 `win.hide()` **전에** `shownIntent` 를 끈다 — 그 안의 동기 blur 를 바깥
   클릭으로 읽으면 경합 가드가 다음 클릭을 삼킨다. blur 는 숨긴다(예외: 창 고정 · DevTools · 표시 뒤 `BLUR_GRACE_MS` 300). Windows 좌클릭은 blur 로 숨긴 지
   `CLICK_RACE_MS` 250 안이면 무시한다 — `lastBlurHideAt` 은 blur 숨김만 적는다(Esc · ✕ 뒤의 클릭은 삼키지 않게). `transparent` 는 쓰지 않는다(투명도는
-  `setOpacity` 로만).
+  창의 opacity 로만 — 만들 때 옵션, 그 뒤 `setOpacity`).
 - **트레이 메뉴는 `refreshTrayMenu` 한 곳에서 만든다** — Windows 는 `setContextMenu` 없이 우클릭마다 새로 만들어 띄운다(D4 — 붙이면 OS 가 우클릭을 받아
   `right-click` 이 오지 않고, 자동 실행 체크를 그 순간의 OS 상태로 그릴 수 없다). 체크박스는 `item.checked` 를 원하는 값으로 쓴다(낡은 메뉴도 사용자가 본
   것과 반대로 가지 않는다). 화면 모드는 메뉴의 '혼자 하기' · '온라인 대전' 만 바꾼다. 판단은 `desktop/lib` 순수 모듈이 하고 시험은 플랫폼을 값으로 받는다.
 - **로그인 항목(자동 실행)은 `setLoginItem` 한 곳에서, `canManageLoginItems` 가 참일 때만 쓴다** — 설치본(패키지 · 스모크 아님 · win32/darwin · 실행
   파일이 `electron(.exe)` 아님)뿐이다. 개발 실행 · 스모크 · 시험이 쓰면 개발용 electron.exe 가 이 PC 의 HKCU `Run` 에 남는다. 스모크는 더 나아가
   `app.setLoginItemSettings` 를 기록만 하는 대체 함수로 바꿔 끼운다(D1 — '감싸서 기록만' 의 유일한 예외: 가드에 버그가 있으면 기록으로는 막지 못한다).
-  Windows 는 `--hidden` 으로 등록하고 같은 인자로 읽는다(`loginItemQuery` — 다른 인자로 읽으면 체크가 OS 와 어긋난다).
+  Windows 는 `--hidden` 으로 등록하고(로그인 실행은 창 없이 뜬다) 같은 인자로 묻는다(`loginItemQuery` — `openAtLogin` 은 인자까지 같아야 참이고 스모크
+  `loginItem` 이 읽는다). 메뉴 체크는 인자를 보지 않는 `executableWillLaunchAtLogin`(실행 파일 경로 · 작업 관리자의 켬/끔)이다.
 - **브리지 `window.tjDesktop` 은 11키다**(`TJ_DESKTOP_KEYS` = preload 의 얼린 객체, 이 순서): `getAppInfo · getState · setTheme · setOpacity · setLayout ·
   hide · onTheme · onOpacity · onMode · onShown · onHidden`. preload 는 값을 고치지 않는다 — 정규화는 main 한 곳이고 틀린 값은 무시한다. 렌더러는 테마 ·
   투명도를 미리 바꾸지 않고 main 이 민 값으로만 바꾼다(토글 흐름은 하나 — 브리지 없는 `/tray.html` 용 흐름도 만들지 않는다).

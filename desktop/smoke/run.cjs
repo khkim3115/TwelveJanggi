@@ -911,13 +911,13 @@ function createSmokeRun({ args, app, session, net, trayBuild, rendererRoot, appR
   }
 
   /**
-   * 붙은 트레이 메뉴의 항목.
+   * 최신 트레이 메뉴(main 이 setTray 로 마지막에 넘긴 것 — Windows 의 메뉴는 트레이에 붙지 않는다, D4)의 항목.
    * @param {string} label
    * @returns {import('electron').MenuItem}
    */
   function menuItem(label) {
     const item = state.menu?.items.find((candidate) => candidate.label === label);
-    if (item === undefined) throw new Error(`붙은 트레이 메뉴에 '${label}' 이 없다`);
+    if (item === undefined) throw new Error(`최신 트레이 메뉴에 '${label}' 이 없다`);
     return item;
   }
 

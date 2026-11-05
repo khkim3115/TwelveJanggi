@@ -1,7 +1,7 @@
 'use strict';
-// 트레이 창의 preload(설계 §5.6) — sandbox · contextIsolation 의 격리 world 에서 페이지 스크립트보다 먼저 돈다.
+// 트레이 창의 preload(#20 설계 §5.6) — sandbox · contextIsolation 의 격리 world 에서 페이지 스크립트보다 먼저 돈다.
 // - 45 규칙: require('electron') 만 쓰고 이 파일 하나로 자족한다(sandbox preload 의 require 는 다른 파일을 부르지 못한다).
-// - 노출은 window.tjDesktop 하나다(얼린 객체, 11키 — 설계 §5.3). raw ipcRenderer 는 노출하지 않는다. 채널은 tj-* 다.
+// - 노출은 window.tjDesktop 하나다(얼린 객체, 11키 — #21 설계 §5.3). raw ipcRenderer 는 노출하지 않는다. 채널은 tj-* 다.
 //   값은 고치지 않고 그대로 보낸다(정규화는 main 한 곳). 구독 함수는 감싼 리스너를 걸고 해제 함수를 돌려준다 — IpcRendererEvent 는 넘기지 않는다.
 //   채널 이름은 글자로 쓴다(이 파일은 자족해야 한다). 계약 시험이 구독 채널 집합을 PUSH_CHANNELS 와 대조한다.
 // - 스모크(tray.html?smoke)일 때만: 실효 상태 보고(tj-smoke-preload) · 격리 world 표식(__tjIsoProbe) · CSP 위반 수집

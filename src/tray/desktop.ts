@@ -1,7 +1,8 @@
-// 트레이 앱(Electron 창)의 preload 가 노출하는 브리지 window.tjDesktop 의 타입과 접근자(설계 §5.6).
-// 브리지는 선택적이다 — 브라우저 개발(`npm run dev` → /tray.html)에는 없고, 그때 화면은 스텁으로 동작한다.
+// 트레이 앱(Electron 창)의 preload 가 노출하는 브리지 window.tjDesktop 의 타입과 접근자(#20 설계 §5.6).
+// 브리지는 선택적이다 — 브라우저 개발(`npm run dev` → /tray.html)에는 없다(undefined). 그때 브리지를 쓰는 것(버전 · 테마 · 투명도 · 숨기기)은
+// 아무것도 하지 않는다 — 브리지 없는 흐름은 따로 두지 않는다(흐름은 하나).
 // 키 목록 TJ_DESKTOP_KEYS 는 노출 키를 대조할 기준이다(preload 계약 시험 · 스모크의 브리지 검사).
-// 값은 preload 가 고치지 않고 그대로 보낸다 — 정규화는 main 한 곳이다(설계 §5.3).
+// 값은 preload 가 고치지 않고 그대로 보낸다 — 정규화는 main 한 곳이다(#21 설계 §5.3).
 
 import type { Theme } from '../lib/theme';
 
@@ -62,7 +63,7 @@ declare global {
   }
 }
 
-/** 브리지. 브라우저 개발이거나 preload 가 없으면 undefined 다 — 부른 쪽이 스텁으로 동작한다(window 가 없는 node 시험에서도 던지지 않는다). */
+/** 브리지. 브라우저 개발이거나 preload 가 없으면 undefined 다 — 부른 쪽은 아무것도 하지 않는다(window 가 없는 node 시험에서도 던지지 않는다). */
 export function desktop(): TjDesktop | undefined {
   return typeof window === 'undefined' ? undefined : window.tjDesktop;
 }
