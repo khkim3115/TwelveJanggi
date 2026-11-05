@@ -1,10 +1,11 @@
 # desktop — 십이장기 트레이 앱 (Electron)
 
 웹과 같은 코드 가운데 `src/core` · `src/engine`(AI)과 `src/lib` · `src/index.css` 로 만든 트레이 빌드(`dist-tray/`)를
-`app://twelvejanggi/tray.html` 로 여는 Electron 셸입니다(`src/store` · `src/ui` 는 아직 쓰지 않습니다 — 화면을 만드는 뒤의 이슈에서 들어옵니다).
-지금은 **골격**(#20)이라 창에는 제목과 자리표시 한 문단뿐이고, 산출물은 화면이 아니라 **증명**입니다 — AI 모듈 워커 · CSP · 보안 기본선이
-`app://` 출처에서 실제로 동작하는지를 PR 마다 스모크가 확인합니다. 화면은 #24 · #25, 창 동작 · 메뉴는 #21, 설치 파일 · 업데이트는 #22,
-전용 아이콘은 #23 이 잇습니다.
+`app://twelvejanggi/tray.html` 로 여는 Electron 셸입니다(`src/ui` 는 Esc 판정이 쓰는 `useDialog` 의 `isDialogOpen` 하나뿐이고 `src/store` 는
+아직 쓰지 않습니다 — 화면을 만드는 뒤의 이슈에서 들어옵니다).
+창은 트레이 팝업입니다(#21) — 아이콘 쪽에 뜨고, 바깥을 누르면 숨고, 위치 · 고정 · 투명도 · 테마를 기억합니다(아래 '조작법'). 안의 화면은 아직
+자리표시 한 문단이라 산출물은 화면이 아니라 **증명**입니다 — AI 모듈 워커 · CSP · 보안 기본선과 창 동작이 `app://` 출처에서 실제로 동작하는지를
+PR 마다 스모크가 확인합니다. 화면은 #24 · #25, 설치 파일 · 업데이트는 #22, 전용 아이콘은 #23 이 잇습니다.
 
 - **Windows 만 검증했습니다.** macOS · Linux 의 트레이는 확인하지 않았습니다.
 - 필요한 것: Node 22.12 이상(`package.json` 의 `engines` — Electron 44 패키지의 하한과 같습니다), 저장소 루트에서 `npm ci`.
@@ -15,7 +16,7 @@
 ```
 desktop/
   main.js              main 프로세스 — app:// 처리기 · 창 · 트레이 · 단일 인스턴스 · 보안 처리기를 잇는다
-  preload.js           window.tjDesktop = { getAppInfo } (tray.html?smoke 일 때만 CSP 위반 수집 · 실효 상태 보고)
+  preload.js           window.tjDesktop — 11키(아래 '보안 기본선' 의 노출 면). tray.html?smoke 일 때만 CSP 위반 수집 · 실효 상태 보고
   lib/                 순수 모듈(.cjs)과 시험(*.test.ts) — electron 을 require 하지 않는다
   smoke/               앱 안 스모크 실행기 — main 이 스모크 인자를 받았을 때만 불러온다
   scripts/smoke.cjs    스모크 런처(plain node)
@@ -29,10 +30,14 @@ desktop/
 | `lib/` 모듈 | 역할 |
 |---|---|
 | `appProtocol` | app:// 파일 색인 · 요청 판정 · MIME 표 · 스킴 특권 · 출처 상수 |
-| `ipcGuard` · `links` · `navigation` · `permissions` | IPC 발신자 검증 · 시스템 브라우저로 열 https 허용 목록 · 탐색 / 새 창 / webview 가드 · 권한 / 다운로드 / 인증서 처리기 |
+| `ipcGuard` · `links` · `navigation` · `permissions` | IPC 발신자 검증 · 시스템 브라우저로 열 https 허용 목록(웹 · 의견 주소 상수 `WEB_URL` · `FEEDBACK_URL` 포함) · 탐색 / 새 창 / webview 가드 · 권한 / 다운로드 / 인증서 처리기 |
 | `windowPrefs` · `trayBuildInfo` | webPreferences 공장(실제 창과 스모크가 같은 값) · `tray-build.json` 검증 |
+| `windowPolicy` · `position` · `layout` | 바깥 클릭(blur) 숨김 · 트레이 클릭 경합 가드 · 아이콘 쪽 배치 / 작업영역 클램프 / 사용자 이동 판별 · 레이아웃별 콘텐츠 크기 |
+| `settings` · `theme` · `opacity` | `settings.json` 정규화 · 원자적 쓰기 · 테마 이름과 창 배경색 · 투명도 정규화(30–100) |
+| `autostart` · `trayMenu` · `pushChannels` · `consoleLine` | 로그인 항목 인자 / 판별 / 관리 가드 · 트레이 메뉴 템플릿 · main→렌더러 채널과 상태 스냅샷의 표 · 개발 실행 콘솔 중계의 한 줄 |
 | `smokeArgs` · `smokeLaunch` · `smokeFs` · `smokeOut` | 스모크 인자 · 런처의 판단 · 임시 폴더 / 잠금 / 정리 · 결과 파일 쓰기 |
 | `smokeResult` · `smokeChecks` · `guards` | 통과 판정과 필수 검사 목록 · 검사 평가 · 값 가드 |
+| `fakeElectron.ts` · `smokeRig.ts` | 시험 도우미(이름이 `*.test.ts` 가 아니라 시험으로 모이지 않는다) — `mainWiring.test.ts` 의 가짜 electron · `smokeRun.test.ts` 의 가짜 Electron 장치. 둘 다 구조 타입이고 electron 을 import 하지 않는다 |
 
 ## 실행
 
@@ -52,15 +57,77 @@ npm --prefix desktop start   # = electron . → 트레이 아이콘 + 창(app://
 - 앱은 `dist-tray/` 를 읽습니다. 화면을 고치면 `build:tray` 를 다시 해야 합니다(핫 리로드는 없습니다).
 - `dist-tray/tray-build.json` 이 없거나 형식이 틀리거나 `tray.html` 이 없으면 빈 창 대신 오류 상자('트레이 화면 파일을 읽지 못해 종료해요')와
   `build:tray` 안내를 보이고 끝납니다(stderr 에도 `[tj] …` 한 줄).
-- 창은 콘텐츠 340×400, 크기 조절 불가, OS 프레임 유지, 메뉴 막대 없음입니다. 닫기(X)는 숨김이고 끝내려면 트레이 메뉴 '종료' 입니다.
-  트레이 메뉴는 '열기' · '종료' 이고 Windows 에서는 좌클릭도 열기입니다. 두 번째 실행은 기존 창을 보이고 끝납니다(단일 인스턴스).
+- 창은 프레임 없는 팝업입니다 — 콘텐츠 340×400(자리표시 — 화면별 크기는 #24 · #25), 크기 조절 · 최대화 · 최소화 · 전체 화면 불가, 작업표시줄에
+  없고 늘 위, 메뉴 막대 없음. 다루는 법은 아래 '조작법' 입니다.
 - 개발 실행의 userData 는 `%APPDATA%/TwelveJanggi-dev` 입니다. `TJ_DEVTOOLS=1` 은 개발 실행에서만 DevTools(분리 창)를 엽니다.
+
+## 조작법
+
+Windows 기준입니다. macOS 갈래는 문서 · 소스대로 짰지만 Mac 에서 확인하지 않았습니다(**macOS 미확인** — #26 에서 봅니다).
+
+### 트레이 아이콘
+
+- **Windows** — 좌클릭은 팝업 열기 · 닫기, 우클릭은 메뉴입니다. 열린 팝업에서 아이콘을 누르면 닫히고 다시 열리지 않습니다 — 그 클릭이 낳은
+  바깥 클릭(blur)이 먼저 숨기므로, blur 로 숨은 지 250ms 안의 좌클릭은 무시합니다. Esc · ✕ 로 숨긴 뒤의 클릭은 무시하지 않습니다.
+- **macOS** — 클릭이 메뉴를 엽니다. 팝업은 메뉴의 '열기' 로 엽니다(macOS 미확인).
+- 메뉴를 열면 고정 안 한 팝업은 숨습니다 — Windows 는 우클릭이 포커스를 가져가 바깥 클릭처럼 숨고, macOS 는 메뉴가 열릴 때 숨깁니다(macOS 미확인).
+  메뉴의 '라이트 모드' · '창 고정' · '위치 초기화' 는 숨은 팝업에 적용되고 다음에 열 때 보입니다. 고정한 팝업은 메뉴를 열어도 그대로 보입니다.
+
+### 트레이 메뉴
+
+Windows 는 `십이장기 <버전>` · ─ · 혼자 하기 · 온라인 대전 · ─ · 자동 실행 · 라이트 모드 · 창 고정 · 위치 초기화 · ─ · 웹에서 열기 · 의견 보내기 · ─ · 종료
+입니다(─ 는 구분선). macOS · Linux 는 버전 줄 다음에 '열기' 가 있고 나머지는 같습니다(Windows 는 아이콘 좌클릭이 열기입니다).
+
+| 항목 | 하는 일 |
+|---|---|
+| `십이장기 <버전>` | 버전 줄 — 누를 수 없습니다 |
+| 열기 | (macOS · Linux) 팝업을 엽니다 |
+| 혼자 하기 · 온라인 대전 | 그 화면으로 바꾸고 팝업을 엽니다(지금은 둘 다 자리표시 문구). 화면을 바꾸는 것은 이 둘뿐입니다 |
+| 자동 실행 | 로그인할 때 창 없이 트레이에만 뜹니다(체크) — 아래 '자동 실행' |
+| 라이트 모드 | 테마 — 체크가 라이트입니다. 팝업의 ☀️ · 🌙 와 같은 설정입니다 |
+| 창 고정 | 바깥을 눌러도 팝업이 숨지 않습니다 |
+| 위치 초기화 | 끌어 옮긴 위치를 잊고 아이콘 쪽으로 되돌립니다. 저장 위치가 있을 때만 켜집니다 |
+| 웹에서 열기 · 의견 보내기 | 시스템 브라우저로 웹 게임 · 이 저장소의 새 이슈 화면을 엽니다(`lib/links.cjs` 의 `WEB_URL` · `FEEDBACK_URL`) |
+| 종료 | 앱을 끝냅니다 — 앱 안에서 끝내는 길은 이것뿐입니다(✕ · Esc · OS 닫기는 숨김) |
+
+### 팝업
+
+- **제목 줄**을 끌어 옮깁니다(단추는 끌기 영역이 아닙니다). 옮긴 위치는 기억합니다 — 다음에 열 때 그 자리이고, 그 위치와 가장 많이 겹치는
+  디스플레이(떼어 낸 모니터면 남은 디스플레이)의 작업영역 안으로 맞춥니다. 저장 위치가 없으면 아이콘 쪽에 뜹니다 — 아이콘이 화면 위쪽 절반이면
+  그 아래, 아래쪽 절반이면 그 위이고, 작업영역 밖으로 나가지 않습니다. 보이는 동안 모니터를 떼거나 배율 · 작업영역이 바뀌면 다시 놓습니다.
+- 🔅 — 투명도 덮개(30–100%)를 펼치고 접습니다. 투명도는 팝업에서만 바꿉니다(메뉴에는 없습니다).
+- ☀️ · 🌙 — 테마를 바꿉니다(메뉴의 '라이트 모드' 와 같은 설정).
+- ✕ · Esc — 숨깁니다. Esc 는 투명도 슬라이더에 포커스가 있어도 숨기지만, 대화상자를 닫는 Esc · IME 조합 중의 Esc · 누르고 있어 반복되는 Esc ·
+  Ctrl/Alt/Meta 와 함께 누른 Esc 로는 숨지 않습니다.
+- **바깥을 누르면** 숨습니다. 숨지 않는 때 — 창 고정, DevTools 가 열린 동안, 열린 직후 300ms(그 안에 포커스를 잃었으면 300ms 가 지난 뒤 한 번 더 보고
+  그때도 포커스가 없으면 숨깁니다 — 시작 때 뜬 창은 빼고).
+- **포커스를 받지 못한 팝업**(뜨는 사이에 다른 앱으로 옮겨 Windows 가 앞으로 가져오지 않은 창)은 바깥을 눌러도 숨지 않습니다 — 팝업 안을 한 번
+  눌러 포커스를 준 뒤 바깥을 누르거나, ✕ · 트레이 아이콘으로 닫습니다.
+
+### 자동 실행 · 두 번째 실행 · 설정
+
+- **자동 실행** — 메뉴의 '자동 실행' 을 켜면 로그인할 때 창 없이 트레이에만 뜹니다(Windows 는 로그인 항목의 `--hidden` 인자, macOS 는
+  `wasOpenedAtLogin` — macOS 미확인). 로그인 항목은 **설치본에서만** 씁니다 — 개발 실행 · 스모크는 이 PC 의 로그인 항목을 바꾸지 않고, 메뉴의
+  '자동 실행' 도 꺼진 항목으로 보입니다. 설치 파일은 #22 라 아래 두 줄은 아직 설치본에서 확인하지 않은 설계입니다.
+  - Windows 설치본은 첫 실행 때 켭니다. 체크는 메뉴를 여는 순간의 OS 상태라 작업 관리자 '시작 앱' 에서 끈 것도 꺼짐으로 보이고, 메뉴에서 다시
+    켜면 작업 관리자의 끔도 풉니다.
+  - macOS 는 기본으로 끕니다. 체크는 앱이 `settings.json` 에 적어 둔 값이라 시스템 설정에서 지운 것은 모릅니다(macOS 미확인).
+- **두 번째 실행** — 이미 떠 있으면(같은 userData) 그 팝업을 마지막 화면 그대로 보이고 끝납니다(단일 인스턴스). `--hidden` 이 붙은 두 번째 실행
+  (로그인 항목이 한 번 더 띄운 것)은 아무것도 하지 않습니다. macOS 는 Finder · Spotlight 로 다시 열면(activate) 팝업을 보입니다(macOS 미확인).
+- **설정** — `<userData>/settings.json`(개발 실행은 `%APPDATA%/TwelveJanggi-dev/settings.json`)에 테마 · 투명도 · 창 고정 · 저장 위치 · 자동 실행(macOS 의
+  체크) · 첫 실행 표시를 둡니다. 바뀌면 300ms 뒤 한 번 쓰고(같은 폴더의 임시 파일에 쓴 뒤 rename), 앱을 끝낼 때와 Windows 를 로그오프 · 종료할 때
+  남은 것을 씁니다. 못 읽는 파일이면 기본값(다크 · 100% · 고정 안 함 · 아이콘 쪽)으로 시작하고 `[tj] settings: …` 한 줄을 남깁니다 — 첫 실행으로 보지
+  않으므로 자동 실행 기본값이 다시 켜지지 않습니다. 화면은 받은 테마를 `localStorage.tj_theme` 에도 적어 다음 첫 페인트에 씁니다.
 
 ## 개발 흐름
 
 1. **화면(`src/tray/`)만 고칠 때** — 루트에서 `npm run dev` 후 <http://localhost:5173/tray.html>. 브라우저에서 보는 것이라 CSP 가 없고
-   `window.tjDesktop` 도 없어서 스텁으로 동작합니다(제목 줄에 버전이 나오지 않습니다).
+   `window.tjDesktop` 도 없습니다 — 제목 줄에 버전이 나오지 않고, 브리지를 쓰는 단추(☀️ · 🌙 · 투명도 슬라이더 · ✕)와 Esc 는 아무것도 하지 않습니다.
+   브리지 없는 페이지를 위한 흐름은 따로 만들지 않습니다(렌더러의 흐름은 하나 — 테마 · 투명도는 main 이 민 값으로만 바뀝니다).
+   라이트 화면은 개발 도구 콘솔에서 `localStorage.tj_theme = 'light'` 로 두고 새로 고쳐 봅니다(되돌리려면 `'dark'`).
 2. **셸(`desktop/`)이나 빌드 설정을 고칠 때** — `npm run build:tray` → `npm --prefix desktop start`.
+   숨긴 채 시작하는 길(로그인 실행과 같다)은 `npm --prefix desktop start -- --hidden` 으로 봅니다(`--` 뒤에 씁니다 — 없으면 npm 이 가져갑니다).
+   창 없이 트레이에만 뜨고 트레이 좌클릭(Windows)으로 엽니다. 개발 실행이라 로그인 항목은 건드리지 않습니다.
 3. **확인** — `npm run typecheck:desktop`(JS 타입 검사: webPreferences 키 오타는 조용히 보안을 끄므로), `npm test`(`desktop/lib` 시험 포함),
    `npm --prefix desktop run smoke`. 트레이를 바꾼 PR 의 확인 목록은 [`CONTRIBUTING.md`](../CONTRIBUTING.md) 에 있습니다.
 4. **빌드 가드** — 트레이 코드가 웹 전용 모듈(`src/main.tsx` · `Header` · `Home` · `PwaStatus` · `InstallButton` · `DownloadCards` · `appStore` ·
@@ -86,7 +153,8 @@ npm --prefix desktop start   # = electron . → 트레이 아이콘 + 창(app://
 - 필수 검사는 런처가 정합니다(`lib/smokeResult.cjs` 의 `BASE_REQUIRED` · `requiredChecks`). 앱이 결과에 적은 `required` 는 참고일 뿐입니다.
 - '없었다' 를 보는 검사(`securityWarnings` · `cspViolations` · `consoleErrors`)는 그 사건의 양성 기록(페이지가 `getAppInfo` 를 왕복한 뒤
   콘솔에 찍는 장벽 표식)을 먼저 받은 뒤에만 판정합니다.
-- 한 판은 약 2초(이 PC 기준)이고 그동안 창이 실제로 뜹니다(`screenshot` 이 보이는 창을 찍습니다). 시간 상한은 둘 — 앱 안 감시 타이머 60초,
+- 한 판은 약 5.5초(런처 포함 · 이 PC 기준 — 창 검사가 blur 유예 · 클릭 경합 · 저장 예약 시간을 실제로 기다립니다)이고 그동안 창이 실제로 뜹니다
+  (`screenshot` 이 보이는 창을 찍고, 창 검사가 창을 숨겼다가 다시 엽니다). 시간 상한은 둘 — 앱 안 감시 타이머 60초,
   런처의 하드 타임아웃 90초(`-- --timeout=<10~90>` 으로 줄일 수 있습니다).
 - **격리** — `%TEMP%/tj-smoke-*` 아래에 이번 실행 전용 프로필이 생기고(앱의 `TMP`/`TEMP` 도 그 안), 동시 실행 잠금은 `%TEMP%/tj-smoke.lock` 입니다.
   끝나면 지우고, 못 지운 것은 다음 실행이 앱을 띄우기 직전에 정리합니다 — 인자 · 잠금 · `smoke-out` 비우기 · 빌드 확인 · electron 확인을 지난 뒤라,
@@ -96,11 +164,12 @@ npm --prefix desktop start   # = electron . → 트레이 아이콘 + 창(app://
 
 ### 필수 검사
 
-표의 순서는 런처가 찍는 순서(`BASE_REQUIRED`)입니다. 앱 안에서 도는 순서는 `smoke/run.cjs` 의 `runChecks` 에 있습니다.
+표의 순서는 런처가 찍는 순서(`BASE_REQUIRED`, 조건부 둘은 맨 뒤)입니다 — `lib/readmeSmokeTable.test.ts` 가 이 표를 그 목록과 대조합니다.
+앱 안에서 도는 순서는 `smoke/run.cjs` 의 `runChecks` 에 있습니다.
 
 | 검사 | 확인하는 것 |
 |---|---|
-| `boot` | 진입 URL(`app://twelvejanggi/tray.html?smoke`) · `#root` 렌더 · 제목 줄의 버전(= `getAppInfo().version`) · body 배경이 다크 토큰(CSS 가 실렸다) |
+| `boot` | 진입 URL(`app://twelvejanggi/tray.html?smoke`) · `#root` 렌더 · 제목 줄의 글자 '십이장기'(`.tapp-title`)와 버전(= `getAppInfo().version`) · body 배경이 다크 토큰(`--bg` · `color-scheme` dark — 새 프로필은 설정 파일이 없어 기본값 다크다. CSS 가 실렸다) |
 | `webPreferences` | `getLastWebPreferences()` 가 `contextIsolation` · `sandbox` true, `nodeIntegration` false 이고, 기본값이 안전한 키 7개는 있으면 안전한 값 |
 | `sandboxEffective` | preload 가 보고한 `process.sandboxed` · `contextIsolated` true, 렌더러가 OS 수준 sandbox(Windows 는 integrityLevel untrusted · low), 페이지에 격리 world 표식 · `require` · `process` 가 없음 |
 | `bridge` | `window.tjDesktop` 의 키가 계약 상수(`TJ_DESKTOP_KEYS`)와 같음 |
@@ -114,22 +183,31 @@ npm --prefix desktop start   # = electron . → 트레이 아이콘 + 창(app://
 | `permissions` | 알림 · 클립보드 쓰기만 허락하고 위치는 거부(감싼 처리기의 결정 기록으로 판정 — Electron 은 처리기가 없으면 모두 허락한다) |
 | `securityWarnings` | 보안 경고 검사가 켜져 있고 'Electron Security Warning' 이 0건 |
 | `noNetwork` | 가드가 기록한 원격 요청 = 기대 목록. 기본은 가드 탐침(가드가 살아 있는지 보는 양성 대조) 한 건뿐이고 앱 · 페이지가 낸 원격 요청은 0건 — `.invalid` 빌드는 connectProbe 두 건, `--net` 은 두 건이 더 기대됨 |
-| `loginItem` | `openAtLogin` 이 시작 · 끝 모두 false(내 PC 의 로그인 항목을 바꾸지 않음) |
-| `tray` | 트레이 · 아이콘(비어 있지 않음) · 메뉴 '열기' · '종료' · 단일 인스턴스 잠금 · 창을 숨긴 뒤 '열기' → 보임 · 포커스 |
+| `loginItem` | 로그인 항목 쓰기를 막았다 — 실행기가 `app.setLoginItemSettings` 를 기록만 하는 대체 함수로 바꿔 끼웠고(D1 — 로그인 항목은 격리 프로필 밖이다) 끝까지 그 함수가 서 있고 쓰기를 0번 받았다. 양성 대조: 프로필 settings.json 의 첫 실행 표시(`autostartDefaultApplied` true)와 로그인 항목 요청 기록(Windows 는 `{ on: true, managed: false }` 하나 — 가드에 닿아 거절했다. 그 밖은 0개). 환경 전제: 쓸 때와 같은 인자로 읽은 `openAtLogin`(Windows 는 `executableWillLaunchAtLogin` 도)이 시작 · 끝 모두 false 이고 둘이 같다 |
+| `tray` | 트레이 · main 이 넘긴 아이콘(비지 않음 · 16×16) · 최신 메뉴의 라벨이 플랫폼별 목록('조작법' 의 트레이 메뉴 — 버전 줄은 `app.getVersion()`) · 버전 줄 · '자동 실행' · '위치 초기화' 는 꺼짐 · 체크 없음(새 프로필) · 단일 인스턴스 잠금. 처음 보인 창을 main 의 길로 숨겼다가(Windows 는 트레이 클릭 토글, 그 밖은 `win.close()`) 다시 열면(Windows 는 트레이 좌클릭, 그 밖은 '열기') 보임 · 포커스. Windows 는 바깥 클릭 · 경합도 본다 — 유예(300ms)가 지난 뒤 blur → 숨음(이유 `blur`) → 같은 턴의 트레이 클릭은 무시 → 경합 시간(250ms) 뒤의 클릭 → 보임. 우클릭은 내지 않는다(네이티브 메뉴가 떠서 실행이 멈춘다) |
 | `screenshot` | `capturePage()` 가 서로 다른 색 8개 이상(검은 화면 거부) → `screenshot.png` |
+| `theme` | 페이지가 `setTheme('light')` → `getState()` 장벽 뒤 스냅샷 · `data-theme` · `localStorage.tj_theme` 이 light, body 배경 = `--bg` = 창 배경(`getBackgroundColor()`) = light 색, 새로 전달된 메뉴의 '라이트 모드' 체크, settings.json light. `setTheme('purple')` 은 아무것도 바꾸지 않는다. 라이트로 바꾸기 전에 받아 둔 낡은 메뉴의 '라이트 모드' 를 누르면 light 그대로 + 새 메뉴(Electron 이 체크를 먼저 뒤집어 '켜기' 가 된다), 최신 메뉴로 누르면 모두 dark(settings.json 까지) |
+| `opacity` | 페이지가 보낸 값마다 스냅샷과 창 투명도(`round(getOpacity() × 100)`)가 실행기 안의 글자 표대로다 — 64→64 · 5→30 · 64.4→64 · `'70'`→64 · NaN→64 · null→64 · 150→100 · 100→100. 잘못된 값은 64 에서 보내 '기본값으로 바꿈' 과 '무시' 를 가르고, NaN 줄은 실행기의 수신 기록이 'NaN' 이어야 한다. 저장값이 바뀌는 줄은 settings.json 도 그 값이 된다 |
+| `escHide` | 대화상자(`aria-modal="true"` 요소)가 있는 채 Esc → 숨지 않고 `tj-hide` 도 없음 · 그 요소를 `#root` 의 keydown 리스너가 동기로 지워도(대화상자를 닫는 Esc) 창은 그대로 — 리스너 등록 순서와 상관없다 · 요소 없이 Esc → `tj-hide` 1 · 숨김 1(이유 `request`) · 창 파괴 없음 → 다시 보임. Esc 는 페이지가 만든 키 이벤트다(실제 키 경로는 손 확인) |
+| `visibility` | 진짜 ✕ 단추 → `tj-hide` 1 · 숨김 1(이유 `request`) · `tj-hidden` 전달 1 · `<html>` 에 `tapp-hidden` · `getBackgroundThrottling()` true → 다시 열면 `tj-shown` 전달 1 · 클래스 빠짐. 스로틀을 끈 한 바퀴: `win.close()`(이유 `close`) 뒤 `visibilityState` 는 visible 인데 `tapp-hidden` 이 붙는다(`visibilitychange` 로 움직이는 렌더러를 걸러 낸다) → 다시 열면 빠짐 → 스로틀을 다시 켠다 |
 | `cspViolations` | 장벽 뒤 CSP 위반 0건 · 콘솔의 CSP 줄 0건, 격리 world 버퍼 = preload 가 보낸 목록(유실 없음) |
 | `consoleErrors` | 장벽 뒤 콘솔 error 0건(`.invalid` 빌드에서 가드가 취소한 connectProbe 요청의 오류만 뺌) |
 | `cspCanary` | 막혀야 하는 fetch(`https://example.invalid/…`)의 위반이 정확히 2건 — meta · header 두 전달 경로가 한 건씩 집행됨. 이 단계의 콘솔 오류는 최대 3건 허용 |
 | `connectAllowed` (조건부) | `.invalid` 빌드에서만 필수 — 빌드 출처의 https · wss 로 시도한 요청에 CSP 위반이 없고 가드가 둘 다 취소 |
 | `net` (조건부) | `--net` 에서만 필수 — 인증 설정 GET 200 + Realtime 소켓 연결 |
 
-필수 검사 수: 기본 빌드(Supabase 값 없음)는 20개, `.invalid` 빌드는 `connectAllowed` 가 더해져 21개, `--net`(실제 값 빌드)은 `net` 이 더해집니다.
-실제 값으로 빌드해도 `--net` 이 없으면 20개이고 원격 요청은 나가지 않습니다.
+창 검사(`theme` · `opacity` · `escHide` · `visibility`)는 `screenshot` 바로 뒤에 돌고, 끝마다 창을 main 의 길로 보인 채 돌려놓습니다(못 하면 그 검사의
+실패 — 뒤 검사는 보이는 다크 창을 전제로 합니다). 실행기는 창을 직접 숨기지 않고 main 의 길(트레이 토글 · ✕ · Esc · `win.close()` · `win.emit('blur')`)로만
+숨겨 숨김 이유가 기록되게 하고, `escHide` · `visibility` 는 그 검사가 일으키지 않은 숨김(우연한 blur 등)이 오면 그 이유를 적고 실패합니다. 순서 장벽은
+페이지의 `await tjDesktop.getState()` 이고(같은 프레임의 IPC 는 순서를 지킨다는 가정), 저장 예약을 기다리지 않는 판정은 그 스냅샷으로 합니다.
+
+필수 검사 수: 기본 빌드(Supabase 값 없음)는 24개, `.invalid` 빌드는 `connectAllowed` 가 더해져 25개, `--net`(실제 값 빌드)은 `net` 이 더해집니다.
+실제 값으로 빌드해도 `--net` 이 없으면 24개이고 원격 요청은 나가지 않습니다.
 `.invalid` 빌드는 CI 의 가짜 값입니다 — 환경 변수로만 줍니다(`.env` 파일에 두지 않습니다). 로컬에서 같은 것을 하려면(Git Bash):
 
 ```bash
 VITE_SUPABASE_URL=https://ci.invalid VITE_SUPABASE_ANON_KEY=ci-dummy-anon-key npm run build:tray
-npm --prefix desktop run smoke        # connectAllowed 포함 21개 — 요청은 가드가 취소한다
+npm --prefix desktop run smoke        # connectAllowed 포함 25개 — 요청은 가드가 취소한다
 npm run build:tray                    # 기본 빌드로 되돌린다 — 저장소 루트에 .env.local 이 있으면 그 값이 들어간다
 ```
 
@@ -173,7 +251,7 @@ npm --prefix desktop run smoke -- --net    # '--' 뒤에 쓴다
 |---|---|---|
 | 출처 동결 | `app://twelvejanggi` — localStorage · 익명 세션이 여기에 묶인다. 스킴 특권은 `{ standard, secure, supportFetchAPI }` 뿐(`supportFetchAPI` 는 스모크의 페이지 안 fetch 검사용) | `boot`(진입 URL) · `protocol`(다른 호스트는 404). 특권 셋은 `appProtocol.test.ts` · `mainWiring.test.ts` |
 | 렌더러 격리 | webPreferences 는 정확히 `{ preload, contextIsolation: true, sandbox: true, nodeIntegration: false }` — `lib/windowPrefs.cjs` 한 곳에서만 만든다. `app.enableSandbox()` 를 단일 인스턴스 잠금보다 먼저 부른다. `additionalArguments` 는 쓰지 않는다(비어 있지 않으면 spare renderer 를 못 써서 스모크만 다른 시작 경로를 탄다) | `webPreferences` · `sandboxEffective`(실제 창의 값 · 실효 sandbox). 정확히 네 키 · 한 공장 · `additionalArguments` 없음은 `windowPrefs.test.ts` · `mainSource.test.ts`, `enableSandbox` 를 잠금보다 먼저는 `mainSource.test.ts` · `mainWiring.test.ts` |
-| 노출 면 | preload 는 `require('electron')` 만 쓰고 `window.tjDesktop = { getAppInfo }` 만 노출한다(raw `ipcRenderer` 없음). 채널은 `tj-*`. IPC 는 트레이 창의 메인 프레임에서 온 것만 받는다 | `bridge`(노출 키) · `ipc`(왕복). preload 의 `require` · 채널 이름은 `preloadContract.test.ts` · `mainWiring.test.ts`, 메인 프레임만 받는 것은 `ipcGuard.test.ts` · `mainSource.test.ts` · `mainWiring.test.ts` |
+| 노출 면 | preload 는 `require('electron')` 만 쓰고 `window.tjDesktop`(얼린 객체 11키 — `getAppInfo · getState · setTheme · setOpacity · setLayout · hide · onTheme · onOpacity · onMode · onShown · onHidden`)만 노출한다(raw `ipcRenderer` 없음). 값은 고치지 않고 보낸다 — 정규화는 main 한 곳이고 틀린 값은 무시한다. 구독은 부를 때만 걸고 해제 함수를 돌려주며 이벤트 객체를 넘기지 않는다. 로드 때는 아무것도 보내거나 듣지 않는다(스모크 제외). 채널은 `tj-*`. IPC 는 트레이 창의 메인 프레임에서 온 것만 받는다 | `bridge`(노출 키) · `ipc`(왕복) · `theme` · `opacity`(틀린 값 무시). preload 의 `require` · 채널 이름은 `preloadContract.test.ts` · `mainWiring.test.ts`(구독 채널 = `PUSH_CHANNELS` · 로드 때 호출 0 은 `preloadContract.test.ts`), 메인 프레임만 받는 것은 `ipcGuard.test.ts` · `mainSource.test.ts` · `mainWiring.test.ts` |
 | CSP | 문서 meta 와 응답 헤더 두 경로에 같은 정책(헤더 판 = meta 판 + `frame-ancestors 'none'`). 전용 워커는 문서 meta 를 물려받지 않고 자기 응답 헤더를 따르므로 헤더가 필요하다. 인라인 스크립트 · 스타일이 없다(`style-src 'self'`) | `cspMeta` · `cspHeader` · `cspViolations` · `cspCanary` |
 | 요청 처리기 | 파일 색인에서만 내준다 · 호스트 정확 일치 · GET/HEAD 만(그 밖의 메서드는 405) · 없거나 거부하면 404 · 표 밖 확장자 없음 · `nosniff` | `protocol` · `mime` · `cspHeader`(`nosniff`). 호스트 정확 일치의 변형(대소문자 · 접두 · 포트 · 사용자 정보)은 `appProtocol.test.ts` |
 | 탐색 · 새 창 · webview | 앱 밖은 막고 허용 목록(`khkim3115.github.io` · 이 저장소의 `github.com`)만 시스템 브라우저로 연다 | `navigation`. webview 는 `webPreferences`(`webviewTag=false`) · `navigation.test.ts` |
