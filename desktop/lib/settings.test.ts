@@ -82,6 +82,26 @@ describe('normalizeSettings', () => {
     expect(normalizeSettings({ position: { x: -0.2, y: 0 } }).position).toStrictEqual({ x: 0, y: 0 });
   });
 
+  // 손으로 고친 파일의 int32 밖 좌표는 Electron 의 Rectangle(정수)로 바꾸지 못해 보일 때마다 screen.getDisplayMatching 이 던진다 —
+  // 저장 위치가 없는 것(기본값 — 아이콘 쪽 배치)으로 본다
+  it.each([
+    ['1e10', { x: 1e10, y: 0 }],
+    ['2**31', { x: 2 ** 31, y: 0 }],
+    ['-(2**31)-1', { x: -(2 ** 31) - 1, y: 0 }],
+    ['y 가 2**31', { x: 0, y: 2 ** 31 }],
+    ['반올림하면 2**31', { x: 2 ** 31 - 0.5, y: 0 }],
+  ])('반올림한 좌표가 int32 밖(%s)이면 position 만 null 이다', (_label, position) => {
+    expect(normalizeSettings({ ...GOOD, position })).toStrictEqual({ ...GOOD, position: null });
+  });
+
+  it.each([
+    { x: 2 ** 31 - 1, y: -(2 ** 31 - 1) },
+    { x: -(2 ** 31 - 1), y: 2 ** 31 - 1 },
+    { x: -(2 ** 31), y: 0 },
+  ])('int32 경계 안(%j)은 그대로다', (position) => {
+    expect(normalizeSettings({ position }).position).toStrictEqual(position);
+  });
+
   it('opacity 는 범위 안으로 들어온다', () => {
     expect(normalizeSettings({ opacity: 150 }).opacity).toBe(100);
     expect(normalizeSettings({ opacity: 5 }).opacity).toBe(30);
@@ -120,6 +140,11 @@ describe('readSettings', () => {
   it('올바른 파일은 정규화한 값과 ok', () => {
     fs.writeFileSync(file(), JSON.stringify({ theme: 'light', opacity: 500, pinned: true, junk: 1 }));
     expect(readSettings(file())).toStrictEqual({ settings: { ...DEFAULTS, theme: 'light', opacity: 100, pinned: true }, status: 'ok' });
+  });
+
+  it('손으로 고친 int32 밖 위치는 기본값(null)으로 읽고 나머지는 그대로 ok', () => {
+    fs.writeFileSync(file(), JSON.stringify({ theme: 'light', position: { x: 1e10, y: 5 } }));
+    expect(readSettings(file())).toStrictEqual({ settings: { ...DEFAULTS, theme: 'light' }, status: 'ok' });
   });
 
   it('주입한 fs 로 읽는다', () => {

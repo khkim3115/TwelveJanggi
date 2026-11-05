@@ -34,7 +34,18 @@ const DEFAULT_SETTINGS = Object.freeze({
 });
 
 /**
- * {x, y} 둘 다 유한수이면 반올림한 정수 위치, 아니면 null. (-0 은 0 으로 쓴다.)
+ * 32비트 부호 있는 정수인가 — Electron 의 Rectangle 이 받는 범위다(정수 필드를 int 로 바꾼다).
+ * @param {number} n
+ * @returns {boolean}
+ */
+function isInt32(n) {
+  return (n | 0) === n;
+}
+
+/**
+ * {x, y} 둘 다 유한수이고 반올림한 값이 int32 이면 그 정수 위치, 아니면 null. (-0 은 0 으로 쓴다.)
+ * int32 밖 좌표(손으로 고친 파일)는 Electron 의 Rectangle 로 바꾸지 못해 보일 때마다 screen.getDisplayMatching 이 던진다 — 저장 위치가
+ * 없는 것(기본값 — 아이콘 쪽 배치)으로 본다.
  * @param {unknown} value
  * @returns {Point | null}
  */
@@ -42,7 +53,8 @@ function normalizePosition(value) {
   if (!isRecord(value)) return null;
   const { x, y } = value;
   if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y)) return null;
-  return { x: Math.round(x) + 0, y: Math.round(y) + 0 };
+  const point = { x: Math.round(x) + 0, y: Math.round(y) + 0 };
+  return isInt32(point.x) && isInt32(point.y) ? point : null;
 }
 
 /**
