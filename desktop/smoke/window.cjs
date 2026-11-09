@@ -791,7 +791,8 @@ function createWindowChecks(ctx) {
    * <html> 의 tapp-hidden 이 want 가 될 때까지 ms(기본 WAIT_MS)까지 페이지를 다시 읽는다(렌더러는 tj-hidden · tj-shown push 로 단다). 창이
    * 파괴되면 그만 기다린다(R29 — 그 페이지 호출이 파괴로 거부돼도 같다. 그 밖의 거부는 그 단계의 실패다). 페이지가 답한 수와 마지막 답의
    * 때도 돌려준다 — 되지 않았을 때 '한 번도 답하지 않았다' 와 '답했지만 붙지 · 빠지지 않았다' 를 가른다(classMiss). ms 는 페이지 호출 한
-   * 번의 상한(PAGE_MS)을 넘지 않는다 — 넘으면 그 호출의 거부가 기다림의 시간 초과보다 먼저 와서 판정 대신 단계의 실패가 된다.
+   * 번의 상한(PAGE_MS)을 넘지 않는다 — 넘으면 그 호출의 거부가 기다림의 시간 초과보다 먼저 와서 판정 대신 단계의 실패가 된다. 같은 값이면
+   * settleWithin 이 타이머를 먼저 걸어(support.cjs:217) 기다림의 시간 초과가 이긴다 — 그 순서에 기댄다.
    * @param {boolean} want
    * @param {number} [ms]
    * @returns {Promise<ClassWait>}
@@ -931,7 +932,11 @@ function createWindowChecks(ctx) {
     if (visibilityState !== 'visible') {
       fail(`스로틀을 끈 숨긴 창의 visibilityState 가 ${show(visibilityState)} 다(기대 "visible" — 양성 기록이 없어 visibilitychange 로 움직이는 렌더러를 가르지 못함)`);
     }
-    if (!added.ok) fail(`visibilityState ${show(visibilityState)} 인 채 ${classMiss(added, [`렌더러는 visibilitychange 가 아니라 ${HIDDEN_CHANNEL} 으로 단다`])}`);
+    if (!added.ok) {
+      // 렌더러 설명은 페이지가 답했을 때만 — 답이 없으면 늦음인지 렌더러 결함인지 드러난 것이 없다(한 글에 섞지 않는다)
+      const renderer = added.answers > 0 ? [`렌더러는 visibilitychange 가 아니라 ${HIDDEN_CHANNEL} 으로 단다`] : [];
+      fail(`visibilityState ${show(visibilityState)} 인 채 ${classMiss(added, renderer)}`);
+    }
     // 그 숨김에서 경합 시간 + 여유가 지난 뒤 다시 연다(R13)
     await waitElapsed(early.at, CLICK_RACE_MS + ctx.timingMarginMs);
     if (stopped(problems, '②', '도중에')) return;

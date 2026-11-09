@@ -712,7 +712,7 @@ describe('visibility — ① 진짜 ✕ → 숨김(request) · tj-hidden · tapp
     [
       '렌더러가 visibilitychange 로 움직인다 — ② 가 잡는다(스로틀을 끈 숨긴 창은 visible 이다)',
       { renderer: { visibilityDriven: true } },
-      ['② visibilityState "visible" 인 채 <html> 에 tapp-hidden 이 5000ms 안에 붙지 않았다'],
+      ['② visibilityState "visible" 인 채 <html> 에 tapp-hidden 이 5000ms 안에 붙지 않았다', ' · 렌더러는 visibilitychange 가 아니라 tj-hidden 으로 단다)'],
       ['①'],
       [],
     ],
@@ -816,6 +816,25 @@ describe('visibility — ① 진짜 ✕ → 숨김(request) · tj-hidden · tapp
     const check = expectOnlyFailure(outcome, 'visibility', ['① <html> 의 tapp-hidden 을 10000ms 동안 읽지 못했다 — 페이지가 한 번도 답하지 않았다(숨김 기록 뒤 ✕ 응답 0.0ms)']);
     expect(check.detail).not.toContain('붙지 않았다');
     expect(check.detail.split('; ').filter((problem) => problem.startsWith('②')), '② 는 통과한다').toStrictEqual([]);
+    expectEndsShown(outcome);
+  });
+
+  it('② 의 tapp-hidden 읽기(넷째 읽기)에 페이지가 끝내 답하지 않는다 → ② 실패 — 읽지 못했다는 글에 렌더러 설명(페이지가 답했을 때의 글)이 섞이지 않는다', async () => {
+    let reads = 0;
+    const outcome = await runScenario({
+      page: {
+        'hidden-state': (arg, app) => {
+          reads += 1;
+          return reads === 4 ? new Promise(() => {}) : HEALTHY_PAGE['hidden-state']?.(arg, app);
+        },
+      },
+    });
+    const check = expectOnlyFailure(outcome, 'visibility', []);
+    const problems = check.detail.split('; ');
+    expect(problems).toContain('② visibilityState undefined 인 채 <html> 의 tapp-hidden 을 5000ms 동안 읽지 못했다 — 페이지가 한 번도 답하지 않았다');
+    expect(check.detail).not.toContain('visibilitychange 가 아니라');
+    expect(check.detail).not.toContain('붙지 않았다');
+    expect(problems.filter((problem) => problem.startsWith('①')), '① 은 통과한다').toStrictEqual([]);
     expectEndsShown(outcome);
   });
 

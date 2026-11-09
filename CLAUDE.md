@@ -189,7 +189,7 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
   파일이 `electron(.exe)` 아님)뿐이다. 개발 실행 · 스모크 · 시험이 쓰면 개발용 electron.exe 가 이 PC 의 HKCU `Run` 에 남는다. 스모크는 더 나아가
   `app.setLoginItemSettings` 를 기록만 하는 대체 함수로 바꿔 끼운다(D1 — '감싸서 기록만' 의 유일한 예외: 가드에 버그가 있으면 기록으로는 막지 못한다).
   Windows 는 `--hidden` 으로 등록하고(로그인 실행은 창 없이 뜬다) 같은 인자로 묻는다(`loginItemQuery` — `openAtLogin` 은 인자까지 같아야 참이고 스모크
-  `loginItem` 이 읽는다). 메뉴 체크는 인자를 보지 않는 `executableWillLaunchAtLogin`(실행 파일 경로 · 작업 관리자의 켬/끔)이다.
+  `loginItem` 이 읽는다). Windows 메뉴 체크는 인자를 보지 않는 `executableWillLaunchAtLogin`(실행 파일 경로 · 작업 관리자의 켬/끔)이다.
 - **브리지 `window.tjDesktop` 은 11키다**(`TJ_DESKTOP_KEYS` = preload 의 얼린 객체, 이 순서): `getAppInfo · getState · setTheme · setOpacity · setLayout ·
   hide · onTheme · onOpacity · onMode · onShown · onHidden`. preload 는 값을 고치지 않는다 — 정규화는 main 한 곳이고 틀린 값은 무시한다. 렌더러는 테마 ·
   투명도를 미리 바꾸지 않고 main 이 민 값으로만 바꾼다(토글 흐름은 하나 — 브리지 없는 `/tray.html` 용 흐름도 만들지 않는다).
