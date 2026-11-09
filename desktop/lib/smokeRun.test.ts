@@ -1,613 +1,196 @@
 // desktop/smoke/run.cjs(앱 안 스모크 실행기) 시험 — createSmokeRun 에 구조 타입의 가짜 Electron 객체를 넘겨, main 의 순서(가드 →
 // registerIpc → beforeLoad → setTray)로 꽂고 첫 did-finish-load 부터 장벽 → 수동 검사 → 능동 검사 → 장벽 → cspViolations · consoleErrors →
-// canary → noNetwork · loginItem → 결과 → 붙은 메뉴 '종료' 까지 실제로 돌린다.
+// canary → noNetwork · loginItem → 결과 → 최신 메뉴 '종료' 까지 실제로 돌린다.
 // 앱은 띄우지 않고 electron 은 import · require 하지 않는다(실행기도 하지 않는다 — Electron 객체는 main 이 넘긴다). 실제 바이너리의 판정은
-// 스모크가 보고, 여기서는 가짜가 내놓는 사실이 바뀔 때 검사가 판정을 바꾸는지 본다. 음성 사례는 아직 일부 검사에만 있다 — boot ·
-// webPreferences · sandboxEffective · bridge · ipc · mime · tray · screenshot · loginItem 은 여기서 양성 갈래만 탄다(webPreferences ·
-// screenshot 의 판정 함수 evaluateWebPreferences · countDistinctColors 는 smokeChecks.test.ts 가 음성까지 본다).
-// - 가짜 페이지는 실행기가 보내는 코드의 태그 주석(smoke/pageScripts.cjs)으로 처리기를 고른다. 기본 처리기는 실제 앱이 낼 사실을 낸다:
-//   - 탐색 · 새 창은 main 처럼 lib/navigation.cjs 의 가드를 실행기의 record · open 에 이어 부른다. 탐색은 Electron 44.9.3 의 실제 순서
-//     (did-start-navigation → 가드 → did-stop-loading — 막힌 탐색에 did-fail-provisional-load 는 없다)로 사건을 낸다.
-//   - 권한은 main 의 처리기처럼 lib/permissions.cjs 로 정하고 기록한다. app:// 응답 상태는 lib/appProtocol.cjs 의 resolveAppRequest 가 정한다.
-//   - CSP 위반은 preload 처럼 tj-smoke-csp 로 보내고 격리 world 버퍼(world 999)에도 남긴다.
-//   사례는 처리기 하나를 바꿔 그 검사의 음성 갈래를 탄다.
-// - 가짜 기본 세션의 fetch 와 페이지의 원격 요청은 Electron 처럼 onBeforeRequest(붙어 있으면)를 먼저 지난다. 탐침은 { cancel: true } 면
-//   가드의 취소(net::ERR_BLOCKED_BY_CLIENT)로 거부되고, {} 면 망으로 간다 — .invalid 는 DNS 에서 거부된다(사례가 정하면 응답한다).
-// - securityWarnings: 경고 검사의 켜짐은 main 프로세스의 execPath · ELECTRON_ENABLE_SECURITY_WARNINGS 로 추론한다 — 사례마다 정하고
-//   afterEach 가 되돌린다. 플랫폼마다 다른 규칙은 securityWarningsArming 을 바로 불러 본다.
-// - 실행은 가짜 시계(setTimeout · clearTimeout · Date) 위에서 돈다(drive — 몇 바퀴 돌리고 시계를 민다). 그래서 상한까지 기다리는 사례도
-//   빨리 끝나고, 실행기의 기다림은 모두 같은 시계를 따른다(runFast 는 그런 사례라는 표시일 뿐 같은 실행이다).
-// - 결과는 mkdtemp(한글 · 공백 이름)의 outDir/result.json 을 읽는다. 실행기의 60초 감시 타이머는 '종료' 와 afterEach 의 will-quit 이 끈다.
-import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+// 스모크가 보고, 여기서는 가짜가 내놓는 사실이 바뀔 때 검사가 판정을 바꾸는지 본다. 음성 사례는 아직 일부 검사에만 있다 —
+// webPreferences · sandboxEffective · bridge · ipc · mime · screenshot 은 여기서 양성 갈래만 탄다(webPreferences · screenshot 의 판정 함수
+// evaluateWebPreferences · countDistinctColors 는 smokeChecks.test.ts 가 음성까지 본다).
+// - 가짜 Electron 장치(rigScenario — 가짜 페이지 · 기본 세션 · 흉내 낸 main · 가짜 렌더러 · 시계)와 사례마다의 준비 · 정리
+//   (installRigLifecycle)는 smokeRig.ts 에 있다(#36 T6-8 · T11-5). 사례는 손잡이 하나 — 페이지 처리기(Scenario.page) · main 의 결함
+//   (Scenario.main) · 렌더러의 결함(Scenario.renderer) · 갈래 · 로그인 항목 — 를 바꿔 그 검사의 음성 갈래를 탄다(#36 runner-N1 의 tray ·
+//   boot · loginItem, 창 검사 theme · opacity · escHide · visibility). 창 파괴(FakeApp.destroyWindow · close 를 막지 않는 main)는 창 검사가
+//   판정으로 적는지 본다(R29).
+// - 건강한 흐름은 세 갈래(win32 · darwin · linux)를 호스트와 상관없이 돈다(필수 check 는 ubuntu 에서 Windows 갈래를 덮는다).
+// - securityWarnings: 플랫폼마다 다른 켜짐 규칙은 securityWarningsArming 을 바로 불러 본다.
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildTrayBuildInfo, buildTrayCsp } from '../../scripts/trayBuild.ts';
+import { describe, expect, it, vi } from 'vitest';
+import { buildTrayCsp } from '../../scripts/trayBuild.ts';
+import { createFakeLoginItems } from './fakeElectron.ts';
+import {
+  AI_MS,
+  APP_ORIGIN_SLASH,
+  APP_VERSION,
+  BLOCKED,
+  CONNECT_PROBES,
+  DEV_BINARY,
+  ENABLE,
+  MIME_HTML,
+  MIME_JS,
+  NONCE,
+  NOT_RESOLVED,
+  OTHER_BINARY,
+  RIG_FAKE_TIMERS,
+  SETTINGS_URL,
+  SMOKE_URL,
+  SOCKET_URL,
+  SUPABASE_URLS,
+  WORKER_SCRIPT,
+  canaryLikeChromium,
+  checkOf,
+  decideLikeMain,
+  drive,
+  electronNavigate,
+  expectOnlyFailure,
+  failing,
+  healthyPage,
+  installRigLifecycle,
+  netLikePage,
+  probeLikePage,
+  rigBase,
+  rigScenario,
+  runFast,
+  runScenario,
+  startScenario,
+  turns,
+  violation,
+  type MenuTemplate,
+  type Outcome,
+  type PageHandler,
+  type Scenario,
+  type SmokeRun,
+} from './smokeRig.ts';
 
 const require = createRequire(import.meta.url);
-const { RESULT_FILE } = require('./smokeOut.cjs') as typeof import('./smokeOut.cjs');
 const { requiredChecks } = require('./smokeResult.cjs') as typeof import('./smokeResult.cjs');
-const { resolveAppRequest } = require('./appProtocol.cjs') as typeof import('./appProtocol.cjs');
-const { createNavigationGuards } = require('./navigation.cjs') as typeof import('./navigation.cjs');
-const { isPermissionAllowed } = require('./permissions.cjs') as typeof import('./permissions.cjs');
-
-/** 기본 세션의 onBeforeRequest 처리기 — main 이 networkGuard 를 단다. */
-type Guard = (details: { url: unknown; method?: unknown }, callback: (response: { cancel?: boolean }) => void) => void;
-/** 실행기가 main 에 내주는 것 중 이 시험이 부르는 것 — run.cjs 의 JSDoc 타입(electron 타입)을 끌어오지 않게 구조 타입으로 적는다. */
-type SmokeRun = {
-  record(entry: unknown): void;
-  open(href: string): void;
-  networkGuard: Guard;
-  registerIpc(ipc: { on(channel: string, listener: (event: unknown, payload: unknown) => void): void }): void;
-  beforeLoad(win: unknown): void;
-  setTray(tray: unknown, menu: unknown): void;
+const { AUTOSTART_NAME, loginItemQuery, loginItemSettings } = require('./autostart.cjs') as typeof import('./autostart.cjs');
+const { untilAsync } = require('../smoke/support.cjs') as {
+  untilAsync(predicate: () => boolean | Promise<boolean>, ms: number, what: string): Promise<boolean>;
 };
 /** securityWarningsArming 이 읽는 main 의 process 값. */
 type Proc = { platform: string; execPath: string; env: Record<string, string | undefined> };
-const { createSmokeRun, securityWarningsArming } = require('../smoke/run.cjs') as {
-  createSmokeRun(input: Record<string, unknown>): SmokeRun;
+const { securityWarningsArming } = require('../smoke/run.cjs') as {
   securityWarningsArming(proc: Proc): { armed: boolean; detail: string };
 };
 
-type Check = { name: string; ok: boolean; detail: string };
-type TrayBuild = ReturnType<typeof buildTrayBuildInfo>;
-type FileIndex = import('./appProtocol.cjs').FileIndex;
-/** preload 가 옮기는 위반 한 건(6필드). */
-type Violation = { blockedURI: string; effectiveDirective: string; originalPolicy: string; disposition: string; sourceFile: string; lineNumber: number };
-
-const NONCE = '논스 시험';
-const APP_VERSION = '0.1.0';
-const ELECTRON_VERSION = '44.9.3';
-const SMOKE_URL = 'app://twelvejanggi/tray.html?smoke';
-/** check 처리기가 받는 requestingOrigin — 끝 슬래시가 붙은 출처. */
-const APP_ORIGIN_SLASH = 'app://twelvejanggi/';
-const RENDERER_PID = 4242;
 /** 가드 탐침(가드가 살아 있는지 보는 양성 대조)과 그 상한 — 실행기가 메인 쪽에서 창의 세션으로 보내는 요청. */
 const PROBE_URL = 'https://example.invalid/tj-net-guard-probe';
 const PROBE_CAP_MS = 5_000;
-/** 실행기가 다시 보는 간격 — 가짜 시계를 이만큼씩 민다. */
-const POLL_MS = 50;
-/** Electron 이 가드의 취소로 탐침을 거부할 때의 글(실제 스모크가 본 그대로). */
-const BLOCKED = 'net::ERR_BLOCKED_BY_CLIENT';
-const NOT_RESOLVED = 'net::ERR_NAME_NOT_RESOLVED';
-const ENABLE = 'ELECTRON_ENABLE_SECURITY_WARNINGS';
-const WORKER_SCRIPT = 'assets/ai.worker.js';
-const AI_MS = 37;
-const MIME_HTML = 'text/html; charset=utf-8';
-const MIME_JS = 'text/javascript; charset=utf-8';
-const CANARY_URL = 'https://example.invalid/tj-csp-canary';
 /** 탐색 검사가 쓰는 허용 목록 주소 — 새 창(저장소)과 메인 프레임 탐색(허브). */
 const REPO_URL = 'https://github.com/khkim3115/TwelveJanggi';
 const HUB_URL = 'https://khkim3115.github.io/';
 /** 격리 world 버퍼를 읽는 코드(브리프의 값 그대로). */
 const ISOLATED_CODE = '({ probe: globalThis.__tjIsoProbe, buf: globalThis.__tjCspBuffer })';
-/** 빌드 — default: Supabase 값 없음 · invalid: CI 의 가짜 값 · real: 실제 값 모양. */
-const SUPABASE_URLS = { default: undefined, invalid: 'https://ci.invalid', real: 'https://abcd.supabase.co' } as const;
-const CONNECT_PROBES = ['https://ci.invalid/tj-connect-probe', 'wss://ci.invalid/tj-connect-probe'];
-const SETTINGS_URL = 'https://abcd.supabase.co/auth/v1/settings';
-/** supabase-js 가 여는 Realtime 소켓 — 쿼리(apikey · vsn)가 붙는다. */
-const SOCKET_URL = 'wss://abcd.supabase.co/realtime/v1/websocket?apikey=anon-key&vsn=1.0.0';
-/** 실행기가 결과에 싣는 검사(실행 순서) — 조건부 검사(.invalid 빌드의 connectAllowed · --net 의 net)는 permissions 뒤에 온다. */
-const BEFORE_CONDITIONAL = ['boot', 'webPreferences', 'sandboxEffective', 'bridge', 'ipc', 'mime', 'securityWarnings', 'tray', 'screenshot', 'cspMeta', 'cspHeader', 'protocol', 'ai', 'navigation', 'permissions'];
+/**
+ * 실행기가 결과에 싣는 검사(실행 순서) — 창 검사(theme · opacity · escHide · visibility)는 screenshot 바로 뒤, 조건부 검사(.invalid 빌드의
+ * connectAllowed · --net 의 net)는 permissions 뒤에 온다.
+ */
+const BEFORE_CONDITIONAL = [
+  'boot',
+  'webPreferences',
+  'sandboxEffective',
+  'bridge',
+  'ipc',
+  'mime',
+  'securityWarnings',
+  'tray',
+  'screenshot',
+  'theme',
+  'opacity',
+  'escHide',
+  'visibility',
+  'cspMeta',
+  'cspHeader',
+  'protocol',
+  'ai',
+  'navigation',
+  'permissions',
+];
 const AFTER_CONDITIONAL = ['cspViolations', 'consoleErrors', 'cspCanary', 'noNetwork', 'loginItem'];
-/** main 프로세스의 execPath — 이 플랫폼의 개발 바이너리(경고 검사가 켜진다)와 그 밖의 실행 파일(켜지지 않는다). */
-const DEV_BINARY =
-  process.platform === 'win32' ? 'D:\\홍 길동\\desktop\\node_modules\\electron\\dist\\electron.exe' : '/home/홍 길동/desktop/node_modules/electron/dist/electron';
-const OTHER_BINARY = process.platform === 'win32' ? 'C:\\Program Files\\nodejs\\node.exe' : '/usr/local/bin/node';
-
-/** 페이지 코드의 태그 주석(smoke/pageScripts.cjs) — 이름과 인자 JSON. 가짜 페이지는 이것으로 코드를 가른다(본문은 해석하지 않는다). */
-const TAG_RE = /^\/\* tj-smoke:([\w-]+)(?: (.*?))? \*\/ /s;
-/** getLastWebPreferences() — Electron 44.9.3 이 돌려주는 모양(기본값 키를 채운다). */
-const WEB_PREFERENCES = {
-  contextIsolation: true,
-  sandbox: true,
-  nodeIntegration: false,
-  allowRunningInsecureContent: false,
-  experimentalFeatures: false,
-  enableBlinkFeatures: '',
-  nodeIntegrationInWorker: false,
-  nodeIntegrationInSubFrames: false,
-  webSecurity: true,
-  webviewTag: false,
+/** 갈래 — 실행기에 넘기는 platform(흉내 낸 main 도 따른다). 호스트 값이 아니다. */
+const PLATFORMS = ['win32', 'darwin', 'linux'] as const;
+/**
+ * 건강한 흐름에서 tray 까지의 창 기록(흉내 낸 main 이 넘긴 차례) — 시작 표시 → 열기 경로(win32 는 트레이 토글 → 트레이 클릭, 그 밖은
+ * win.close() → 메뉴의 '열기') → win32 는 경합 단계(blur 숨김 → 같은 턴의 클릭 무시 → 경합 시간 뒤 클릭). theme · opacity 는 창 기록을
+ * 남기지 않는다.
+ */
+const TRAY_WINDOWS: Record<(typeof PLATFORMS)[number], Outcome['windows']> = {
+  win32: [
+    { action: 'show', reason: 'start' },
+    { action: 'hide', reason: 'toggle' },
+    { action: 'show', reason: 'tray' },
+    { action: 'hide', reason: 'blur' },
+    { action: 'show', reason: 'tray' },
+  ],
+  darwin: [
+    { action: 'show', reason: 'start' },
+    { action: 'hide', reason: 'close' },
+    { action: 'show', reason: 'menu' },
+  ],
+  linux: [
+    { action: 'show', reason: 'start' },
+    { action: 'hide', reason: 'close' },
+    { action: 'show', reason: 'menu' },
+  ],
 };
-/** capturePage() — 서로 다른 색 16개(검은 화면이 아니다). */
-const SCREEN = {
-  isEmpty: () => false,
-  toBitmap: () => Buffer.from(Array.from({ length: 16 * 4 }, (_, i) => (i % 4 === 3 ? 255 : Math.floor(i / 4) * 16))),
-  toPNG: () => Buffer.from('png'),
-  getSize: () => ({ width: 4, height: 4 }),
-};
+/**
+ * 건강한 흐름의 창 기록 — tray 의 것 뒤에 escHide(③ Esc 숨김 → ④ 다시 열기)와 visibility(① ✕ 숨김 → 다시 열기 → ② win.close() 숨김 →
+ * 다시 열기)가 남긴다. 다시 열기는 main 의 길이다(win32 는 트레이 클릭, 그 밖은 메뉴의 '열기'). 그 뒤 검사는 창 기록을 남기지 않는다.
+ */
+const HEALTHY_WINDOWS = Object.fromEntries(
+  PLATFORMS.map((platform) => {
+    const reopened = platform === 'win32' ? 'tray' : 'menu';
+    const windows: Outcome['windows'] = [
+      ...TRAY_WINDOWS[platform],
+      { action: 'hide', reason: 'request' },
+      { action: 'show', reason: reopened },
+      { action: 'hide', reason: 'request' },
+      { action: 'show', reason: reopened },
+      { action: 'hide', reason: 'close' },
+      { action: 'show', reason: reopened },
+    ];
+    return [platform, windows];
+  }),
+) as Record<(typeof PLATFORMS)[number], Outcome['windows']>;
+/** 건강한 페이지 처리기 — 사례가 감싸서 쓴다. */
+const HEALTHY_PAGE = healthyPage({ files: new Map(), unmapped: [] });
 
-/** 가짜 앱 — 페이지 처리기가 사실을 낼 때 쓰는 자리(콘솔 · 위반 · 원격 요청 · 탐색 · 결정 기록). */
-type FakeApp = {
-  build: TrayBuild;
-  /** main 이 webContents 에 거는 탐색 가드 — 실행기의 record · open 에 잇는다 */
-  guards: ReturnType<typeof createNavigationGuards>;
-  /** main 의 권한 처리기가 결정마다 부르는 기록기(= 실행기의 record) */
-  record(entry: unknown): void;
-  /** 허용 목록 주소를 여는 함수(= 실행기의 open — 열지 않고 기록한다) */
-  open(href: string): void;
-  log(level: 'info' | 'warning' | 'error', message: string): void;
-  /** preload 처럼 위반을 tj-smoke-csp 로 보내고 격리 world 버퍼에도 남긴다(buffer false 면 보내기만 한다 — 유실) */
-  violate(event: Violation, options?: { buffer?: boolean }): void;
-  /** 페이지의 원격 요청 — onBeforeRequest(붙어 있으면)를 지난다. 가드가 정한 처리를 돌려준다 */
-  request(url: string, method?: string): Promise<'cancelled' | 'passed'>;
-  /** 트레이 창의 webContents 사건을 낸다(did-start-navigation · did-stop-loading …) */
-  emit(event: string, ...args: unknown[]): void;
-  commit(url: string): void;
-  url(): string;
-};
-type PageHandler = (arg: unknown, app: FakeApp) => unknown;
-
-type Scenario = {
-  /**
-   * 기본 세션의 onBeforeRequest — run: 실행기의 가드 그대로(기록 · 취소) · pass: 실행기가 기록한 뒤 {} 로 통과시킨다 ·
-   * hang: 실행기가 기록한 뒤 콜백을 부르지 않는다 · foreign: 실행기의 가드 없이 취소만 한다(기록 없음) · none: 붙이지 않는다. 기본 run
-   */
-  guard?: 'run' | 'pass' | 'hang' | 'foreign' | 'none';
-  /** 가드를 지난 탐침의 끝 — unresolved: DNS 실패(.invalid) · respond: 200 응답. 기본 unresolved */
-  network?: 'unresolved' | 'respond';
-  /** 가드가 취소한 탐침의 거부 — 기본 new Error(BLOCKED) */
-  blocked?: () => unknown;
-  /** 첫 장벽 표식보다 먼저 오는 콘솔 줄(warning) */
-  warningsBeforeMarker?: readonly string[];
-  /** n 번째 장벽(1부터)이 표식을 콘솔에 찍는가 — 기본 늘 찍는다 */
-  barrierMarks?: (n: number) => boolean;
-  /** main 프로세스의 execPath · ELECTRON_ENABLE_SECURITY_WARNINGS(없으면 지운다). 기본은 런처처럼 env 로 켠다 */
-  arming?: { execPath: string; enable?: string };
-  /** tray-build.json 의 Supabase 값 — 기본 default */
-  build?: keyof typeof SUPABASE_URLS;
-  /** --net. 기본 false */
-  net?: boolean;
-  /** tray-build.json 의 workerScript. 기본 WORKER_SCRIPT */
-  workerScript?: string | null;
-  /** 페이지 처리기 바꾸기(태그 → 처리기) — 그 검사의 음성 갈래 */
-  page?: Partial<Record<string, PageHandler>>;
-  /** 격리 world 의 답 — 기본은 preload 처럼 world 999 에서만 { probe: 1, buf: 버퍼 } */
-  isolated?: (buffer: readonly Violation[]) => unknown;
-  /** main 의 net.fetch(app://…) 답 — 기본은 resolveAppRequest 의 상태 */
-  mainFetch?: (url: string) => Promise<{ status: number }>;
-  /** 렌더러 루트 바로 위의 package.json 을 깔지 않는다(탈출 검사의 전제가 깨진다) */
-  noParentFile?: boolean;
-};
-type Outcome = {
-  result: Record<string, unknown>;
-  checks: Check[];
-  fetches: string[];
-  quits: number;
-  exits: number[];
-  /** 가짜 페이지가 받은 코드의 태그(순서대로) */
-  pageCalls: string[];
-  isolatedCalls: Array<{ worldId: number; codes: string[] }>;
-};
-type Running = { fetches: string[]; ended(): boolean; finish(): Promise<Outcome> };
-type Rig = { run: SmokeRun; start(): Running };
-
-let base = '';
-let restoreProcess = (): void => {};
-/** 이번 사례의 실행기에 will-quit 을 낸다 — 감시 타이머가 남았으면 끈다. */
-let quitApp: (() => void) | null = null;
-
-beforeEach(() => {
-  base = mkdtempSync(join(tmpdir(), 'tj-실행기 '));
-  const execPath = process.execPath;
-  const enable = process.env[ENABLE];
-  restoreProcess = () => {
-    process.execPath = execPath;
-    if (enable === undefined) delete process.env[ENABLE];
-    else process.env[ENABLE] = enable;
+/**
+ * 실행기의 fail 이 stderr(fd 2)에 쓰는 '[tj] …' 줄을 모은다 — 시험 출력에 내보내지 않는다(그 밖의 쓰기는 그대로 보낸다).
+ * @returns work 의 값과 모은 줄
+ */
+async function withTjLines<T>(work: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
+  const nodeFs = require('node:fs') as { writeSync: (...args: unknown[]) => unknown };
+  const realWriteSync = nodeFs.writeSync;
+  const lines: string[] = [];
+  nodeFs.writeSync = (fd: unknown, data: unknown, ...rest: unknown[]): unknown => {
+    if (fd === 2 && typeof data === 'string' && data.startsWith('[tj] ')) {
+      lines.push(data);
+      return Buffer.byteLength(data);
+    }
+    return Reflect.apply(realWriteSync, nodeFs, [fd, data, ...rest]);
   };
-});
-
-afterEach(() => {
-  vi.useRealTimers();
-  quitApp?.();
-  quitApp = null;
-  restoreProcess();
-  rmSync(base, { recursive: true, force: true });
-});
-
-/** setImmediate 로 한 바퀴씩 돈다(가짜 시계가 건드리지 않는다). 실행기의 흐름은 마이크로태스크라 몇 바퀴면 된다. */
-async function turns(count: number): Promise<void> {
-  for (let i = 0; i < count; i += 1) await new Promise((resolve) => setImmediate(resolve));
-}
-
-/** predicate 가 참이 될 때까지 돈다 — 2초(실제 시각) 안에 오지 않으면 던진다. */
-async function waitFor(predicate: () => boolean, what: string): Promise<void> {
-  const deadline = Date.now() + 2_000;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(`${what}: 2초 안에 오지 않았다`);
-    await turns(1);
-  }
-}
-
-/** 가짜 시계 위에서 돈다 — 몇 바퀴 돌리고, cond 가 아직이면 시계를 POLL_MS 민다. 200초를 밀어도 안 되면 던진다. */
-async function drive(cond: () => boolean): Promise<void> {
-  for (let i = 0; i < 4_000; i += 1) {
-    await turns(3);
-    if (cond()) return;
-    vi.advanceTimersByTime(POLL_MS);
-  }
-  throw new Error('가짜 시계로 200초를 밀어도 끝나지 않았다');
-}
-
-/** Electron 44.9.3 의 탐색(실제 스모크에서 본 순서) — did-start-navigation → will-frame-navigate → (막으면) did-stop-loading.
- * will-frame-navigate 가 막으면 will-navigate 는 오지 않고(alsoWillNavigate 면 온다), did-fail-provisional-load 도 없다(그 사건은 오류
- * 페이지로 들어간 탐색에만 난다). 막지 않은 탐색은 들어간다(URL 이 바뀐다). silent 면 did-stop-loading 이 없다(탐색이 끝나지 않았다). */
-function electronNavigate(app: FakeApp, url: string, { alsoWillNavigate = false, silent = false } = {}): void {
-  let prevented = false;
-  const event = {
-    url,
-    preventDefault: () => {
-      prevented = true;
-    },
-  };
-  app.emit('did-start-navigation', { url, isMainFrame: true, isSameDocument: false });
-  app.guards.willFrameNavigate(event);
-  if (!prevented || alsoWillNavigate) app.guards.willNavigate(event);
-  setImmediate(() => {
-    if (!prevented) app.commit(url);
-    if (!silent) app.emit('did-stop-loading');
-  });
-}
-
-/** main 의 권한 처리기 — lib/permissions.cjs 로 정하고 결정마다 기록한다(check 는 requestingOrigin, request 는 requestingUrl).
- * later 면 기록을 다음 바퀴로 미룬다(페이지의 답이 기록보다 먼저 온다). */
-function decideLikeMain(app: FakeApp, { later = false } = {}): unknown {
-  const note = (entry: unknown): void => {
-    if (later) setImmediate(() => app.record(entry));
-    else app.record(entry);
-  };
-  const check = (permission: string): string => {
-    const allowed = isPermissionAllowed({ permission, requestingOrigin: APP_ORIGIN_SLASH, requestingUrl: SMOKE_URL });
-    note({ kind: 'permission-check', permission, url: APP_ORIGIN_SLASH, allowed });
-    return allowed ? 'granted' : 'denied';
-  };
-  const request = (permission: string): boolean => {
-    const allowed = isPermissionAllowed({ permission, requestingUrl: SMOKE_URL });
-    note({ kind: 'permission-request', permission, url: SMOKE_URL, allowed });
-    return allowed;
-  };
-  return {
-    checks: { notifications: check('notifications'), geolocation: check('geolocation'), clipboardWrite: check('clipboard-sanitized-write') },
-    notificationPermission: check('notifications'),
-    requested: request('notifications') ? 'granted' : 'denied',
-    geolocation: request('geolocation') ? 'position' : 'error 1',
-  };
-}
-
-/** 페이지의 connectProbe() — .invalid 빌드에서 https 를 fetch 하고 wss 소켓을 연다. 가드가 취소한 소켓은 Chromium 이 콘솔 error 를 남긴다. */
-async function probeLikePage(app: FakeApp, { socket = true } = {}): Promise<unknown> {
-  const origin = app.build.supabaseOrigin;
-  if (origin === null || !new URL(origin).hostname.endsWith('.invalid')) return { attempted: [] };
-  const [http = '', ws = ''] = CONNECT_PROBES;
-  const attempted = [http];
-  await app.request(http);
-  if (socket) {
-    attempted.push(ws);
-    await app.request(ws);
-    app.log('error', `WebSocket connection to '${ws}' failed: `);
-  }
-  return { attempted };
-}
-
-/** 페이지의 net() — 설정 GET(apikey 머리글이라 CORS 사전 요청 OPTIONS 가 먼저 간다)과 Realtime 소켓. result 는 덮어쓸 필드. */
-async function netLikePage(app: FakeApp, result: Record<string, unknown> = {}): Promise<unknown> {
-  const preflight = await app.request(SETTINGS_URL, 'OPTIONS');
-  const settings = preflight === 'passed' ? await app.request(SETTINGS_URL, 'GET') : 'cancelled';
-  const socket = await app.request(SOCKET_URL, 'GET');
-  return {
-    configured: true,
-    settingsStatus: settings === 'passed' ? 200 : null,
-    realtimeConnected: socket === 'passed',
-    joinStatus: socket === 'passed' ? 'SUBSCRIBED' : null,
-    error: null,
-    ...result,
-  };
-}
-
-/** Chromium 의 canary — CSP 가 막은 fetch 하나가 정책마다 위반 하나 · 콘솔 error 하나를 낸다. */
-function canaryLikeChromium(app: FakeApp, { policies = ['meta', 'header'] as ReadonlyArray<'meta' | 'header'>, errors = 2 } = {}): string {
-  for (const which of policies) {
-    app.violate({ blockedURI: CANARY_URL, effectiveDirective: 'connect-src', originalPolicy: app.build.csp[which], disposition: 'enforce', sourceFile: '', lineNumber: 0 });
-  }
-  for (let i = 0; i < errors; i += 1) {
-    app.log('error', `Refused to connect to '${CANARY_URL}' because it violates the following Content Security Policy directive: "connect-src 'self'".`);
-  }
-  return 'rejected TypeError: Failed to fetch';
-}
-
-/** 실제 앱이 낼 페이지 사실 — 태그마다. 장벽은 rig 가 따로 본다(표식을 콘솔에 찍는다). */
-function healthyPage(index: FileIndex): Record<string, PageHandler> {
-  return {
-    boot: () => ({ rootChildren: 1, title: '십이장기', version: APP_VERSION, bodyBackground: 'rgb(13, 17, 23)', bgToken: '#0d1117', colorScheme: 'dark' }),
-    'main-world': () => ({ isoProbe: 'undefined', cspBuffer: 'undefined', require: 'undefined', process: 'undefined' }),
-    'disable-warnings': () => false,
-    bridge: () => ({ keys: ['getAppInfo'], contract: ['getAppInfo'] }),
-    frames: () => true,
-    'csp-meta': (_arg, app) => ({ contents: [app.build.csp.meta], inHead: [true] }),
-    'csp-header': (arg, app) =>
-      (arg as string[]).map((url) => ({ url, status: 200, csp: app.build.csp.header, nosniff: 'nosniff', contentType: url.endsWith('.html') ? MIME_HTML : MIME_JS })),
-    protocol: (arg) =>
-      (arg as Array<{ url: string; method: string }>).map(({ url, method }) => ({ url, method, status: resolveAppRequest({ url, method }, index).status })),
-    ai: () => ({ aiWorker: 'worker', aiAnswered: true, legal: true, ms: AI_MS }),
-    'window-open': (arg, app) => app.guards.windowOpen({ url: String(arg) }).action === 'deny',
-    navigate: (arg, app) => {
-      electronNavigate(app, String(arg));
-      return true;
-    },
-    location: (_arg, app) => app.url(),
-    permissions: (_arg, app) => decideLikeMain(app),
-    'connect-probe': (_arg, app) => probeLikePage(app),
-    net: (_arg, app) => netLikePage(app),
-    canary: (_arg, app) => canaryLikeChromium(app),
-  };
-}
-
-/** 실행기를 만들어 main 의 순서로 꽂는다. start() 가 첫 did-finish-load 를 낸다 — finish 는 '종료' 클릭이나 exit 까지 기다려 결과를 읽는다. */
-function rigScenario(scenario: Scenario = {}): Rig {
-  const {
-    guard = 'run',
-    network = 'unresolved',
-    blocked = () => new Error(BLOCKED),
-    warningsBeforeMarker = [],
-    arming = { execPath: OTHER_BINARY, enable: '1' },
-    build = 'default',
-    net = false,
-    workerScript = WORKER_SCRIPT,
-  } = scenario;
-  process.execPath = arming.execPath;
-  if (arming.enable === undefined) delete process.env[ENABLE];
-  else process.env[ENABLE] = arming.enable;
-
-  // 앱 폴더 — ipc 검사가 desktop 패키지 · 고정한 electron 패키지의 version 을 읽는다. 렌더러 루트 — protocol 검사의 전제(바로 위의
-  // package.json · 디렉터리 assets · tray-build.json)를 깐다
-  const appRoot = join(base, 'desktop');
-  const rendererRoot = join(base, 'dist-tray');
-  const outDir = join(base, 'smoke out');
-  mkdirSync(join(appRoot, 'node_modules', 'electron'), { recursive: true });
-  mkdirSync(join(rendererRoot, 'assets'), { recursive: true });
-  writeFileSync(join(appRoot, 'package.json'), JSON.stringify({ version: APP_VERSION }));
-  writeFileSync(join(appRoot, 'node_modules', 'electron', 'package.json'), JSON.stringify({ version: ELECTRON_VERSION }));
-  if (scenario.noParentFile !== true) writeFileSync(join(base, 'package.json'), JSON.stringify({ name: '저장소' }));
-  const trayBuild = buildTrayBuildInfo(buildTrayCsp(SUPABASE_URLS[build]), workerScript, '2026-10-29T00:00:00.000Z', null);
-  writeFileSync(join(rendererRoot, 'tray-build.json'), JSON.stringify(trayBuild));
-  const index: FileIndex = {
-    files: new Map([
-      ['tray.html', join(rendererRoot, 'tray.html')],
-      [WORKER_SCRIPT, join(rendererRoot, WORKER_SCRIPT)],
-    ]),
-    unmapped: [],
-  };
-
-  const appEvents = new EventEmitter();
-  quitApp = () => appEvents.emit('will-quit');
-  const exits: number[] = [];
-  let quits = 0;
-  const app = {
-    on: (event: string, listener: () => void) => appEvents.on(event, listener),
-    exit: (code: number) => exits.push(code),
-    getVersion: () => APP_VERSION,
-    getLoginItemSettings: () => ({ openAtLogin: false }),
-    getAppMetrics: () => [{ pid: RENDERER_PID, sandboxed: true, integrityLevel: 'untrusted' }],
-    hasSingleInstanceLock: () => true,
-  };
-
-  let beforeRequest: Guard | null = null;
-  const fetches: string[] = [];
-  const defaultSession = {
-    webRequest: {
-      onBeforeRequest: (listener: Guard) => {
-        beforeRequest = listener;
-      },
-    },
-    /** Electron 의 session.fetch 처럼 onBeforeRequest 를 먼저 지난다. */
-    fetch: (url: string): Promise<{ status: number }> => {
-      fetches.push(url);
-      return new Promise((resolve, reject) => {
-        const toNetwork = (): void => {
-          if (network === 'respond') resolve({ status: 200 });
-          else reject(new Error(NOT_RESOLVED));
-        };
-        const listener = beforeRequest;
-        if (listener === null) toNetwork();
-        else listener({ url, method: 'GET' }, (response) => (response.cancel === true ? reject(blocked()) : toNetwork()));
-      });
-    },
-  };
-
-  const events = new EventEmitter();
-  const ipc = new Map<string, (event: unknown, payload: unknown) => void>();
-  const buffer: Violation[] = [];
-  const pageCalls: string[] = [];
-  const isolatedCalls: Outcome['isolatedCalls'] = [];
-  let currentUrl = SMOKE_URL;
-  let barriers = 0;
-  const handlers: Record<string, PageHandler | undefined> = { ...healthyPage(index), ...scenario.page };
-  const info = { version: APP_VERSION, electron: ELECTRON_VERSION, chrome: process.versions.chrome, platform: process.platform };
-  const contents = Object.assign(events, {
-    session: defaultSession,
-    getURL: () => currentUrl,
-    getOSProcessId: () => RENDERER_PID,
-    getLastWebPreferences: () => ({ ...WEB_PREFERENCES }),
-    capturePage: async () => SCREEN,
-    executeJavaScript: async (code: string): Promise<unknown> => {
-      const tag = TAG_RE.exec(code);
-      if (tag === null) throw new Error(`가짜 페이지가 모르는 코드다(태그 없음): ${code.slice(0, 60)}`);
-      const [, name = '', json] = tag;
-      pageCalls.push(name);
-      const arg: unknown = json === undefined ? undefined : JSON.parse(json);
-      if (name === 'barrier') {
-        // 장벽 — getAppInfo 왕복 뒤 표식을 콘솔에 찍는다. 첫 장벽에서는 그보다 먼저 온 줄을 앞에 둔다
-        barriers += 1;
-        if (barriers === 1) for (const message of warningsBeforeMarker) events.emit('console-message', { level: 'warning', message, sourceId: '', lineNumber: 0 });
-        if (scenario.barrierMarks?.(barriers) ?? true) events.emit('console-message', { level: 'info', message: String(arg), sourceId: '', lineNumber: 1 });
-        return info;
-      }
-      const handler = handlers[name];
-      if (handler === undefined) throw new Error(`가짜 페이지에 '${name}' 처리기가 없다`);
-      return handler(arg, fakeApp);
-    },
-    executeJavaScriptInIsolatedWorld: async (worldId: number, scripts: Array<{ code: string }>): Promise<unknown> => {
-      isolatedCalls.push({ worldId, codes: scripts.map((script) => script.code) });
-      if (scenario.isolated !== undefined) return scenario.isolated(buffer);
-      // preload 의 격리 world 전역은 world 999 에서만 보인다
-      return worldId === 999 ? { probe: 1, buf: buffer.map((violation) => ({ ...violation })) } : { probe: undefined, buf: undefined };
-    },
-  });
-  let visible = true;
-  let focused = true;
-  const win = {
-    webContents: contents,
-    isVisible: () => visible,
-    isFocused: () => focused,
-    hide: () => {
-      visible = false;
-      focused = false;
-    },
-    show: () => {
-      visible = true;
-    },
-  };
-  const tray = { isDestroyed: () => false, getBounds: () => ({ x: 0, y: 0, width: 16, height: 16 }) };
-  const menu = {
-    items: [
-      {
-        label: '열기',
-        click: () => {
-          visible = true;
-          focused = true;
-        },
-      },
-      {
-        label: '종료',
-        click: () => {
-          quits += 1;
-          appEvents.emit('before-quit');
-          appEvents.emit('will-quit');
-        },
-      },
-    ],
-  };
-  const mainFetch = scenario.mainFetch ?? (async (url: string) => ({ status: resolveAppRequest({ url, method: 'GET' }, index).status }));
-
-  const run = createSmokeRun({
-    args: { enabled: true, outDir, profile: join(base, 'profile'), net, nonce: NONCE, error: null },
-    app,
-    session: { defaultSession },
-    net: { fetch: mainFetch },
-    nativeImage: { createFromPath: () => ({ isEmpty: () => false, getSize: () => ({ width: 64, height: 64 }) }) },
-    trayBuild,
-    rendererRoot,
-    appRoot,
-    index,
-  });
-  const fakeApp: FakeApp = {
-    build: trayBuild,
-    guards: createNavigationGuards({ open: run.open, record: run.record }),
-    record: run.record,
-    open: run.open,
-    log: (level, message) => events.emit('console-message', { level, message, sourceId: '', lineNumber: 0 }),
-    violate: (event, { buffer: buffered = true } = {}) => {
-      if (buffered) buffer.push(event);
-      ipc.get('tj-smoke-csp')?.({}, { ...event });
-    },
-    request: (url, method = 'GET') =>
-      new Promise((resolve) => {
-        const listener = beforeRequest;
-        if (listener === null) resolve('passed');
-        else listener({ url, method }, (response) => resolve(response.cancel === true ? 'cancelled' : 'passed'));
-      }),
-    emit: (event, ...args) => {
-      events.emit(event, ...args);
-    },
-    commit: (url) => {
-      currentUrl = url;
-    },
-    url: () => currentUrl,
-  };
-  // 사례의 onBeforeRequest — main 의 순서대로 가드가 먼저다. null 이면 붙이지 않는다
-  const guards: Record<NonNullable<Scenario['guard']>, Guard | null> = {
-    run: run.networkGuard,
-    pass: (details, callback) => run.networkGuard(details, () => callback({})),
-    hang: (details) => run.networkGuard(details, () => {}),
-    foreign: (_details, callback) => callback({ cancel: true }),
-    none: null,
-  };
-  const attached = guards[guard];
-  if (attached !== null) defaultSession.webRequest.onBeforeRequest(attached);
-  run.registerIpc({ on: (channel, listener) => ipc.set(channel, listener) });
-  run.beforeLoad(win);
-  run.setTray(tray, menu);
-  ipc.get('tj-smoke-preload')?.({}, { sandboxed: true, contextIsolated: true });
-
-  const ended = (): boolean => quits > 0 || exits.length > 0;
-  return {
-    run,
-    start(): Running {
-      events.emit('did-finish-load');
-      return {
-        fetches,
-        ended,
-        async finish(): Promise<Outcome> {
-          await waitFor(ended, "결과 뒤 '종료' 클릭이나 exit");
-          const result = JSON.parse(readFileSync(join(outDir, RESULT_FILE), 'utf8')) as Record<string, unknown>;
-          return { result, checks: result.checks as Check[], fetches, quits, exits, pageCalls, isolatedCalls };
-        },
-      };
-    },
-  };
-}
-
-const startScenario = (scenario?: Scenario): Running => rigScenario(scenario).start();
-
-/** 가짜 시계로 끝까지 돈다 — 실행기의 기다림(사건 5초 · 페이지 호출 상한 · 감시 타이머)은 모두 이 시계를 따른다. */
-async function runScenario(scenario?: Scenario): Promise<Outcome> {
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
   try {
-    const running = startScenario(scenario);
-    await drive(running.ended);
-    return await running.finish();
+    return { value: await work(), lines };
   } finally {
-    vi.useRealTimers();
+    nodeFs.writeSync = realWriteSync;
   }
 }
 
-/** 상한까지 기다리는 사례 — 같은 가짜 시계 위의 실행이다(이름은 무엇을 보는 사례인지 드러낸다). */
-const runFast = runScenario;
-
-/** 결과의 그 검사(한 번만 있다). */
-function checkOf(outcome: Outcome, name: string): Check {
-  const found = outcome.checks.filter((check) => check.name === name);
-  expect(found.map((check) => check.name), `${name} 검사는 한 번`).toStrictEqual([name]);
-  return found[0] as Check;
+/** tray 가 창을 main 의 길로 보인 채 끝냈다(판정 R13) — 마지막 창 기록이 show 이고, 바로 뒤의 screenshot 이 창을 직접 보이지 않았다. */
+function expectEndsShown(outcome: Outcome): void {
+  expect(outcome.windows.at(-1)?.action, '마지막 창 기록').toBe('show');
+  expect(checkOf(outcome, 'screenshot').detail).not.toContain('보이지 않던 창을 보인 뒤');
 }
 
-/** ok 가 아닌 검사 [이름, detail]. */
-const failing = (outcome: Outcome): string[][] => outcome.checks.filter((entry) => !entry.ok).map((entry) => [entry.name, entry.detail]);
-
-/** 그 검사만 실패했다 — detail 에 fragments 가 모두 든다. 결과는 성공 경로(stage · error 없음, '종료' 한 번)다. */
-function expectOnlyFailure(outcome: Outcome, name: string, fragments: readonly string[]): Check {
-  expect(failing(outcome).map(([failed]) => failed)).toStrictEqual([name]);
-  const check = checkOf(outcome, name);
-  for (const fragment of fragments) expect(check.detail).toContain(fragment);
-  expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
-  return check;
-}
-
-/** 위반 한 건(preload 모양). */
-function violation(over: Partial<Violation> = {}): Violation {
-  return { blockedURI: CANARY_URL, effectiveDirective: 'connect-src', originalPolicy: '', disposition: 'enforce', sourceFile: '', lineNumber: 0, ...over };
-}
+installRigLifecycle();
 
 describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과', () => {
   /** 이 빌드 · --net 의 필수 검사(런처의 규칙) — 결과의 검사 이름 집합이 이것과 같아야 한다. */
   const requiredFor = (build: keyof typeof SUPABASE_URLS, net: boolean): string[] =>
     requiredChecks({ net, supabaseOrigin: buildTrayCsp(SUPABASE_URLS[build]).supabaseOrigin }).sort();
 
-  it("기본 빌드 — 20개가 실행 순서대로 모두 ok · stage · error 없음 · 메모 필드는 ai() 와 canary 전 위반 수 · 붙은 메뉴 '종료' 한 번", async () => {
+  it("기본 빌드 — 24개가 실행 순서대로 모두 ok · stage · error 없음 · 메모 필드는 ai() 와 canary 전 위반 수 · 최신 메뉴 '종료' 한 번", async () => {
     const outcome = await runScenario();
     expect(outcome.checks.map((entry) => entry.name)).toStrictEqual([...BEFORE_CONDITIONAL, ...AFTER_CONDITIONAL]);
     expect([...outcome.checks.map((entry) => entry.name)].sort()).toStrictEqual(requiredFor('default', false));
@@ -636,7 +219,7 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
     ]);
   });
 
-  it('.invalid 빌드 — connectAllowed 까지 21개 ok, noNetwork 는 탐침 + connectProbe 두 주소, consoleErrors 는 취소된 소켓의 오류를 뺀다', async () => {
+  it('.invalid 빌드 — connectAllowed 까지 25개 ok, noNetwork 는 탐침 + connectProbe 두 주소, consoleErrors 는 취소된 소켓의 오류를 뺀다', async () => {
     const outcome = await runScenario({ build: 'invalid' });
     expect(outcome.checks.map((entry) => entry.name)).toStrictEqual([...BEFORE_CONDITIONAL, 'connectAllowed', ...AFTER_CONDITIONAL]);
     expect([...outcome.checks.map((entry) => entry.name)].sort()).toStrictEqual(requiredFor('invalid', false));
@@ -646,13 +229,806 @@ describe('전체 흐름 — 필수 검사가 모두 있고 ok 인 성공 결과'
     expect(checkOf(outcome, 'consoleErrors').detail).toContain('connectProbe 의 취소된 요청 오류 1건은 뺐다');
   });
 
-  it('--net · 실제 값 빌드 — net 까지 21개 ok, noNetwork 는 탐침 + 인증 설정 · Realtime 소켓(가드가 통과시켰다)', async () => {
+  it('--net · 실제 값 빌드 — net 까지 25개 ok, noNetwork 는 탐침 + 인증 설정 · Realtime 소켓(가드가 통과시켰다)', async () => {
     const outcome = await runScenario({ build: 'real', net: true });
     expect(outcome.checks.map((entry) => entry.name)).toStrictEqual([...BEFORE_CONDITIONAL, 'net', ...AFTER_CONDITIONAL]);
     expect([...outcome.checks.map((entry) => entry.name)].sort()).toStrictEqual(requiredFor('real', true));
     expect(failing(outcome)).toStrictEqual([]);
     expect(checkOf(outcome, 'net').detail).toContain('join "SUBSCRIBED"');
     expect(checkOf(outcome, 'noNetwork').detail).toContain('기대한 요청 3종만 기록됐다');
+  });
+
+  it.each(PLATFORMS)(
+    "%s — 24개 ok · 최신 메뉴의 '종료' 한 번 · 창은 main 의 길로만 숨고 보였다 · getLoginItemSettings 는 모두 loginItemQuery(갈래) 로 · 원래 setLoginItemSettings 0회 · 테마 네 단계 · 투명도 표 · Esc 네 단계 · ✕ 와 스로틀 끈 닫기",
+    async (platform) => {
+      const outcome = await runScenario({ platform });
+      expect(outcome.checks.map((entry) => entry.name)).toStrictEqual([...BEFORE_CONDITIONAL, ...AFTER_CONDITIONAL]);
+      expect(failing(outcome)).toStrictEqual([]);
+      expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
+      expect(outcome.windows).toStrictEqual(HEALTHY_WINDOWS[platform]);
+      expect(outcome.loginItemQueries.length).toBeGreaterThanOrEqual(2); // 실행기의 시작 · 끝(win32 는 main 의 메뉴도)
+      for (const query of outcome.loginItemQueries) expect(query).toStrictEqual(loginItemQuery(platform));
+      expect(outcome.loginItemWrites).toStrictEqual([]);
+      const tray = checkOf(outcome, 'tray').detail;
+      expect(tray).toContain(platform === 'win32' ? '열기: 트레이 클릭(토글) → 숨김(toggle) → 0.0ms 뒤 트레이 클릭 → 보임 · 포커스' : "열기: win.close() → 숨김(close) → 0.0ms 뒤 메뉴의 '열기' → 보임 · 포커스");
+      expect(tray).toContain(platform === 'win32' ? '경합: 표시 350.0ms 뒤 blur → 숨김(blur) → 같은 턴의 트레이 클릭 무시 → 300.0ms 뒤 트레이 클릭 → 보임(tray)' : `경합 단계 건너뜀(${platform}`);
+      expect(tray).toContain('아이콘 16×16');
+      expect(checkOf(outcome, 'loginItem').detail).toContain(`로그인 항목 요청 기록 ${JSON.stringify(platform === 'win32' ? [{ kind: 'login-item', on: true, managed: false }] : [])}(${platform})`);
+      const theme = checkOf(outcome, 'theme').detail;
+      expect(theme).toContain(`① setTheme('light') → 스냅샷 · data-theme · tj_theme "light" · body 배경 = --bg = getBackgroundColor() = "rgb(245, 246, 248)"`);
+      expect(theme).toContain("③ ① 전의 낡은 메뉴의 '라이트 모드' 체크 false → true(Electron 이 click 전에 뒤집었다)");
+      expect(theme).toContain('④');
+      expect(checkOf(outcome, 'opacity').detail).toContain('64→64 · 5→30 · 64.4→64 · "70"→64 · NaN→64 · null→64 · 150→100 · 100→100');
+      const reopen = platform === 'win32' ? '트레이 클릭 → 보임(tray)' : "메뉴의 '열기' → 보임(menu)";
+      const escHide = checkOf(outcome, 'escHide').detail;
+      expect(escHide).toContain('① aria-modal 요소가 있는 채 Esc → 장벽 뒤 숨김 0 · tj-hide 수신 0');
+      expect(escHide).toContain('② 그 요소를 #root keydown 리스너가 동기로 지웠다(돌았다) → 창은 그대로 보임');
+      expect(escHide).toContain('③ 요소 없이 Esc → tj-hide 수신 1 · 숨김 1(request) · 파괴 안 됨 · 페이지 응답');
+      // win32 는 'request' 숨김 기록을 보자마자(같은 시각) 트레이 클릭 — 경합 창 안의 클릭이 열었다
+      expect(escHide).toContain(platform === 'win32' ? "④ 'request' 숨김 기록 0.0ms 뒤 트레이 클릭 → 보임(tray)" : `④ ${reopen}`);
+      const visibility = checkOf(outcome, 'visibility').detail;
+      // ① 의 시각은 숨김 기록에서 잰다 — ✕ 의 답과 tapp-hidden 을 본 때(가짜 페이지는 곧바로 답한다)
+      expect(visibility).toContain(
+        `① ✕ → tj-hide 수신 1 · 숨김 1(request) · tj-hidden 전달 1 · <html> tapp-hidden · getBackgroundThrottling() true · 파괴 안 됨 · 숨김 기록 뒤 ✕ 응답 0.0ms · tapp-hidden 확인 0.0ms → 300.0ms 뒤 ${reopen} · tj-shown 전달 1 · tapp-hidden 빠짐`,
+      );
+      expect(visibility).toContain(`② 스로틀 끔 → win.close() → 숨김(close) · visibilityState "visible" 인데 tapp-hidden → 300.0ms 뒤 ${reopen} · tapp-hidden 빠짐 → 스로틀 켬 · getBackgroundThrottling() true`);
+      // 창 검사는 페이지에 테마 네 단계 · 투명도 여덟 줄 · Esc 세 번 · ✕ 와 숨김 상태 다섯 번을 묻는다 — screenshot 의 frames 다음, cspMeta 앞이다
+      const calls = outcome.pageCalls;
+      expect(calls.slice(calls.indexOf('frames') + 1, calls.indexOf('csp-meta'))).toStrictEqual([
+        ...Array(4).fill('theme'),
+        ...Array(8).fill('opacity'),
+        ...Array(3).fill('esc'),
+        'hidden-state',
+        'hide-button',
+        ...Array(4).fill('hidden-state'),
+      ]);
+      // 숨긴 동안 capturePage 를 하지 않는다(캡처하면 페이지가 visible 로 바뀐다 — 설계 §5.5). screenshot 은 보이는 창을 캡처했다(양성 대조)
+      expect(outcome.captures.length, 'capturePage 호출 수').toBeGreaterThan(0);
+      expect(outcome.captures.filter((visible) => !visible), '숨긴 창의 capturePage').toStrictEqual([]);
+      expectEndsShown(outcome);
+    },
+  );
+});
+
+describe('boot — 제목 줄의 글자(.tapp-title)가 십이장기다(#36 T10-10)', () => {
+  it('제목 줄 안에 버전까지 그렸다 → 실패', async () => {
+    const boot = healthyPage({ files: new Map(), unmapped: [] }).boot;
+    const outcome = await runScenario({ page: { boot: (arg, app) => ({ ...(boot?.(arg, app) as object), title: `십이장기 ${APP_VERSION}` }) } });
+    expectOnlyFailure(outcome, 'boot', [`제목 줄(.tapp-title)이 "십이장기 ${APP_VERSION}" 다(기대 "십이장기")`]);
+  });
+
+  it('제목 줄이 없다(null) → 실패', async () => {
+    const boot = healthyPage({ files: new Map(), unmapped: [] }).boot;
+    const outcome = await runScenario({ page: { boot: (arg, app) => ({ ...(boot?.(arg, app) as object), title: null }) } });
+    expectOnlyFailure(outcome, 'boot', ['제목 줄(.tapp-title)이 null 다(기대 "십이장기")']);
+  });
+});
+
+describe('tray — 최신 메뉴(새 프로필) · main 이 붙인 아이콘 · 열기 경로 · 바깥 클릭과 경합(win32), 끝에는 main 의 길로 보인 채', () => {
+  /** 템플릿에서 그 라벨 항목을 고친다. */
+  const patchItem =
+    (label: string, patch: Record<string, unknown>) =>
+    (template: MenuTemplate): MenuTemplate =>
+      template.map((entry) => (entry.label === label ? { ...entry, ...patch } : entry));
+
+  it.each(PLATFORMS)("%s — 라벨이 실행기의 글자 목록과 다르다('의견 보내기' 가 빠졌다) → 실패", async (platform) => {
+    const outcome = await runScenario({ platform, main: { template: (template) => template.filter((entry) => entry.label !== '의견 보내기') } });
+    expectOnlyFailure(outcome, 'tray', ['메뉴 라벨이']);
+    expectEndsShown(outcome);
+  });
+
+  it("darwin 에 Windows 메뉴('열기' 없음) → 라벨 실패 · 숨긴 창을 열 수 없다 · 끝에도 열지 못했다 — 숨기고 다시 여는 escHide · visibility 도 실패", async () => {
+    const outcome = await runScenario({ platform: 'darwin', main: { template: (template) => template.filter((entry) => entry.label !== '열기') } });
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(['tray', 'escHide', 'visibility']);
+    const tray = checkOf(outcome, 'tray').detail;
+    for (const fragment of ['메뉴 라벨이', "최신 메뉴에 '열기' 가 없다 — 숨긴 창을 main 의 길로 열 수 없다", '끝에 창을 main 의 길로 보인 채 두지 못했다']) expect(tray).toContain(fragment);
+    expect(checkOf(outcome, 'screenshot').detail).toContain('보이지 않던 창을 보인 뒤'); // 뒤의 검사는 그래도 보이는 창에서 돈다
+    // escHide 는 screenshot 이 보인 창에서 ③ 까지 돌고 ④ 에서 다시 열 것이 없다 — 숨은 채 넘겨받은 visibility 는 시작하지 못한다
+    expect(checkOf(outcome, 'escHide').detail).toContain("④ 최신 메뉴에 '열기' 가 없다 — 숨긴 창을 main 의 길로 다시 열 수 없다");
+    expect(checkOf(outcome, 'visibility').detail).toContain('시작 때 창이 보이지 않는다');
+    expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
+  });
+
+  it.each([`십이장기 ${APP_VERSION}`, '자동 실행', '위치 초기화'])('%s 가 켜졌다 → 실패', async (label) => {
+    expectOnlyFailure(await runScenario({ main: { template: patchItem(label, { enabled: true }) } }), 'tray', [`꺼져 있어야 할 항목이 켜졌다: ${label}`]);
+  });
+
+  it.each(['자동 실행', '창 고정'])('새 프로필인데 %s 가 체크됐다 → 실패', async (label) => {
+    expectOnlyFailure(await runScenario({ main: { template: patchItem(label, { checked: true }) } }), 'tray', [`새 프로필인데 체크된 항목이 있다: ${label}`]);
+  });
+
+  it("새 프로필인데 '라이트 모드' 가 체크됐다(늘 체크로 그린다) → tray 실패 — 그 체크를 읽는 theme 도 낡은 메뉴의 전제 · ④ 의 체크 해제에서 잡는다", async () => {
+    const outcome = await runScenario({ main: { template: patchItem('라이트 모드', { checked: true }) } });
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(['tray', 'theme']);
+    expect(checkOf(outcome, 'tray').detail).toContain('새 프로필인데 체크된 항목이 있다: 라이트 모드');
+    const theme = checkOf(outcome, 'theme').detail;
+    expect(theme).toContain("③ ① 전의 메뉴의 '라이트 모드' 가 이미 체크돼 있다(dark 에서 만든 메뉴가 아니다) — 낡은 메뉴 단계를 증명하지 못함");
+    expect(theme).toContain("④ 새 메뉴의 '라이트 모드' 체크가 true 다(기대 false)");
+    expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
+  });
+
+  it('아이콘 파일이 없다(빈 이미지) → 실패', async () => {
+    expectOnlyFailure(await runScenario({ main: { icon: 'missing' } }), 'tray', ['트레이 아이콘이 빈 이미지다', '트레이 아이콘이 0×0 다(기대 16×16)']);
+  });
+
+  it('아이콘을 16×16 으로 줄이지 않았다(원본 64×64) → 실패', async () => {
+    const check = expectOnlyFailure(await runScenario({ main: { icon: 'unresized' } }), 'tray', ['트레이 아이콘이 64×64 다(기대 16×16)']);
+    expect(check.detail).not.toContain('빈 이미지');
+  });
+
+  it.each(PLATFORMS)('%s — 연 창이 포커스를 받지 않는다(main 이 focus 를 부르지 않는다) → 실패', async (platform) => {
+    const outcome = await runScenario({ platform, main: { noFocus: true } });
+    expectOnlyFailure(outcome, 'tray', ['창이 보임 · 포커스가 되지 않았다(보임 true · 포커스 false']);
+    expectEndsShown(outcome);
+  });
+
+  it('win32 — 트레이 토글이 숨김을 기록만 하고 창을 숨기지 않는다 → 실패(숨김 기록 뒤에도 창이 보인다), 열지 않고 멈춘다 — 이미 보이는 창을 열어 통과하지 않는다', async () => {
+    const outcome = await runScenario({ main: { toggleRecordsOnly: true } });
+    const check = expectOnlyFailure(outcome, 'tray', ['트레이 클릭(토글) 의 숨김 기록(toggle) 뒤에도 창이 보인다 — 열기 경로를 증명하지 못함']);
+    // 끝의 규칙(마지막 창 기록이 show)도 어긋난다 — main 은 숨겼다고 기록했고, 보이는 창은 다시 열지 않는다
+    expect(check.detail).toContain('끝에 창을 main 의 길로 보인 채 두지 못했다(보임 true · 마지막 창 기록 ["show:start","hide:toggle"])');
+    // 숨김 기록 뒤 트레이 클릭을 내지 않았다 — 다음 창 기록은 escHide ③ 의 Esc 숨김이다(뒤 검사는 보이는 창에서 돈다)
+    expect(outcome.windows.slice(0, 3).map(({ action, reason }) => `${action}:${reason}`)).toStrictEqual(['show:start', 'hide:toggle', 'hide:request']);
+    expectEndsShown(outcome);
+  });
+
+  it('win32 — 모든 숨김에 경합 가드를 켠다(곧바로 연 클릭을 삼킨다) → tray 실패 · Esc 숨김 직후의 클릭도 삼켜 escHide ④ 실패, 끝에는 경합 시간 뒤에 main 의 길로 다시 보였다', async () => {
+    const outcome = await runScenario({ main: { guardEveryHide: true } });
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(['tray', 'escHide']);
+    expect(checkOf(outcome, 'tray').detail).toContain('숨김(toggle) 기록 0.0ms 뒤의 트레이 클릭 뒤 창이 보임 · 포커스가 되지 않았다(보임 false');
+    expect(checkOf(outcome, 'escHide').detail).toContain('④ 트레이 클릭 뒤 5000ms 안에 창이 보이지 않았다');
+    expect(outcome.windows.slice(0, 3).map(({ action, reason }) => `${action}:${reason}`)).toStrictEqual(['show:start', 'hide:toggle', 'show:tray']);
+    expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
+    expectEndsShown(outcome);
+  });
+
+  /** [갈래, tray 가 숨기는 이유, 실패하는 검사] — 닫기를 다른 이유로 기록하면 win.close() 로 숨기는 visibility ② 도 실패한다. */
+  const RELABELED: Array<[(typeof PLATFORMS)[number], 'toggle' | 'close', string[]]> = [
+    ['win32', 'toggle', ['tray']],
+    ['darwin', 'close', ['tray', 'visibility']],
+    ['linux', 'close', ['tray', 'visibility']],
+  ];
+  it.each(RELABELED)('%s — 숨김을 다른 이유(request)로 기록한다 → 실패(이유 %s 의 숨김 기록을 받지 못했다)', async (platform, reason, failed) => {
+    const outcome = await runScenario({ platform, main: { relabelHide: { [reason]: 'request' } } });
+    const how = platform === 'win32' ? '트레이 클릭(토글)' : 'win.close()';
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(failed);
+    expect(checkOf(outcome, 'tray').detail).toContain(`${how} 뒤 이유 "${reason}" 의 숨김 기록을 받지 못했다(5000ms) — 마지막 창 기록 ["show:start","hide:request"]`);
+    if (failed.includes('visibility')) expect(checkOf(outcome, 'visibility').detail).toContain('② win.close() 뒤 숨김 기록이 ["hide:request"] 다(기대 하나 — 이유 "close")');
+    expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
+    expectEndsShown(outcome);
+  });
+
+  it('win32 — 우연한 blur(표시 320ms 뒤 OS 가 포커스를 가져갔다) → 실패(경합 단계를 증명하지 못함), 끝에는 main 의 길로 다시 보였다', async () => {
+    const outcome = await runScenario({ main: { strayBlurAfterTrayShow: 320 } });
+    expectOnlyFailure(outcome, 'tray', ['우연한 숨김(이유 "blur") — 경합 단계를 증명하지 못함']);
+    expect(outcome.windows.slice(0, 5).map(({ action, reason }) => `${action}:${reason}`)).toStrictEqual(['show:start', 'hide:toggle', 'show:tray', 'hide:blur', 'show:tray']);
+    expectEndsShown(outcome);
+  });
+
+  it('win32 — 유예 뒤의 blur 가 숨기지 않는다(blur 처리기가 없다) → 실패', async () => {
+    const outcome = await runScenario({ main: { ignoreBlur: true } });
+    expectOnlyFailure(outcome, 'tray', ['표시 350.0ms 뒤의 blur 가 창을 동기로 숨기지 않았다(기대 숨김 하나 — 이유 "blur") — 새 창 기록 [] · 보임 true']);
+    expectEndsShown(outcome);
+  });
+
+  it('win32 — 경합 가드가 없다(blur 숨김과 같은 턴의 클릭이 다시 연다) → 실패', async () => {
+    const outcome = await runScenario({ main: { noRaceGuard: true } });
+    expectOnlyFailure(outcome, 'tray', ['blur 숨김과 같은 턴의 트레이 클릭이 무시되지 않았다(경합 가드) — 새 창 기록 ["show:tray"] · 보임 true']);
+    expectEndsShown(outcome);
+  });
+
+  it('win32 — 경합 가드가 1초 더 길다(경합 시간 뒤의 클릭도 삼킨다) → 실패, 끝에는 main 의 길로 다시 보였다', async () => {
+    const outcome = await runScenario({ main: { longerRace: 1_000 } });
+    expectOnlyFailure(outcome, 'tray', ['blur 숨김 300.0ms 뒤의 트레이 클릭이 창을 열지 않았다(기대 보임 — 이유 "tray") — 새 창 기록 [] · 보임 false']);
+    expectEndsShown(outcome);
+  });
+});
+
+describe("theme — ① setTheme('light') ② 'purple' 은 아무것도 바꾸지 않는다 ③ 낡은 메뉴(Electron 이 체크를 먼저 뒤집는다) ④ 최신 메뉴로 dark", () => {
+  /** [사례, 시나리오(결함 하나), detail 에 들 글, detail 에 없어야 할 단계] — theme 만 실패한다(다른 검사 · 종료 경로는 그대로). */
+  const CASES: Array<[string, Scenario, string[], string[]]> = [
+    [
+      'main 이 메뉴를 다시 만들지 않는다',
+      { main: { themeNoRefresh: true } },
+      ['① 새로 전달된 메뉴가 0개다(기대 1개)', '③ 새로 전달된 메뉴가 0개다(기대 1개)', '④ 새로 전달된 메뉴가 0개다(기대 1개)'],
+      ['②'],
+    ],
+    [
+      "'라이트 모드' 처리기가 item.checked 대신 상태를 뒤집는다 — ③ 이 잡는다(④ 도 반대로 간다)",
+      { main: { lightFlipsState: true } },
+      [
+        '③ 스냅샷 theme 이 "dark" 다(기대 "light")',
+        "③ 새 메뉴의 '라이트 모드' 체크가 false 다(기대 true)",
+        '④ 스냅샷 theme 이 "light" 다(기대 "dark")',
+        '④ settings.json 의 theme 값을 5000ms 기다렸지만 "light" 다(기대 "dark")',
+      ],
+      ['①', '②'],
+    ],
+    [
+      "main 이 'purple' 을 받는다 — ② 가 잡는다(메모리 · 페이지가 바뀌고 메뉴를 다시 만들고 tj-theme 를 민다)",
+      { main: { themeAcceptsAny: true } },
+      ['② 스냅샷 theme 이 "light" 에서 "purple" 로 바뀌었다', '② data-theme 이 "light" 에서 "purple" 로 바뀌었다', '② 새로 전달된 메뉴가 1개다(기대 0개)', '② tj-theme 전달이 1번이다(기대 0번)'],
+      ['①', '③', '④'],
+    ],
+    [
+      'main 이 창 배경(setBackgroundColor)을 바꾸지 않는다',
+      { main: { themeNoBackground: true } },
+      ['① getBackgroundColor() 가 "rgb(13, 17, 23)" 다(기대 "rgb(245, 246, 248)")', '③ getBackgroundColor() 가 "rgb(13, 17, 23)" 다(기대 "rgb(245, 246, 248)")'],
+      ['②', '④'],
+    ],
+    [
+      '렌더러가 tj_theme 를 쓰지 않는다',
+      { renderer: { noStoreTheme: true } },
+      ['① localStorage.tj_theme 이 null 다(기대 "light")', '④ localStorage.tj_theme 이 null 다(기대 "dark")'],
+      ['②'],
+    ],
+    [
+      'main 이 저장하지 않는다 → 기다림의 시간 초과를 판정으로 적는다(stage 실패가 아니다)',
+      { main: { themeNoSave: true } },
+      ['① settings.json 의 theme 값을 5000ms 기다렸지만 "dark" 다(기대 "light")'],
+      ['②', '③', '④'],
+    ],
+    [
+      '페이지가 data-theme 을 바꾸지 않는다',
+      { renderer: { noDataTheme: true } },
+      ['① data-theme 이 "dark" 다(기대 "light")', '① body 배경이 "rgb(13, 17, 23)" 다(기대 "rgb(245, 246, 248)")', '① --bg 가 "rgb(13, 17, 23)" 다(기대 "rgb(245, 246, 248)")'],
+      ['②', '④'],
+    ],
+    [
+      "새 메뉴의 '라이트 모드' 가 낡은 값이다(상태를 바꾸기 전에 메뉴를 만든다)",
+      { main: { themeRefreshFirst: true } },
+      ["① 새 메뉴의 '라이트 모드' 체크가 false 다(기대 true)", "④ 새 메뉴의 '라이트 모드' 체크가 true 다(기대 false)"],
+      ['②', '③'],
+    ],
+    [
+      "'라이트 모드' 가 체크박스가 아니다(click 이 checked 를 뒤집지 않는다) — 낡은 메뉴 단계가 Electron 의 뒤집기를 직접 본다",
+      { main: { template: (template) => template.map((entry) => (entry.label === '라이트 모드' ? { ...entry, type: 'normal' } : entry)) } },
+      ["③ 낡은 메뉴의 '라이트 모드' 를 누른 뒤에도 그 항목의 checked 가 false 다(Electron 이 click 전에 뒤집지 않았다)", '③ 스냅샷 theme 이 "dark" 다(기대 "light")'],
+      ['①', '②', '④'],
+    ],
+  ];
+  it.each(CASES)('%s → 실패', async (_label, scenario, fragments, quietSteps) => {
+    const check = expectOnlyFailure(await runScenario(scenario), 'theme', fragments);
+    // 실패 detail 은 단계 표식으로 시작하는 문제들을 '; ' 로 이은 것이다
+    const problems = check.detail.split('; ');
+    for (const step of quietSteps) expect(problems.filter((problem) => problem.startsWith(step)), `${step} 단계는 통과한다`).toStrictEqual([]);
+  });
+});
+
+describe('opacity — 실행기 안의 글자 표(64→64 · 5→30 · 64.4→64 · "70"→64 · NaN→64 · null→64 · 150→100 · 100→100), 어긋난 줄에서 멈춘다', () => {
+  /** [사례, 시나리오(결함 하나), detail 에 들 글, detail 에 없어야 할 글] — opacity 만 실패한다. */
+  const CASES: Array<[string, Scenario, string[], string[]]> = [
+    ["main 이 '70' 을 받는다", { main: { opacityAcceptsString: true } }, ['"70"→64: 스냅샷 opacity 가 70 다(기대 64)', '"70"→64: 창 투명도 round(getOpacity() × 100) 이 70 다(기대 64)'], ['NaN→64']],
+    ['main 이 잘못된 값을 기본값으로 바꾼다 — 64 에서 보내므로 무시와 갈린다', { main: { opacityDefaultsInvalid: true } }, ['"70"→64: 스냅샷 opacity 가 100 다(기대 64)'], ['NaN→64']],
+    ['main 이 받은 값을 나중에 저장한다(실행기의 기다림보다 늦다)', { main: { opacitySavesLater: true } }, ['64→64: settings.json 의 opacity 값을 5000ms 기다렸지만 100 다(기대 64)'], ['스냅샷', '창 투명도', '5→30']],
+    ['main 이 창 투명도(setOpacity)를 바꾸지 않는다 — 스냅샷은 맞고 창은 틀리다', { main: { opacityNoWindow: true } }, ['64→64: 창 투명도 round(getOpacity() × 100) 이 100 다(기대 64)'], ['스냅샷']],
+  ];
+  it.each(CASES)('%s → 실패', async (_label, scenario, fragments, absent) => {
+    const check = expectOnlyFailure(await runScenario(scenario), 'opacity', fragments);
+    for (const text of absent) expect(check.detail).not.toContain(text);
+  });
+
+  it('NaN 줄에 페이지가 NaN 대신 null 을 보낸다(JSON 으로 넘긴 것과 같다) → 수신 기록으로만 실패 — main 은 둘 다 무시해 스냅샷 · 창은 맞다', async () => {
+    const opacity = healthyPage({ files: new Map(), unmapped: [] }).opacity;
+    const outcome = await runScenario({ page: { opacity: (arg, app) => opacity?.((arg as { nan?: boolean }).nan === true ? { value: null } : arg, app) } });
+    const check = expectOnlyFailure(outcome, 'opacity', ['NaN→64: 실행기의 tj-set-opacity 수신 기록이 [null] 다(기대 ["NaN"])']);
+    expect(check.detail).not.toContain('스냅샷');
+    expect(check.detail).not.toContain('창 투명도');
+  });
+});
+
+describe('창 검사의 끝(R13) — theme · opacity 에는 숨김 규칙이 없고, 끝에 창이 숨어 있으면 main 의 길로 다시 보인다(못 보이면 그 검사가 실패한다)', () => {
+  it.each(['theme', 'opacity'] as const)('%s 도중 OS 가 포커스를 가져갔다(우연한 blur → 숨김) → ok, 끝에 경합 시간 뒤 트레이 클릭으로 다시 보였다', async (name) => {
+    const healthy = healthyPage({ files: new Map(), unmapped: [] })[name];
+    let blurred = false;
+    const outcome = await runScenario({
+      page: {
+        [name]: (arg, app) => {
+          if (!blurred) {
+            blurred = true;
+            app.osBlur();
+          }
+          return healthy?.(arg, app);
+        },
+      },
+    });
+    expect(failing(outcome)).toStrictEqual([]);
+    // tray 의 기록 바로 뒤가 그 검사의 몫이다(escHide · visibility 의 기록은 그 뒤에 온다)
+    expect(outcome.windows.slice(TRAY_WINDOWS.win32.length, TRAY_WINDOWS.win32.length + 2)).toStrictEqual([
+      { action: 'hide', reason: 'blur' },
+      { action: 'show', reason: 'tray' },
+    ]);
+    expect(checkOf(outcome, name).detail).toContain('끝에 숨어 있던 창을 main 의 길로 다시 보였다');
+    expectEndsShown(outcome);
+  });
+
+  /** darwin 메뉴에서 '열기' 를 뺀다 — 숨은 창을 main 의 길로 열 것이 없다(tray 도 실패한다). */
+  const NO_OPEN_ITEM: Scenario = { platform: 'darwin', main: { template: (template) => template.filter((entry) => entry.label !== '열기') } };
+  /** win32 의 경합 가드가 3초 더 길다 — blur 숨김 뒤의 트레이 클릭을 삼켜, 다시 보이기를 기다리다 시간이 다 된다(tray 의 경합 단계도 실패한다). */
+  const LONG_GUARD: Scenario = { main: { longerRace: 3_000 } };
+  /**
+   * [끝에 다시 보이지 못하는 길, 검사, 시나리오, 이유 조각, 실패하는 검사] — 숨은 채 넘겨받은 escHide · visibility 는 시작 때 보이지 않아
+   * 실패한다(R14 — 그 끝이 다시 열면 다음 검사는 보이는 창에서 시작한다).
+   */
+  const NO_REOPEN: Array<[string, 'theme' | 'opacity', Scenario, string, string[]]> = [
+    // 창이 숨은 채라 opacity · escHide · visibility 의 끝도 못 연다
+    ["누를 것이 없다(darwin 메뉴에 '열기' 없음)", 'theme', NO_OPEN_ITEM, "최신 메뉴에 '열기' 가 없다", ['tray', 'theme', 'opacity', 'escHide', 'visibility']],
+    ["누를 것이 없다(darwin 메뉴에 '열기' 없음)", 'opacity', NO_OPEN_ITEM, "최신 메뉴에 '열기' 가 없다", ['tray', 'opacity', 'escHide', 'visibility']],
+    // opacity 의 끝은 가드가 풀린 뒤라 다시 연다 — escHide 는 보이는 창에서 시작한다
+    ['눌러도 보이지 않는다(win32 경합 가드가 3초 더 길다 — 기다림의 시간 초과)', 'theme', LONG_GUARD, '트레이 클릭 뒤 5000ms 안에 보이지 않았다', ['tray', 'theme']],
+    // escHide 는 숨은 창을 넘겨받아 실패하고, 그 끝이 가드가 풀린 뒤 다시 연다 — visibility 는 보이는 창에서 시작한다
+    ['눌러도 보이지 않는다(win32 경합 가드가 3초 더 길다 — 기다림의 시간 초과)', 'opacity', LONG_GUARD, '트레이 클릭 뒤 5000ms 안에 보이지 않았다', ['tray', 'opacity', 'escHide']],
+  ];
+  it.each(NO_REOPEN)('%s · %s 도중 우연한 blur → 끝에 창을 다시 보이지 못해 그 검사가 실패한다(R13 · R12 — 숨은 창을 다음 검사로 넘기지 않는다)', async (_path, name, scenario, why, failed) => {
+    const healthy = healthyPage({ files: new Map(), unmapped: [] })[name];
+    let calls = 0;
+    const outcome = await runScenario({
+      ...scenario,
+      page: {
+        [name]: (arg, app) => {
+          calls += 1;
+          // 그 검사의 둘째 페이지 호출에서 — 첫 단계(줄)의 settings.json 기다림 뒤라 마지막 표시의 유예가 지났다(시작 표시의 유예 안
+          // blur 는 숨기지 않는다)
+          if (calls === 2) app.osBlur();
+          return healthy?.(arg, app);
+        },
+      },
+    });
+    expect(failing(outcome).map(([failedName]) => failedName)).toStrictEqual(failed);
+    expect(checkOf(outcome, name).detail).toContain(`끝에 창을 main 의 길로 다시 보이지 못했다(${why}`);
+    for (const later of failed.filter((failedName) => failedName === 'escHide' || failedName === 'visibility')) {
+      expect(checkOf(outcome, later).detail).toContain('시작 때 창이 보이지 않는다');
+    }
+    expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
+  });
+});
+
+describe('escHide — ① 대화상자가 열린 채의 Esc 는 숨기지 않는다 ② 같은 Esc 로 닫히는 대화상자도(등록 순서 무관) ③ 대화상자 없는 Esc 는 숨긴다(request) ④ 곧바로 다시 연다(win32 는 경합 창 안의 트레이 클릭)', () => {
+  /** [사례, 시나리오(결함 하나), detail 에 들 글, 통과하는 단계] — escHide 만 실패한다(끝에 창을 다시 보여 visibility 는 보이는 창에서 돈다). */
+  const CASES: Array<[string, Scenario, string[], string[]]> = [
+    ['Esc 처리기가 없다 — ③ 이 숨지 않는다', { renderer: { noEsc: true } }, ['③ tj-hide 수신이 0번이다(기대 1번)', '③ 숨김 기록이 [] 다(기대 하나 — 이유 "request")'], ['①', '②', '④']],
+    [
+      '대화상자 순서 의존(캡처 리스너 없이 버블에서 그때의 대화상자를 본다) — ② 가 잡는다',
+      { renderer: { escNoCapture: true } },
+      ['② 대화상자(aria-modal)가 열려 있는데 Esc 로 숨었다 — tj-hide 수신 1번 · 새 창 기록 ["hide:request"]'],
+      ['①', '③', '④'],
+    ],
+    ['win32 — Esc 숨김에도 경합 가드를 켠다 — ④ 의 곧바로 한 트레이 클릭을 삼킨다', { main: { guardRequestHide: true } }, ['④ 트레이 클릭 뒤 5000ms 안에 창이 보이지 않았다'], ['①', '②', '③']],
+  ];
+  it.each(CASES)('%s → 실패, 끝에는 main 의 길로 다시 보였다', async (_label, scenario, fragments, quietSteps) => {
+    const outcome = await runScenario(scenario);
+    // 실패 detail 은 단계 표식으로 시작하는 문제들을 '; ' 로 이은 것이다
+    const problems = expectOnlyFailure(outcome, 'escHide', fragments).detail.split('; ');
+    for (const step of quietSteps) expect(problems.filter((problem) => problem.startsWith(step)), `${step} 단계는 통과한다`).toStrictEqual([]);
+    expectEndsShown(outcome);
+  });
+
+  it("main 이 tj-hide 를 이유 'blur' 로 기록한다 → escHide ③ 과 visibility ① 이 실패한다(Esc 와 ✕ 는 같은 tj-hide 다) · 'request' 숨김이 없어 ④ 는 하지 않는다", async () => {
+    const outcome = await runScenario({ main: { relabelHide: { request: 'blur' } } });
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(['escHide', 'visibility']);
+    const escHide = checkOf(outcome, 'escHide').detail;
+    expect(escHide).toContain('③ 숨김 기록이 ["hide:blur"] 다(기대 하나 — 이유 "request")');
+    expect(escHide).not.toContain('④');
+    expect(checkOf(outcome, 'visibility').detail).toContain('① 숨김 기록이 ["hide:blur"] 다(기대 하나 — 이유 "request")');
+    expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
+    expectEndsShown(outcome);
+  });
+
+  it('우연한 blur(① 도중 OS 가 포커스를 가져갔다) → 그 숨김의 이유를 상세에 적고 멈춘다, 끝에 경합 시간 뒤 트레이 클릭으로 다시 보였다', async () => {
+    const outcome = await runScenario({
+      page: {
+        esc: (arg, app) => {
+          if (arg === 'open') app.osBlur();
+          return HEALTHY_PAGE.esc?.(arg, app);
+        },
+      },
+    });
+    const problems = expectOnlyFailure(outcome, 'escHide', ['① 우연한 숨김(이유 "blur") — 이 검사가 일으키지 않은 숨김이다']).detail.split('; ');
+    expect(problems.filter((problem) => /^[②③④]/.test(problem)), '멈춘 뒤의 단계는 돌지 않는다').toStrictEqual([]);
+    expect(outcome.pageCalls.filter((name) => name === 'esc')).toStrictEqual(['esc']);
+    expect(outcome.windows.slice(TRAY_WINDOWS.win32.length, TRAY_WINDOWS.win32.length + 2)).toStrictEqual([
+      { action: 'hide', reason: 'blur' },
+      { action: 'show', reason: 'tray' },
+    ]);
+    expectEndsShown(outcome);
+  });
+
+  it("win32 — 실행기가 'request' 숨김 기록을 경합 시간이 지나서야 봤다(main 이 300ms 바빴다) → ④ 의 시각 단언이 실패한다(창은 열렸다 — 경합 가드를 증명하지 못했을 뿐이다)", async () => {
+    const outcome = await runScenario({
+      page: {
+        esc: (arg, app) => {
+          const seen = HEALTHY_PAGE.esc?.(arg, app);
+          // Esc 숨김이 기록된 뒤 실행기가 그 기록을 보기 전에 300ms 가 지난다
+          if (arg === 'none') vi.advanceTimersByTime(300);
+          return seen;
+        },
+      },
+    });
+    const check = expectOnlyFailure(outcome, 'escHide', ["④ 트레이 클릭이 'request' 숨김 기록 300.0ms 뒤였다(경합 시간 250ms 안이어야 한다)"]);
+    expect(check.detail).not.toContain('보이지 않았다');
+    expectEndsShown(outcome);
+  });
+
+  it("숨은 창의 페이지가 ③ 에 늦게 답한다(400ms) → ④ 는 그 답을 기다리지 않고 'request' 숨김 기록을 보자마자 연다(경합 창 안) → ok", async () => {
+    const outcome = await runScenario({
+      page: {
+        esc: (arg, app) => {
+          const seen = HEALTHY_PAGE.esc?.(arg, app);
+          return arg === 'none' ? new Promise((resolve) => setTimeout(() => resolve(seen), 400)) : seen;
+        },
+      },
+    });
+    expect(failing(outcome)).toStrictEqual([]);
+    expect(checkOf(outcome, 'escHide').detail).toContain("④ 'request' 숨김 기록 0.0ms 뒤 트레이 클릭 → 보임(tray)");
+  });
+
+  it('③ 의 페이지 호출이 거부됐다(창은 살아 있다) → 페이지 응답이 없어 실패 · ④ 는 숨김 기록을 보고 다시 열었다', async () => {
+    const outcome = await runScenario({
+      page: {
+        esc: (arg, app) => {
+          const seen = HEALTHY_PAGE.esc?.(arg, app);
+          if (arg === 'none') throw new Error('렌더러 오류');
+          return seen;
+        },
+      },
+    });
+    const check = expectOnlyFailure(outcome, 'escHide', ['③ 페이지가 응답하지 않았다(렌더러 오류)']);
+    expect(check.detail).not.toContain('④');
+    expect(outcome.windows.slice(TRAY_WINDOWS.win32.length, TRAY_WINDOWS.win32.length + 2)).toStrictEqual([
+      { action: 'hide', reason: 'request' },
+      { action: 'show', reason: 'tray' },
+    ]);
+    expectEndsShown(outcome);
+  });
+
+  /** [단계, 그 단계의 대화상자 갈래, 페이지가 바꿔 답하는 사실, detail 에 들 글] — 전제가 서지 않은 단계는 아무것도 증명하지 못해 실패한다. */
+  const PREMISES: Array<[string, 'open' | 'closes' | 'none', Record<string, unknown>, string]> = [
+    ['①', 'open', { dialog: false }, '① Esc 를 보낼 때 aria-modal 요소가 없었다(false) — 대화상자 단계를 증명하지 못함'],
+    [
+      '②',
+      'closes',
+      { ran: false, removed: false },
+      '② #root keydown 리스너가 aria-modal 요소를 지우지 않았다(보낼 때 요소 true · 리스너 false · 지움 false) — 등록 순서와 상관없음을 증명하지 못함',
+    ],
+    ['③', 'none', { dialog: true }, '③ Esc 를 보낼 때 aria-modal 요소가 있었다(true) — 대화상자 없는 단계가 아니다'],
+  ];
+  it.each(PREMISES)('%s 의 전제가 페이지에서 서지 않았다 → 그 단계를 증명하지 못해 실패', async (_step, mode, over, fragment) => {
+    const outcome = await runScenario({
+      page: {
+        esc: (arg, app) => {
+          const seen = HEALTHY_PAGE.esc?.(arg, app) as Record<string, unknown>;
+          return arg === mode ? { ...seen, ...over } : seen;
+        },
+      },
+    });
+    expectOnlyFailure(outcome, 'escHide', [fragment]);
+    expectEndsShown(outcome);
+  });
+});
+
+describe('visibility — ① 진짜 ✕ → 숨김(request) · tj-hidden · tapp-hidden · 스로틀 켬 → 다시 보임 · tj-shown · 빠짐 ② 스로틀 끈 win.close() → visible 인데 tapp-hidden → 다시 보임 · 빠짐 → 스로틀 켬', () => {
+  /** [사례, 시나리오(결함 하나), detail 에 들 글, 통과하는 단계, detail 에 없어야 할 글] — visibility 만 실패한다. */
+  const CASES: Array<[string, Scenario, string[], string[], string[]]> = [
+    [
+      '렌더러가 visibilitychange 로 움직인다 — ② 가 잡는다(스로틀을 끈 숨긴 창은 visible 이다)',
+      { renderer: { visibilityDriven: true } },
+      ['② visibilityState "visible" 인 채 <html> 에 tapp-hidden 이 5000ms 안에 붙지 않았다', ' · 렌더러는 visibilitychange 가 아니라 tj-hidden 으로 단다)'],
+      ['①'],
+      [],
+    ],
+    ['✕ 단추에 처리기가 없다 — ① 이 숨지 않는다(② 는 돈다)', { renderer: { noHideButton: true } }, ['① tj-hide 수신이 0번이다(기대 1번)', '① 숨김 기록이 없다'], ['②'], []],
+    [
+      'main 이 숨어도 tj-hidden 을 밀지 않는다 — 전달 기록이 없고 클래스가 따라오지 않는다(페이지는 답했다 — 읽지 못한 것과 가른다)',
+      { main: { noHiddenPush: true } },
+      [
+        '① 새 tj-hidden 전달이 0번이다(기대 1번)',
+        '① <html> 에 tapp-hidden 이 10000ms 안에 붙지 않았다 — 페이지는 ',
+        '번 답했다(마지막에 본 것 {"hiddenClass":false,"visibilityState":"hidden"} · 숨김 기록 뒤 ✕ 응답 0.0ms · 마지막 답 ',
+        '② visibilityState "visible" 인 채 <html> 에 tapp-hidden 이 5000ms 안에 붙지 않았다 — 페이지는 ',
+      ],
+      [],
+      ['읽지 못했다', '한 번도 답하지 않았다'],
+    ],
+    [
+      'main 이 보여도 tj-shown 을 밀지 않는다 — 다시 보인 뒤 클래스가 빠지지 않는다(앞의 숨김에서 붙은 것도 남았다)',
+      { main: { noShownPush: true } },
+      [
+        '시작 때 <html> 의 tapp-hidden 이 true 다',
+        '① 다시 보인 뒤 tj-shown 전달이 0번이다(기대 1번)',
+        '① 다시 보인 뒤 <html> 의 tapp-hidden 이 5000ms 안에 빠지지 않았다',
+        '② 다시 보인 뒤 <html> 의 tapp-hidden 이 5000ms 안에 빠지지 않았다',
+      ],
+      [],
+      [],
+    ],
+    [
+      '렌더러가 tj-shown 을 받아도 tapp-hidden 을 빼지 않는다 — 전달은 됐다',
+      { renderer: { keepHiddenClass: true } },
+      ['시작 때 <html> 의 tapp-hidden 이 true 다', '① 다시 보인 뒤 <html> 의 tapp-hidden 이 5000ms 안에 빠지지 않았다', '② 다시 보인 뒤 <html> 의 tapp-hidden 이 5000ms 안에 빠지지 않았다'],
+      [],
+      ['tj-shown 전달이'],
+    ],
+    [
+      '스로틀이 돌아오지 않는다(한 번 끄면 setBackgroundThrottling(true) 가 듣지 않는다)',
+      { throttle: 'sticky' },
+      ['② setBackgroundThrottling(true) 뒤 getBackgroundThrottling() 이 false 다 — 스로틀이 돌아오지 않았다'],
+      ['①'],
+      [],
+    ],
+    [
+      '스로틀이 처음부터 꺼져 있다(main 이 setThrottling(false) 를 불렀다 — #21 에는 부르는 곳이 없다) — ① 이 잡는다',
+      { throttle: 'off' },
+      ['① 숨긴 동안 getBackgroundThrottling() 이 false 다(기대 true — 기본 켬)'],
+      ['②'],
+      [],
+    ],
+    [
+      '스로틀을 꺼도 듣지 않는다(숨긴 창이 hidden 이 된다) — ② 의 양성 기록이 서지 않는다',
+      { throttle: 'ignored' },
+      ['② 스로틀을 끈 숨긴 창의 visibilityState 가 "hidden" 다(기대 "visible"'],
+      ['①'],
+      ['tapp-hidden 이 5000ms 안에'],
+    ],
+    ['win.close() 가 숨기지 않는다(main 이 close 를 막고 숨기지 않는다)', { main: { closeIgnored: true } }, ['② win.close() 뒤 5000ms 안에 숨김 기록이 없다(보임 true)'], ['①'], []],
+  ];
+  it.each(CASES)('%s → 실패, 끝에는 보이는 창', async (_label, scenario, fragments, quietSteps, absent) => {
+    const outcome = await runScenario(scenario);
+    const check = expectOnlyFailure(outcome, 'visibility', fragments);
+    const problems = check.detail.split('; ');
+    for (const step of quietSteps) expect(problems.filter((problem) => problem.startsWith(step)), `${step} 단계는 통과한다`).toStrictEqual([]);
+    for (const text of absent) expect(check.detail).not.toContain(text);
+    // 이 검사가 끈 스로틀은 — 다시 켜기 전에 멈춰도(win.close() 가 숨기지 않는다) — 끝에 다시 켰다('sticky' 는 켜지지 않아 실패로 적었다)
+    expect(outcome.throttling).toBe(scenario.throttle !== 'sticky');
+    expectEndsShown(outcome);
+  });
+
+  /**
+   * 숨긴(스로틀 켠) 창의 렌더러가 늦다 — ✕ 의 페이지 호출은 hideMs 뒤에(0 이면 곧바로) 답하고, ① 의 tapp-hidden 읽기(visibility 의 둘째
+   * 읽기)는 readMs 뒤에 답한다(null 이면 끝내 답하지 않는다). 숨김 · 전달 · 클래스는 제때 일어난다 — 늦는 것은 페이지의 답뿐이다(실측 한
+   * 번의 약 3초가 이 모양이다).
+   */
+  const slowHiddenPage = (hideMs: number, readMs: number | null): Scenario => {
+    let reads = 0;
+    const later = (ms: number, answer: () => unknown): Promise<unknown> => new Promise((resolve) => setTimeout(() => resolve(answer()), ms));
+    return {
+      page: {
+        'hide-button': (arg, app) => {
+          const seen = HEALTHY_PAGE['hide-button']?.(arg, app);
+          return hideMs === 0 ? seen : later(hideMs, () => seen);
+        },
+        'hidden-state': (arg, app) => {
+          reads += 1;
+          if (reads !== 2) return HEALTHY_PAGE['hidden-state']?.(arg, app);
+          return readMs === null ? new Promise(() => {}) : later(readMs, () => HEALTHY_PAGE['hidden-state']?.(arg, app));
+        },
+      },
+    };
+  };
+
+  it('숨긴 창의 렌더러가 늦다 — ✕ 는 숨김 기록 2초 뒤, ① 의 tapp-hidden 읽기는 그 뒤 6초에 답한다(WAIT_MS 를 넘는다) → PAGE_MS 까지 읽어 ok, 상세에 숨김 기록에서 잰 시각', async () => {
+    const outcome = await runScenario(slowHiddenPage(2_000, 6_000));
+    expect(failing(outcome)).toStrictEqual([]);
+    expect(checkOf(outcome, 'visibility').detail).toContain('파괴 안 됨 · 숨김 기록 뒤 ✕ 응답 2000.0ms · tapp-hidden 확인 8000.0ms → 8000.0ms 뒤 트레이 클릭 → 보임(tray)');
+  });
+
+  it('① 의 tapp-hidden 읽기에 페이지가 끝내 답하지 않는다 → ① 실패 — 읽지 못했다(한 번도 답하지 않았다)로, 렌더러가 붙이지 않은 실패와 가른다 · 숨김 기록에서 잰 ✕ 응답', async () => {
+    const outcome = await runScenario(slowHiddenPage(0, null));
+    const check = expectOnlyFailure(outcome, 'visibility', ['① <html> 의 tapp-hidden 을 10000ms 동안 읽지 못했다 — 페이지가 한 번도 답하지 않았다(숨김 기록 뒤 ✕ 응답 0.0ms)']);
+    expect(check.detail).not.toContain('붙지 않았다');
+    expect(check.detail.split('; ').filter((problem) => problem.startsWith('②')), '② 는 통과한다').toStrictEqual([]);
+    expectEndsShown(outcome);
+  });
+
+  it('② 의 tapp-hidden 읽기(넷째 읽기)에 페이지가 끝내 답하지 않는다 → ② 실패 — 읽지 못했다는 글에 렌더러 설명(페이지가 답했을 때의 글)이 섞이지 않는다', async () => {
+    let reads = 0;
+    const outcome = await runScenario({
+      page: {
+        'hidden-state': (arg, app) => {
+          reads += 1;
+          return reads === 4 ? new Promise(() => {}) : HEALTHY_PAGE['hidden-state']?.(arg, app);
+        },
+      },
+    });
+    const check = expectOnlyFailure(outcome, 'visibility', []);
+    const problems = check.detail.split('; ');
+    expect(problems).toContain('② visibilityState undefined 인 채 <html> 의 tapp-hidden 을 5000ms 동안 읽지 못했다 — 페이지가 한 번도 답하지 않았다');
+    expect(check.detail).not.toContain('visibilitychange 가 아니라');
+    expect(check.detail).not.toContain('붙지 않았다');
+    expect(problems.filter((problem) => problem.startsWith('①')), '① 은 통과한다').toStrictEqual([]);
+    expectEndsShown(outcome);
+  });
+
+  it('win32 — ✕ 숨김의 경합 가드가 경합 시간 + 여유보다 오래 간다 → ① 의 다시 열기가 보이지 않아 ② 전에 멈춘다, 끝에 다시 보였다', async () => {
+    const outcome = await runScenario({ main: { guardRequestHide: true, longerRace: 1_000 } });
+    // 더 긴 가드는 blur 숨김(tray 의 경합 단계) · Esc 숨김(escHide ④)도 삼킨다
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(['tray', 'escHide', 'visibility']);
+    const problems = checkOf(outcome, 'visibility').detail.split('; ');
+    expect(problems.some((problem) => problem.startsWith('① 트레이 클릭 뒤 5000ms 안에 창이 보이지 않았다')), problems.join('\n')).toBe(true);
+    expect(problems.filter((problem) => problem.startsWith('②')), '② 는 돌지 않는다').toStrictEqual([]);
+    expect([outcome.quits, outcome.exits]).toStrictEqual([1, []]);
+    expectEndsShown(outcome);
+  });
+
+  /**
+   * 'hidden-state'(<html> 의 tapp-hidden · visibilityState 읽기)의 n 번째 호출에서 건강한 답을 만든 뒤 렌더러가 tj-hide 를 하나 더 보낸다 — 이
+   * 검사가 일으키지 않은 숨김(이유 'request')이다(R14). visibility 의 읽기 차례는 1 시작 · 2 ① 붙음 · 3 ① 빠짐 · 4 ② 붙음 · 5 ② 빠짐이다.
+   */
+  const strayOn = (n: number): Scenario => {
+    let calls = 0;
+    return {
+      page: {
+        'hidden-state': (arg, app) => {
+          calls += 1;
+          const seen = HEALTHY_PAGE['hidden-state']?.(arg, app);
+          if (calls === n) app.send('tj-hide');
+          return seen;
+        },
+      },
+    };
+  };
+  /** [읽기 차례, detail 에 들 글, 문제가 없어야 할 단계(돌지 않았거나 통과했다)] */
+  const STRAYS: Array<[number, string, string[]]> = [
+    [1, '시작 때 우연한 숨김(이유 "request") — 이 검사가 일으키지 않은 숨김이다', ['①', '②']],
+    [3, '① 다시 보인 뒤 우연한 숨김(이유 "request") — 이 검사가 일으키지 않은 숨김이다', ['②']],
+    [5, '② 다시 보인 뒤 우연한 숨김(이유 "request") — 이 검사가 일으키지 않은 숨김이다', []],
+  ];
+  it.each(STRAYS)("'hidden-state' 의 %i 번째 읽기 뒤 이 검사가 일으키지 않은 숨김(request) → 그 이유를 상세에 적고 멈춘다(R14), 끝에 다시 보였다", async (n, fragment, quietSteps) => {
+    const outcome = await runScenario(strayOn(n));
+    const problems = expectOnlyFailure(outcome, 'visibility', [fragment]).detail.split('; ');
+    for (const step of quietSteps) expect(problems.filter((problem) => problem.startsWith(step)), `${step} 단계에는 문제가 없다`).toStrictEqual([]);
+    expectEndsShown(outcome);
+  });
+});
+
+describe('창 파괴(R29) — 창 검사는 파괴된 창을 만지지 않고 그 검사의 판정으로 적는다(뒤의 능동 검사는 파괴된 창에서 stage 실패로 끝낸다)', () => {
+  /** 그 태그의 n 번째 페이지 호출(1부터)에서 건강한 처리기를 돈 뒤 창을 파괴한다 — throws 면 그 호출은 거부된다(파괴된 창의 페이지 호출). */
+  const destroyOn = (tag: string, n: number, { throws = false } = {}): Scenario => {
+    let calls = 0;
+    return {
+      page: {
+        [tag]: (arg, app) => {
+          calls += 1;
+          const seen = HEALTHY_PAGE[tag]?.(arg, app);
+          if (calls !== n) return seen;
+          app.destroyWindow();
+          if (throws) throw new Error('Render frame was disposed before WebFrameMain could be accessed');
+          return seen;
+        },
+      },
+    };
+  };
+  /** [사례, 시나리오(만든다), 판정으로 실패하는 창 검사, 그 검사의 상세에 들 글] */
+  const CASES: Array<[string, () => Scenario, string[], Record<string, string>]> = [
+    [
+      'theme ① 도중',
+      () => destroyOn('theme', 1),
+      ['theme', 'opacity', 'escHide', 'visibility'],
+      {
+        theme: '① getBackgroundColor() 가 "(창 파괴)" 다',
+        opacity: '64→64 전에 트레이 창이 파괴됐다 — 검사를 멈춘다',
+        escHide: '시작 전에 트레이 창이 파괴됐다 — 검사를 멈춘다',
+        visibility: '시작 전에 트레이 창이 파괴됐다 — 검사를 멈춘다',
+      },
+    ],
+    ['opacity 첫 줄 도중', () => destroyOn('opacity', 1), ['opacity', 'escHide', 'visibility'], { opacity: '64→64: 트레이 창이 파괴됐다 — getOpacity() 를 읽지 못함' }],
+    ['escHide ③ 도중(그 페이지 호출은 거부된다)', () => destroyOn('esc', 3, { throws: true }), ['escHide', 'visibility'], { escHide: '③ 도중에 트레이 창이 파괴됐다 — 검사를 멈춘다' }],
+    ['visibility ② 의 win.close() 가 창을 파괴한다(main 이 close 를 막지 않는다)', () => ({ main: { closeDestroys: true } }), ['visibility'], { visibility: '② win.close() 뒤 트레이 창이 파괴됐다 — 검사를 멈춘다' }],
+  ];
+  it.each(CASES)('%s → 판정으로 실패 · 끝에도 만지지 않는다 · 다음 능동 검사(cspMeta)가 stage 실패로 끝낸다', async (_label, scenario, failed, fragments) => {
+    const { value: outcome, lines } = await withTjLines(() => runFast(scenario()));
+    expect(outcome.result.stage).toBe('check:cspMeta');
+    expect(String(outcome.result.error)).toBe('Object has been destroyed');
+    expect(outcome.exits).toStrictEqual([1]);
+    expect(lines).toHaveLength(1);
+    // 실패 결과에도 그때까지의 검사가 실린다 — 창 검사는 던지지 않고 판정을 남겼다
+    expect(outcome.checks.map((entry) => entry.name)).toStrictEqual(BEFORE_CONDITIONAL.slice(0, BEFORE_CONDITIONAL.indexOf('cspMeta')));
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(failed);
+    for (const [name, fragment] of Object.entries(fragments)) expect(checkOf(outcome, name).detail).toContain(fragment);
+    for (const name of failed) expect(checkOf(outcome, name).detail).toContain('끝에 창을 main 의 길로 다시 보이지 못했다(트레이 창이 파괴됐다)');
+  });
+});
+
+describe('loginItem(D1) — 대체 함수가 서 있고 쓰기 0회 · 양성 대조(첫 실행 표시 · win32 의 요청 기록 하나) · 환경 전제(시작 · 끝 없음 · 같음)', () => {
+  /** '--hidden' 으로 등록된 이 실행의 로그인 항목(Windows 흉내 — 경로는 rig 의 execPath). */
+  const registered = (approved: boolean) => ({ name: AUTOSTART_NAME, path: OTHER_BINARY, args: ['--hidden'], approved });
+
+  it('대체 함수가 빠졌다(실행기를 만든 뒤 누가 원래 메서드로 되돌렸다) → 실패', async () => {
+    expectOnlyFailure(await runScenario({ unplugBlocker: true }), 'loginItem', ['app.setLoginItemSettings 가 D1 의 대체 함수가 아니다']);
+  });
+
+  it('win32 — 가드가 샌다(스모크인데 관리한다고 본다) → 대체 함수가 쓰기 1회를 받아 실패 · 이 PC 의 로그인 항목은 그대로(원래 메서드 0회)', async () => {
+    const outcome = await runScenario({ main: { leakLoginItem: true } });
+    expectOnlyFailure(outcome, 'loginItem', [`대체 함수가 로그인 항목 쓰기 1회를 받았다(기대 0 — main 의 가드가 샜다): ${JSON.stringify([loginItemSettings('win32', true)])}`]);
+    expect(outcome.loginItemWrites).toStrictEqual([]);
+  });
+
+  it('첫 실행 표시(autostartDefaultApplied)가 settings.json 에 없다 → 실패', async () => {
+    expectOnlyFailure(await runScenario({ main: { noFirstRunFlag: true } }), 'loginItem', ['autostartDefaultApplied 가 false 다(기대 true — 첫 실행 갈래가 돌지 않았다)']);
+  });
+
+  it.each([
+    ['none', '[]'],
+    ['twice', JSON.stringify([0, 1].map(() => ({ kind: 'login-item', on: true, managed: false })))],
+  ] as const)('win32 — 로그인 항목 요청 기록이 %s → 실패(정확히 하나여야 한다)', async (loginRecord, seen) => {
+    expectOnlyFailure(await runScenario({ main: { loginRecord } }), 'loginItem', [`양성 대조 — 로그인 항목 요청 기록이 ${seen} 다`]);
+  });
+
+  it("win32 — '--hidden' 으로 등록 · 승인된 항목이 이미 있다 → 시작 · 끝 openAtLogin true 로 실패(메뉴의 '자동 실행' 도 체크로 보인다)", async () => {
+    const outcome = await runScenario({ loginItems: [registered(true)] });
+    expect(failing(outcome).map(([name]) => name)).toStrictEqual(['tray', 'loginItem']);
+    const check = checkOf(outcome, 'loginItem');
+    expect(check.detail).toContain('환경 전제 — 시작의 openAtLogin 이 true 다');
+    expect(check.detail).toContain('환경 전제 — 시작의 executableWillLaunchAtLogin 이 true 다');
+    expect(checkOf(outcome, 'tray').detail).toContain('새 프로필인데 체크된 항목이 있다: 자동 실행');
+  });
+
+  it("win32 — '--hidden' 으로 등록 · 작업 관리자에서 끔(approved false) → 시작 openAtLogin true 로 실패(인자 없이 읽으면 놓친다)", async () => {
+    const outcome = await runScenario({ loginItems: [registered(false)] });
+    const check = expectOnlyFailure(outcome, 'loginItem', ['환경 전제 — 시작의 openAtLogin 이 true 다', '환경 전제 — 끝의 openAtLogin 이 true 다']);
+    expect(check.detail).not.toContain('executableWillLaunchAtLogin');
+    // 대조 — 같은 항목을 인자 없이 물으면 openAtLogin 도 거짓이다(그렇게 읽는 실행기는 통과시켰다)
+    expect(createFakeLoginItems([registered(false)]).read(undefined, AUTOSTART_NAME, OTHER_BINARY)).toStrictEqual({ openAtLogin: false, executableWillLaunchAtLogin: false });
+  });
+
+  it('darwin — 실행 도중 다른 실행이 같은 경로를 승인된 항목으로 남겼다(openAtLogin 은 그대로 false) → 시작 ≠ 끝으로만 실패', async () => {
+    const ai = healthyPage({ files: new Map(), unmapped: [] }).ai;
+    const outcome = await runScenario({
+      platform: 'darwin',
+      page: {
+        ai: (arg, app) => {
+          app.loginItems.push({ name: '다른 실행', path: OTHER_BINARY, args: [], approved: true });
+          return ai?.(arg, app);
+        },
+      },
+    });
+    const check = expectOnlyFailure(outcome, 'loginItem', ['환경 전제 — 시작과 끝이 다르다']);
+    expect(check.detail).not.toContain('openAtLogin 이');
+  });
+});
+
+describe('untilAsync — 비동기 predicate 를 ms 까지 기다린다(until 과 같은 모양 — 시간이 다 되면 false 이고 던지지 않는다)', () => {
+  /** 가짜 시계에서 work 를 돌려 ms 만큼 민 뒤의 끝(약속이 끝나지 않았으면 'pending'). */
+  async function settleOnFakeClock<T>(work: () => Promise<T>, ms: number): Promise<{ value: T } | { error: unknown } | 'pending'> {
+    vi.useFakeTimers(RIG_FAKE_TIMERS);
+    try {
+      let outcome: { value: T } | { error: unknown } | 'pending' = 'pending';
+      work().then(
+        (value) => (outcome = { value }),
+        (error: unknown) => (outcome = { error }),
+      );
+      await vi.advanceTimersByTimeAsync(ms);
+      expect(vi.getTimerCount(), '남은 타이머').toBe(0);
+      return outcome;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it('거짓인 동안 다시 보고, 참이 되면 true', async () => {
+    let calls = 0;
+    const outcome = await settleOnFakeClock(() => untilAsync(async () => (calls += 1) >= 3, 1_000, '셋째'), 1_000);
+    expect(outcome).toStrictEqual({ value: true });
+    expect(calls).toBe(3);
+  });
+
+  it('시간이 다 되면 false — 던지지 않는다', async () => {
+    expect(await settleOnFakeClock(() => untilAsync(async () => false, 500, '오지 않는 것'), 600)).toStrictEqual({ value: false });
+  });
+
+  it('한 번의 predicate 가 끝나지 않아도 ms 에서 false(기다림이 ms 를 넘지 않는다)', async () => {
+    expect(await settleOnFakeClock(() => untilAsync(() => new Promise<boolean>(() => {}), 500, '멈춘 페이지'), 500)).toStrictEqual({ value: false });
+  });
+
+  it("predicate 가 거부하거나 던지면 '<what>: <이유>' 로 거부한다(원인은 cause)", async () => {
+    const gone = new Error('페이지가 사라졌다');
+    const throwing = (): boolean => {
+      throw gone;
+    };
+    for (const predicate of [async () => Promise.reject(gone), throwing]) {
+      const outcome = await settleOnFakeClock(() => untilAsync(predicate, 500, 'tapp-hidden 클래스'), 100);
+      expect(outcome).toStrictEqual({ error: new Error('tapp-hidden 클래스: 페이지가 사라졌다') });
+      expect((outcome as { error: Error }).error.cause).toBe(gone);
+    }
   });
 });
 
@@ -692,7 +1068,7 @@ describe('noNetwork — 가드 탐침은 가드의 기록 + ERR_BLOCKED_BY_CLIEN
   });
 
   it('가드가 기록하고 콜백을 부르지 않는다 → 상한(5초)까지 기다린 뒤 실패, detail 은 끝나지 않았다고 말한다', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.useFakeTimers(RIG_FAKE_TIMERS);
     try {
       const running = startScenario({ guard: 'hang' });
       await drive(() => running.fetches.length > 0);
@@ -961,7 +1337,7 @@ describe('protocol — 루트 위 실제 파일을 겨냥한 인코딩 탈출 �
 
   it('루트 바로 위의 package.json 이 없다 → 404 가 아무것도 증명하지 못하므로 실패(탈출 전제)', async () => {
     const outcome = await runScenario({ noParentFile: true });
-    expectOnlyFailure(outcome, 'protocol', ['탈출 검사가 겨냥할 파일이 없다', join(base, 'package.json')]);
+    expectOnlyFailure(outcome, 'protocol', ['탈출 검사가 겨냥할 파일이 없다', join(rigBase(), 'package.json')]);
   });
 });
 
@@ -1346,22 +1722,7 @@ describe('net — --net: 인증 설정 200 · Realtime 소켓 연결(join 응답
 
   it('net() 이 끝나지 않는다 → 실행기의 상한(30초)에서 check:net 으로 끝난다(감시 타이머 60초 전) · [tj] 한 줄', async () => {
     // 실행기의 fail 은 stderr(fd 2)에 '[tj] …' 를 쓴다 — 모아서 본다(시험 출력에 내보내지 않는다)
-    const nodeFs = require('node:fs') as { writeSync: (...args: unknown[]) => unknown };
-    const realWriteSync = nodeFs.writeSync;
-    const lines: string[] = [];
-    nodeFs.writeSync = (fd: unknown, data: unknown, ...rest: unknown[]): unknown => {
-      if (fd === 2 && typeof data === 'string' && data.startsWith('[tj] ')) {
-        lines.push(data);
-        return Buffer.byteLength(data);
-      }
-      return Reflect.apply(realWriteSync, nodeFs, [fd, data, ...rest]);
-    };
-    let outcome: Outcome;
-    try {
-      outcome = await runFast({ build: 'real', net: true, page: { net: () => new Promise(() => {}) } });
-    } finally {
-      nodeFs.writeSync = realWriteSync;
-    }
+    const { value: outcome, lines } = await withTjLines(() => runFast({ build: 'real', net: true, page: { net: () => new Promise(() => {}) } }));
     expect(outcome.result.stage).toBe('check:net');
     expect(String(outcome.result.error)).toBe('페이지 net(): 30000ms 안에 끝나지 않았다');
     expect(outcome.exits).toStrictEqual([1]);

@@ -2,7 +2,7 @@
 // 스모크가 페이지에서 돌리는 코드(설계 §5.10) — 실행기(run.cjs)와 능동 검사(active.cjs)가 executeJavaScript(main world)로 보내고, preload 의
 // 격리 world 는 executeJavaScriptInIsolatedWorld 로 읽는다. 코드는 글이라 타입 검사 밖이다 — 작게 두고, 밖에서 넣는 값은 JSON 으로만 넣는다.
 // main world 코드는 모두 태그 주석(/* tj-smoke:<이름> <인자 JSON> */)으로 시작한다. 페이지는 주석을 무시하고, 단위 시험의 가짜 페이지
-// (desktop/lib/smokeRun.test.ts)는 이 주석으로 코드를 가르고 인자를 읽는다 — 코드 본문을 해석하지 않는다.
+// (desktop/lib/smokeRig.ts)는 이 주석으로 코드를 가르고 인자를 읽는다 — 코드 본문을 해석하지 않는다.
 // 페이지 쪽 실패(fetch 거부 · 권한 API 의 예외)는 던지지 않고 값으로 돌려준다 — 판정은 실행기가 한다.
 // electron 을 require 하지 않는다.
 
@@ -79,6 +79,115 @@ const FRAMES_SCRIPT = tagged(
   setTimeout(() => resolve(false), 1000);
   requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
 })`,
+);
+
+/**
+ * 테마 한 단계의 페이지 쪽(창 검사 theme) — theme 이 있으면 브리지로 setTheme(theme) 을 보내고(값은 고치지 않는다 — 'purple' 도. 거르는
+ * 것은 main 이다), null 이면(메뉴를 누른 뒤) 보내지 않는다. 그다음 getState() 를 왕복한다 — 순서 장벽이다(앞의 send 와 main 이 민 tj-theme 가
+ * 응답보다 먼저 처리된다). 장벽 뒤의 스냅샷 · <html data-theme> · --bg 토큰 · body 배경(계산값) · 저장값(localStorage.tj_theme)을 돌려준다.
+ * @param {string | null} theme
+ * @returns {string}
+ */
+function themeScript(theme) {
+  const request = theme === null ? '' : `window.tjDesktop.setTheme(${JSON.stringify(theme)});\n  `;
+  return tagged(
+    'theme',
+    `(async () => {
+  ${request}const snapshot = await window.tjDesktop.getState();
+  const root = document.documentElement;
+  let stored;
+  try {
+    stored = localStorage.getItem('tj_theme');
+  } catch (err) {
+    stored = 'error: ' + String(err);
+  }
+  return {
+    snapshot,
+    dataTheme: root.dataset.theme ?? null,
+    bgToken: getComputedStyle(root).getPropertyValue('--bg').trim(),
+    bodyBackground: getComputedStyle(document.body).backgroundColor,
+    stored,
+  };
+})()`,
+    theme,
+  );
+}
+
+/**
+ * 투명도 한 줄의 페이지 쪽(창 검사 opacity) — 브리지로 setOpacity(value) 를 보낸 뒤(값은 고치지 않는다 — '70' · null 도) getState() 를 왕복하고
+ * (순서 장벽) 그 스냅샷을 돌려준다. NaN 은 JSON 이 null 로 바꾸므로 코드 안에서 만든다 — 태그의 인자는 표식 { nan: true } 이고(가짜 페이지가
+ * 읽는다), 그 밖은 { value } 다. value 는 JSON 으로 쓸 수 있는 값이거나 NaN 이다(실행기의 투명도 표).
+ * @param {unknown} value
+ * @returns {string}
+ */
+function opacityScript(value) {
+  const nan = typeof value === 'number' && Number.isNaN(value);
+  return tagged(
+    'opacity',
+    `(async () => {
+  window.tjDesktop.setOpacity(${nan ? 'Number.NaN' : JSON.stringify(value)});
+  return window.tjDesktop.getState();
+})()`,
+    nan ? { nan: true } : { value },
+  );
+}
+
+/**
+ * Esc 한 단계의 페이지 쪽(창 검사 escHide) — 페이지가 만든 Escape keydown 을 #root 안 요소에서 보낸다(bubbles — 렌더러가 window 에 건 캡처 ·
+ * 버블 리스너에 닿는다. 실제 키 경로는 손으로 본다, 설계 §5.5). dialog 갈래: 'open' 은 aria-modal="true" 요소를 넣은 채, 'closes' 는 그 요소와
+ * 그것을 동기로 지우는 #root keydown 리스너와 함께(React 커밋 대신 — 버블 길에서 window 보다 먼저 돈다), 'none' 은 요소 없이 보낸다. 보낸 뒤
+ * 넣은 요소 · 리스너를 치우고 getState() 를 왕복한다(순서 장벽 — 렌더러가 보낸 tj-hide 가 그 응답보다 먼저 처리된다). 보낼 때 aria-modal 요소가
+ * 있었는지(dialog) · #root 리스너가 돌았는지(ran) · 그 요소가 지워졌는지(removed) · 스냅샷을 돌려준다.
+ * @param {'open' | 'closes' | 'none'} dialog
+ * @returns {string}
+ */
+function escScript(dialog) {
+  return tagged(
+    'esc',
+    `(async () => {
+  const mode = ${JSON.stringify(dialog)};
+  const root = document.getElementById('root');
+  const target = root?.firstElementChild ?? root ?? document.body;
+  const modal = mode === 'none' ? null : document.createElement('div');
+  if (modal !== null) {
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('data-tj-smoke', 'dialog');
+    document.body.append(modal);
+  }
+  let ran = false;
+  const close = () => {
+    ran = true;
+    modal?.remove();
+  };
+  if (mode === 'closes') root?.addEventListener('keydown', close);
+  const dialogAtStart = document.querySelector('[aria-modal="true"]') !== null;
+  target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
+  root?.removeEventListener('keydown', close);
+  const removed = modal !== null && !modal.isConnected;
+  modal?.remove();
+  return { dialog: dialogAtStart, ran, removed, snapshot: await window.tjDesktop.getState() };
+})()`,
+    dialog,
+  );
+}
+
+/**
+ * ✕(숨기기) 클릭의 페이지 쪽(창 검사 visibility ①) — 진짜 단추(button[aria-label="숨기기"])를 누르고(렌더러의 onClick → tjDesktop.hide())
+ * getState() 를 왕복한다(순서 장벽). 단추가 있었는지(found)와 스냅샷.
+ */
+const HIDE_BUTTON_SCRIPT = tagged(
+  'hide-button',
+  `(async () => {
+  const button = document.querySelector('button[aria-label="숨기기"]');
+  if (button === null) return { found: false, snapshot: null };
+  button.click();
+  return { found: true, snapshot: await window.tjDesktop.getState() };
+})()`,
+);
+/** <html> 의 숨김 클래스(tapp-hidden — 렌더러가 tj-hidden · tj-shown 으로 단다)와 document.visibilityState(창 검사 visibility). */
+const HIDDEN_STATE_SCRIPT = tagged(
+  'hidden-state',
+  `({ hiddenClass: document.documentElement.classList.contains('tapp-hidden'), visibilityState: document.visibilityState })`,
 );
 
 /** preload 의 격리 world — Electron 이 contextIsolation 에 쓰는 world 번호. */
@@ -228,6 +337,11 @@ module.exports = {
   DISABLE_WARNINGS_SCRIPT,
   BRIDGE_SCRIPT,
   FRAMES_SCRIPT,
+  themeScript,
+  opacityScript,
+  escScript,
+  HIDE_BUTTON_SCRIPT,
+  HIDDEN_STATE_SCRIPT,
   CSP_META_SCRIPT,
   headersScript,
   protocolScript,

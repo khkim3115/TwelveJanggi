@@ -26,7 +26,7 @@ npm run build:tray           # vite build --config vite.tray.config.ts → dist-
 npm run typecheck:desktop    # desktop/ 의 JS(main · preload · lib · smoke · scripts)를 checkJs 로 — 먼저 npm --prefix desktop ci
 npm --prefix desktop ci      # Electron 설치 — 42+ 는 바이너리를 받지 않는다(처음 start 때 받는다). `--prefix` 와 인자 없는 `install` 의 조합은 쓰지 않는다
 npm --prefix desktop start   # 트레이 앱 실행(= electron .) — 먼저 npm run build:tray
-npm --prefix desktop run smoke           # 실제 앱 스모크(한 판 약 2초, 이 PC 기준) — 결과는 desktop/smoke-out/
+npm --prefix desktop run smoke           # 실제 앱 스모크(한 판 약 5.5초, 런처 포함 · 이 PC 기준) — 결과는 desktop/smoke-out/
 npm --prefix desktop run smoke -- --net  # + 실제 Supabase 연결 — 공유 프로젝트라 사용자 확인 뒤에만. `--` 없이는 npm 이 플래그를 가져가 런처가 거부한다
 ```
 
@@ -52,6 +52,9 @@ npm --prefix desktop run smoke -- --net  # + 실제 Supabase 연결 — 공유 �
 - **`src/core`·`src/engine` 에는 React/DOM import 가 없다** — `node` 환경 vitest 로 테스트한다(`src/**/*.test.ts`).
 - **트레이 앱 출처는 동결 계약이다** — `app://twelvejanggi`(진입 `tray.html`, 스모크는 `tray.html?smoke`). localStorage · 익명 세션이 이 출처에 묶여
   바꾸면 저장된 설정과 세션이 끊긴다(`desktop/lib/appProtocol.cjs` 의 `APP_ORIGIN`).
+- **트레이 앱 AUMID 도 동결 계약이다** — `com.khkim.twelvejanggi`(`desktop/lib/autostart.cjs` 의 `AUTOSTART_NAME` — main.js 는 이 상수로만 쓴다).
+  Windows 로그인 항목(HKCU `Run`)의 값 이름이기도 해서 바꾸면 옛 이름의 항목이 남는다 — 끄기는 새 이름에만 쓰고 체크는 이름이 아니라 실행 파일 경로를
+  보므로 설치본의 자동 실행을 메뉴로 끌 수 없다(#22 의 설치 제거도 이 이름에 기댄다).
 - **표기**: 비슷한 3×4 변형 게임의 상표명을 코드·문서·화면 어디에도 쓰지 않는다(`src/naming.test.ts` 가 막는다).
 
 ## Layering
@@ -72,8 +75,10 @@ src/store/     Zustand — appStore(화면) · gameStore(혼자 하기) · multi
 src/ui/        React 컴포넌트 (표현 전담, 상태는 스토어에서)
 src/lib/       supabase.ts(클라이언트 — 동적 import 전용) · env.ts(설정 여부만) · chat · feedback
                · loadSupabase.ts(supabase.ts 를 동적 import 하는 약속 하나 — 스토어 · 트레이 스모크 공용)
+               · theme.ts(테마 저장 · 적용 — 웹 · 트레이 공용, 최상위 부작용 없음)
 src/data/      changelog(패치노트 단일 진실원본) · links
 src/tray/      트레이 앱 화면(tray.html 진입) — 웹 전용 모듈 import 금지 · desktop.ts(window.tjDesktop 접근자) · smoke.ts(?smoke 때만)
+               · trayState.ts(브리지 구독 · 화면 상태) · esc.ts(Esc 두 리스너)
 desktop/       Electron 셸 — main.js · preload.js · smoke/(앱 안 스모크 실행기) · scripts/smoke.cjs(런처)
   lib/           순수 .cjs 모듈 + 시험 — electron 을 import 하지 않는다(루트 검사는 desktop 설치 없이 통과해야 한다)
 supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
@@ -154,9 +159,10 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
 
 - 구조: `tray.html` 과 `src/tray/` 를 `vite.tray.config.ts`(웹 설정과 따로 — PWA 없음, 도구 `scripts/trayBuild.ts`)로 `dist-tray/` 에
   빌드하고 `desktop/` 의 Electron 이 `app://twelvejanggi/tray.html` 로 연다(사용법 · 스모크 표 · 문제 해결은 `desktop/README.md`, Windows 만 검증).
-  개발은 `npm run dev` → `/tray.html`(CSP 없음 · `window.tjDesktop` 은 스텁), 앱은 `build:tray` → `npm --prefix desktop ci` →
-  `npm --prefix desktop start`. 설치는 `ci` 로만 한다 — `--prefix` 와 인자 없는 `install` 은 Windows 에서 저장소 루트를 `desktop/node_modules`
-  에 링크하고, node_modules 정션을 따라간 삭제는 진짜 폴더를 지운 적이 있다(다른 정션이었다). lock 은 `desktop/` 안에서 `npm install` 로만 다시 쓴다.
+  개발은 `npm run dev` → `/tray.html`(CSP 없음 · `window.tjDesktop` 없음 — 흐름은 하나라 브리지를 쓰는 단추 · Esc 는 아무것도 하지 않는다), 앱은
+  `build:tray` → `npm --prefix desktop ci` → `npm --prefix desktop start`. 설치는 `ci` 로만 한다 — `--prefix` 와 인자 없는 `install` 은 Windows 에서
+  저장소 루트를 `desktop/node_modules` 에 링크하고, node_modules 정션을 따라간 삭제는 진짜 폴더를 지운 적이 있다(다른 정션이었다). lock 은 `desktop/`
+  안에서 `npm install` 로만 다시 쓴다.
 - 스킴 특권은 `{ standard, secure, supportFetchAPI }` 뿐이다 — `supportFetchAPI` 는 제품 코드가 아니라 스모크의 페이지 안 fetch 검사용이고,
   `corsEnabled`(다른 출처가 app:// 응답을 읽게 된다) · `stream` · `bypassCSP` 는 넣지 않는다.
 - 처리기: app:// 는 시작할 때 만든 파일 색인에서만 내주고(요청 문자열은 경로 계산에 넣지 않는다 · 호스트 정확 일치 · GET/HEAD 만, 그 밖은 405 ·
@@ -170,7 +176,32 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
 - `desktop/main.js` 최상위(ready 전 · 동기)는 **순서가 의미를 가진다**: 스모크 인자 → userData → `enableSandbox` →
   `registerSchemesAsPrivileged` → 단일 인스턴스 잠금. webPreferences 는 `lib/windowPrefs.cjs` 한 공장에서만 만들어
   스모크와 같다(`additionalArguments` 금지).
-- **스모크**(`npm --prefix desktop run smoke [-- --net]`)는 실제 앱을 `tray.html?smoke` · 격리 프로필로 띄워 필수 검사 20개를 하나도
+- **트레이 창은 프레임 없는 팝업이다**(#21) — 보이기 · 숨기기 · 배치는 `showWindow(reason)` · `hideWindow(reason)` · `placeNow` 로만 하고 창은
+  `liveWindow()`(없거나 파괴됐거나 종료 중이면 null)로만 만진다. `hideWindow` 는 `win.hide()` **전에** `shownIntent` 를 끈다 — 그 안의 동기 blur 를 바깥
+  클릭으로 읽으면 경합 가드가 다음 클릭을 삼킨다. blur 는 숨긴다(예외: 창 고정 · DevTools · 표시 뒤 `BLUR_GRACE_MS` 300). Windows 좌클릭은 blur 로 숨긴 지
+  `CLICK_RACE_MS` 250 안이면 무시한다 — `lastBlurHideAt` 은 blur 숨김만 적는다(Esc · ✕ 뒤의 클릭은 삼키지 않게). 더블클릭은 직전 좌클릭이 창을 보였을 때만
+  다시 보인다(`trayDoubleClickAction` — 둘째 누름의 blur 가 미룬 확인으로 창을 숨기지 않게). `transparent` 는 쓰지 않는다(투명도는 창의 opacity 로만 — 만들 때
+  옵션, 그 뒤 `setOpacity`).
+- **트레이 메뉴는 `refreshTrayMenu` 한 곳에서 만든다** — Windows 는 `setContextMenu` 없이 우클릭마다 새로 만들어 띄운다(D4 — 붙이면 OS 가 우클릭을 받아
+  `right-click` 이 오지 않고, 자동 실행 체크를 그 순간의 OS 상태로 그릴 수 없다). 체크박스는 `item.checked` 를 원하는 값으로 쓴다(낡은 메뉴도 사용자가 본
+  것과 반대로 가지 않는다). 화면 모드는 메뉴의 '혼자 하기' · '온라인 대전' 만 바꾼다. 판단은 `desktop/lib` 순수 모듈이 하고 시험은 플랫폼을 값으로 받는다.
+- **로그인 항목(자동 실행)은 `setLoginItem` 한 곳에서, `canManageLoginItems` 가 참일 때만 쓴다** — 설치본(패키지 · 스모크 아님 · win32/darwin · 실행
+  파일이 `electron(.exe)` 아님)뿐이다. 개발 실행 · 스모크 · 시험이 쓰면 개발용 electron.exe 가 이 PC 의 HKCU `Run` 에 남는다. 스모크는 더 나아가
+  `app.setLoginItemSettings` 를 기록만 하는 대체 함수로 바꿔 끼운다(D1 — '감싸서 기록만' 의 유일한 예외: 가드에 버그가 있으면 기록으로는 막지 못한다).
+  Windows 는 `--hidden` 으로 등록하고(로그인 실행은 창 없이 뜬다) 같은 인자로 묻는다(`loginItemQuery` — `openAtLogin` 은 인자까지 같아야 참이고 스모크
+  `loginItem` 이 읽는다). Windows 메뉴 체크는 인자를 보지 않는 `executableWillLaunchAtLogin`(실행 파일 경로 · 작업 관리자의 켬/끔)이다.
+- **브리지 `window.tjDesktop` 은 11키다**(`TJ_DESKTOP_KEYS` = preload 의 얼린 객체, 이 순서): `getAppInfo · getState · setTheme · setOpacity · setLayout ·
+  hide · onTheme · onOpacity · onMode · onShown · onHidden`. preload 는 값을 고치지 않는다 — 정규화는 main 한 곳이고 틀린 값은 무시한다. 렌더러는 테마 ·
+  투명도를 미리 바꾸지 않고 main 이 민 값으로만 바꾼다(토글 흐름은 하나 — 브리지 없는 `/tray.html` 용 흐름도 만들지 않는다).
+- **main→렌더러는 `sendToTray` 하나로 `PUSH_CHANNELS` 의 채널만 민다**(`webContents.send(` 는 그 함수 안에만). 미는 채널은 모두 `getState()` 스냅샷(main
+  메모리의 값)에 필드가 있어야 한다 — 구독보다 먼저 온 send 는 사라지므로 렌더러는 구독을 모두 건 뒤에 묻고 그 응답을 최종값으로 쓴다. 채널을 더하면
+  (#22 의 `tj-compat`) 표 · 스냅샷 · preload · `TJ_DESKTOP_KEYS` 를 함께 늘린다.
+- **`tj-shown` · `tj-hidden` 은 창의 `show` · `hide` 사건에서 보낸다** — 어느 길로 보이든 숨든(OS · 스모크의 직접 호출 포함) 렌더러가 같은 상태를 본다.
+  렌더러는 `<html>` 에 `tapp-hidden` 을 달아 애니메이션을 멈춘다. `visibilitychange` 는 쓰지 않는다 — 스로틀을 끄면(#25) 숨겨도 visible 이다.
+- **Esc 는 `window` 의 keydown 리스너 둘로 정한다**(`src/tray/esc.ts`) — 캡처 단계에서 그 이벤트가 시작될 때의 `isDialogOpen()` 을 찍고, 버블 단계에서
+  순수 함수 `escAction` 으로 숨길지 정한다. 버블에서 그때의 대화상자를 보면 대화상자를 닫은 같은 Esc 로 창까지 숨는다(React 19 는 닫기를 마이크로태스크에서
+  커밋한다). 캡처 기록은 등록 순서와 상관없고, 결정이 버블이라 React `stopPropagation` 이 막은 Esc 는 닿지 않는다.
+- **스모크**(`npm --prefix desktop run smoke [-- --net]`)는 실제 앱을 `tray.html?smoke` · 격리 프로필로 띄워 필수 검사 24개를 하나도
   건너뛰지 않는다(`.invalid` 빌드는 +`connectAllowed`, `--net` 은 +`net`). 기본 스모크 · CI 는 원격으로 나가는 요청이 0 이고,
   `--net` 은 공유 Supabase 에 닿으니 사용자 확인 뒤에만 돌린다.
 - **Windows 앱 실행 규칙**: 에이전트는 앱 · 스모크를 한 번에 하나만 돌린다 — 스모크는 `run smoke` 런처로, 앱은 PID 를 기록하는 `spawn` 도우미로 띄우고

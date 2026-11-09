@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { externalHref } = require('./links.cjs') as typeof import('./links.cjs');
+const { externalHref, WEB_URL, FEEDBACK_URL } = require('./links.cjs') as typeof import('./links.cjs');
 
 const HUB = 'https://khkim3115.github.io/';
 const REPO = 'https://github.com/khkim3115/TwelveJanggi';
@@ -90,17 +90,34 @@ describe('externalHref — null', () => {
   });
 });
 
+describe('WEB_URL · FEEDBACK_URL', () => {
+  it('값이 정확하다', () => {
+    expect(WEB_URL).toBe('https://khkim3115.github.io/TwelveJanggi/');
+    expect(FEEDBACK_URL).toBe('https://github.com/khkim3115/TwelveJanggi/issues/new/choose');
+  });
+  it.each([WEB_URL, FEEDBACK_URL])('externalHref 를 바뀌지 않고 통과한다: %s', (url) => {
+    expect(externalHref(url)).toBe(url);
+  });
+});
+
 describe('소스의 외부 주소 — 허용 목록과 어긋나지 않는다(drift)', () => {
   /** 트레이 화면이 쓰지 않아 허용 목록에 넣지 않는 주소와 그 이유. 새 주소가 소스에 생기면 여기든 허용 목록이든 정해야 한다. */
   const TRAY_EXCLUDED: Record<string, string> = {
     'https://open.kakao.com/o/sR8A9fBi': '트레이 화면이 쓰지 않는다',
   };
   /** 이 시험 파일 기준 상대 경로 → 저장소 루트의 소스(실행 위치와 무관). */
-  const SOURCES = ['../../src/data/links.ts', '../../src/lib/feedback.ts'];
+  const SOURCES = [
+    '../../src/data/links.ts',
+    '../../src/lib/feedback.ts',
+    // 데스크톱 쪽 주소 파일 — 주석까지 원문 그대로 훑는다(#36 T5-3). 허용 목록 밖 주소는 주석에도 쓰지 않는다.
+    './links.cjs',
+    './trayMenu.cjs',
+    '../main.js',
+  ];
   const found: Array<[string, string]> = SOURCES.flatMap((source) => {
     const text = readFileSync(new URL(source, import.meta.url), 'utf8');
     // 따옴표 · 공백 · 괄호 앞에서 끊는다. http 도 잡는다 — 허용 목록은 https 만 받으므로 http 리터럴은 결정을 요구한다.
-    return (text.match(/https?:\/\/[^\s'"`<>)\\]+/g) ?? []).map((url): [string, string] => [source, url]);
+    return (text.match(/https?:\/\/[^\s'"`<>)\\]+/gi) ?? []).map((url): [string, string] => [source, url]);
   });
 
   it('소스에서 외부 주소를 찾았다(경로 · 정규식이 어긋나 빈 채로 통과하지 않게)', () => {

@@ -17,13 +17,13 @@ import {
 import { SEAT_PREFS, resolveClick, resolveSeat, toSeatPref, type SeatPref, type Selection } from '../core/view';
 import { cancelPendingAi, requestAiMove, requestHint } from '../engine/aiClient';
 import type { Difficulty } from '../engine/ai';
+import { applyTheme, readStoredTheme, storeTheme, type Theme } from '../lib/theme';
 
-export type Theme = 'dark' | 'light';
+export type { Theme } from '../lib/theme';
 
 const DIFFICULTY_KEY = 'tj_difficulty';
 /** 값은 '1'|'2'|'random'. */
 const SEAT_KEY = 'tj_seat';
-const THEME_KEY = 'tj_theme';
 
 /** AI 가 "생각하는 척" 최소한 이 정도는 끌어야 사람 눈에 자연스럽다. */
 const MIN_THINK_MS = 260;
@@ -43,14 +43,6 @@ function persist(key: string, value: string) {
   } catch {
     // 저장 불가(사생활 모드 등) — 이번 세션에만 적용.
   }
-}
-
-/** 테마 적용. index.html 의 인라인 스크립트가 첫 페인트 전에 같은 일을 한 번 해 둔다(깜빡임 방지). */
-function applyTheme(theme: Theme) {
-  if (typeof document === 'undefined') return;
-  document.documentElement.dataset.theme = theme;
-  // 모바일 주소창 색도 따라간다.
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'light' ? '#f5f6f8' : '#0d1117');
 }
 
 /**
@@ -106,7 +98,7 @@ interface GameStore {
   toggleTheme: () => void;
 }
 
-const initialTheme = readStored<Theme>(THEME_KEY, ['dark', 'light'], 'dark');
+const initialTheme: Theme = readStoredTheme();
 applyTheme(initialTheme);
 
 export const useGameStore = create<GameStore>((set, get) => {
@@ -283,7 +275,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
     toggleTheme: () => {
       const theme: Theme = get().theme === 'dark' ? 'light' : 'dark';
-      persist(THEME_KEY, theme);
+      storeTheme(theme);
       applyTheme(theme);
       set({ theme });
     },

@@ -13,7 +13,7 @@
     />
     <title>십이장기</title>
     <script>
-      // 저장된 테마를 첫 페인트 전에 적용한다 — 번들이 뜰 때까지 다크로 깜빡이지 않게(gameStore.applyTheme 와 같은 키).
+      // 저장된 테마를 첫 페인트 전에 적용한다 — 번들이 뜰 때까지 다크로 깜빡이지 않게(src/lib/theme.ts 의 applyTheme 와 같은 키).
       try {
         var t = localStorage.getItem('tj_theme');
         if (t === 'light' || t === 'dark') {

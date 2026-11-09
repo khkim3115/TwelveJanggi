@@ -18,7 +18,10 @@ const { failureResult } = require('./smokeOut.cjs') as typeof import('./smokeOut
 
 type Input = Parameters<typeof judgeSmoke>[0];
 
-/** 설계 §5.10 표의 필수 검사 20개(connectAllowed · net 은 조건부라 뺀다). 순서까지 계약이다. */
+/**
+ * 필수 검사 24개 — #20 설계 §5.10 표(connectAllowed · net 은 조건부라 뺀다)에 #21 설계 §5.5 의 창 검사 theme · opacity · escHide · visibility 를
+ * screenshot 바로 뒤에 더했다. 순서까지 계약이다.
+ */
 const NAMES = [
   'boot',
   'webPreferences',
@@ -37,6 +40,10 @@ const NAMES = [
   'loginItem',
   'tray',
   'screenshot',
+  'theme',
+  'opacity',
+  'escHide',
+  'visibility',
   'cspViolations',
   'consoleErrors',
   'cspCanary',
@@ -102,15 +109,15 @@ const DIRS = '임시 폴더가 남았다';
 const REPORTED = '실패를 보고했다';
 
 describe('BASE_REQUIRED', () => {
-  it('설계 §5.10 표의 필수 검사 20개 — 이름과 순서가 계약이다', () => {
+  it('필수 검사 24개(#20 표 + 창 검사 theme · opacity · escHide · visibility 가 screenshot 바로 뒤) — 이름과 순서가 계약이다', () => {
     expect([...BASE_REQUIRED]).toStrictEqual(NAMES);
-    expect(new Set(BASE_REQUIRED).size).toBe(20);
+    expect(new Set(BASE_REQUIRED).size).toBe(24);
   });
 
   it('얼려 있다 — 부르는 쪽이 고칠 수 없다', () => {
     expect(Object.isFrozen(BASE_REQUIRED)).toBe(true);
     expect(() => (BASE_REQUIRED as string[]).push('x')).toThrow(TypeError);
-    expect(BASE_REQUIRED).toHaveLength(20);
+    expect(BASE_REQUIRED).toHaveLength(24);
   });
 });
 
@@ -141,11 +148,11 @@ const INVALID_RULE: Array<[string, string | null | undefined, boolean]> = [
 ];
 
 describe('requiredChecks', () => {
-  it('기본은 20개 그대로 — connectAllowed · net 이 없다', () => {
+  it('기본은 24개 그대로 — connectAllowed · net 이 없다', () => {
     expect(requiredChecks({ net: false, supabaseOrigin: null })).toStrictEqual(NAMES);
   });
 
-  it('.invalid 호스트의 Supabase 출처면 connectAllowed 를 20개 뒤에 더한다', () => {
+  it('.invalid 호스트의 Supabase 출처면 connectAllowed 를 24개 뒤에 더한다', () => {
     expect(requiredChecks({ net: false, supabaseOrigin: INVALID_ORIGIN })).toStrictEqual([...NAMES, 'connectAllowed']);
   });
 
@@ -162,7 +169,7 @@ describe('requiredChecks', () => {
     expect(requiredChecks({ net: true, supabaseOrigin: 'https://abc.supabase.co' })).toStrictEqual([...NAMES, 'net']);
   });
 
-  it('인자를 빠뜨려도 던지지 않는다 — 기본 20개', () => {
+  it('인자를 빠뜨려도 던지지 않는다 — 기본 24개', () => {
     expect(requiredChecks()).toStrictEqual(NAMES);
     expect(requiredChecks({})).toStrictEqual(NAMES);
   });
@@ -177,7 +184,7 @@ describe('requiredChecks', () => {
   it.each(INVALID_RULE)('.invalid 규칙: %s (%j)', (_name, supabaseOrigin, invalid) => {
     const names = requiredChecks({ net: false, supabaseOrigin });
     expect(names.includes('connectAllowed')).toBe(invalid);
-    expect(names.slice(0, 20)).toStrictEqual(NAMES);
+    expect(names.slice(0, 24)).toStrictEqual(NAMES);
   });
 
   it('호출마다 새 배열이다 — 받은 쪽이 고쳐도 BASE_REQUIRED 와 다음 호출은 그대로다', () => {
@@ -430,7 +437,7 @@ describe('judgeSmoke — 실패 이유 하나씩', () => {
     ['객체', { boot: true }],
     ['문자열', 'boot'],
     ['숫자', 20],
-  ])('checks 가 배열이 아니다: %s — 필수 20개가 모두 빠진 것으로 본다', (_name, checks) => {
+  ])('checks 가 배열이 아니다: %s — 필수 24개가 모두 빠진 것으로 본다', (_name, checks) => {
     const verdict = judgeSmoke(input({ result: goodResult({ checks }) }));
     expect(verdict.ok).toBe(false);
     expect(verdict.reasons.join('\n')).toContain('checks 가 배열이 아니다');

@@ -44,6 +44,24 @@ const MAX_REPR_CHARS = 160;
  * @typedef {{ kind: 'did-start-navigation', url: string, isMainFrame: boolean } | { kind: 'did-stop-loading' }} NavigationEvent
  */
 /**
+ * main 의 창 보이기 · 숨기기 한 건 — 이유와 받은 때. at 은 실행기가 기록을 받을 때의 performance.now() 다(main 이 유예 · 경합 시각을 재는
+ * 시계와 같다 — main 이 시각을 잰 뒤에 기록하므로 at 은 그 시각보다 조금 늦다).
+ * @typedef {{ action: 'show', reason: import('../main.js').ShowReason, at: number } | { action: 'hide', reason: import('../main.js').HideReason, at: number }} WindowFact
+ */
+/**
+ * main 이 렌더러로 민 채널 한 건(값은 싣지 않는다)과 받은 때(at — WindowFact 와 같은 시계).
+ * @typedef {{ channel: import('../main.js').SentRecord['channel'], at: number }} SentFact
+ */
+/**
+ * 실행기가 받은 렌더러의 tj-hide 한 건(main 의 처리기와 같은 채널에 단 수신 기록 — 발신자 검증을 지났다)과 받은 때.
+ * @typedef {{ at: number }} HideReceipt
+ */
+/**
+ * 실행기가 받은 렌더러의 tj-set-opacity 한 건 — value 는 받은 값 그대로이고 NaN 만 'NaN' 이다(JSON 은 NaN 을 null 로 바꿔, 상세 · 결과에서
+ * NaN 과 null 이 갈리지 않는다).
+ * @typedef {{ value: unknown, at: number }} OpacityReceipt
+ */
+/**
  * 수집한 사실 — 수집기 · IPC · 가드 · 연결점이 채우고(뒤에 쌓기만 한다), 검사가 읽는다.
  * @typedef {object} SmokeFacts
  * @property {ConsoleEntry[]} console
@@ -55,6 +73,11 @@ const MAX_REPR_CHARS = 160;
  * @property {string[]} opened 허용 목록 주소(열지 않고 기록만 했다)
  * @property {LoadFailure[]} loadFailures
  * @property {NavigationEvent[]} navigation 트레이 창의 탐색 시작 · 로딩 끝
+ * @property {WindowFact[]} window main 의 창 보이기 · 숨기기(일어난 차례)
+ * @property {SentFact[]} sent main 이 렌더러로 민 채널(일어난 차례)
+ * @property {import('../main.js').LoginItemRecord[]} loginItem main 의 로그인 항목 요청 기록(받은 그대로의 사본)
+ * @property {HideReceipt[]} hideReceipts 렌더러가 보낸 tj-hide
+ * @property {OpacityReceipt[]} opacityReceipts 렌더러가 보낸 tj-set-opacity
  */
 /**
  * 약속이 끝난 모양 — 값(resolved) · 거부(rejected) · 상한 안에 끝나지 않음(timeout).
@@ -124,6 +147,37 @@ async function until(predicate, ms) {
     await delay(POLL_MS);
   }
   return true;
+}
+
+/**
+ * 비동기 predicate(페이지 호출처럼 기다리는 일)가 참이 될 때까지 ms 까지 기다린다 — until 과 같은 모양이다: 참(=== true)이 됐으면 true,
+ * 시간이 다 됐으면 false 이고 던지지 않는다. 한 번의 predicate 가 남은 시간 안에 끝나지 않아도 false 다(기다림이 ms 를 넘지 않는다 —
+ * 늦게 끝난 그 약속은 버린다). predicate 가 던지거나 거부하면 '<what>: <이유>' 로 거부한다(그 단계의 실패 글 — what 은 이 글에만 쓴다).
+ * @param {() => boolean | Promise<boolean>} predicate
+ * @param {number} ms
+ * @param {string} what 기다리는 것(실패 글에 쓴다)
+ * @returns {Promise<boolean>}
+ */
+async function untilAsync(predicate, ms, what) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const outcome = await settleWithin(async () => predicate(), Math.max(deadline - Date.now(), 0));
+    if (outcome.kind === 'rejected') throw new Error(`${what}: ${errorText(outcome.error)}`, { cause: outcome.error });
+    if (outcome.kind === 'resolved' && outcome.value === true) return true;
+    if (outcome.kind === 'timeout' || Date.now() >= deadline) return false;
+    await delay(POLL_MS);
+  }
+}
+
+/**
+ * since(performance.now() 의 한 시각 — 기록의 at)에서 ms 가 지날 때까지 기다린다. 타이머가 조금 일찍 깨면(정수 ms 로 자른다) 다시 잰다.
+ * 이미 지났으면 곧바로 돌아온다.
+ * @param {number} since
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
+async function waitElapsed(since, ms) {
+  for (let left = since + ms - performance.now(); left > 0; left = since + ms - performance.now()) await delay(left);
 }
 
 /**
@@ -216,6 +270,8 @@ module.exports = {
   logError,
   delay,
   until,
+  untilAsync,
+  waitElapsed,
   within,
   settleWithin,
   verdictOf,
