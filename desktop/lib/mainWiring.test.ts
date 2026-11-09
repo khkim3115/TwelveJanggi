@@ -2344,7 +2344,7 @@ describe('트레이 좌클릭 — 토글 · 경합 가드 (설계 §5.1 trayClic
 
 describe('트레이 더블클릭 — 직전 좌클릭이 창을 보였을 때만 다시 보인다 (trayDoubleClickAction — 가짜 시계)', () => {
   // 실제 Windows 순서(손 확인의 진단 기록): 숨긴 팝업은 click → show → focus → (둘째 누름에 작업표시줄이 활성화) blur → 5–7ms 뒤 double-click 이고,
-  // 열린 팝업은 click → 61–307ms 뒤 double-click 이다. 둘째 누름에는 click 이 오지 않는다.
+  // 열린 팝업은 click → 65–307ms 뒤 double-click 이다. 둘째 누름에는 click 이 오지 않는다.
   const SHOW_TRAY = { kind: 'window', action: 'show', reason: 'tray' };
   const HIDE_BLUR = { kind: 'window', action: 'hide', reason: 'blur' };
   const HIDE_TOGGLE = { kind: 'window', action: 'hide', reason: 'toggle' };
@@ -2417,6 +2417,37 @@ describe('트레이 더블클릭 — 직전 좌클릭이 창을 보였을 때만
     trayDoubleClick(fake);
     expect(win.isVisible()).toBe(false);
     expect(recordsOf(fake, 'window', mark)).toStrictEqual([HIDE_BLUR]);
+  });
+
+  // 위 두 사례는 트레이 클릭 없이 보인 창이라 직전 좌클릭이 null 에서 시작한다 — 아래 둘은 좌클릭으로 연 창이라 앞선 'show' 가 남아 있다.
+  // hide · ignore 도 직전 좌클릭의 결과로 적혀야 그 'show' 를 덮어쓴다(안 적으면 나중의 더블클릭이 남은 'show' 를 읽어 창을 다시 연다).
+  it("좌클릭으로 연 창 — 나중의 click(토글 'hide')이 앞선 'show' 를 덮어쓴다 → double-click: 숨은 채다", async () => {
+    const { fake, win, mark } = await hiddenWindow();
+    trayClick(fake); // 'show'
+    expect(win.isVisible()).toBe(true);
+    vi.advanceTimersByTime(301); // 유예(300ms) 밖 — 나중의 누름이다
+    trayClick(fake); // 'hide'
+    expect(win.isVisible()).toBe(false);
+    vi.advanceTimersByTime(65);
+    trayDoubleClick(fake);
+    expect(win.isVisible()).toBe(false);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([SHOW_TRAY, HIDE_TOGGLE]);
+  });
+
+  it("좌클릭으로 연 창 — 나중의 누름이 blur 로 숨기고 경합 안 click('ignore')이 앞선 'show' 를 덮어쓴다 → double-click: 숨은 채다", async () => {
+    const { fake, win, mark } = await hiddenWindow();
+    trayClick(fake); // 'show'
+    expect(win.isVisible()).toBe(true);
+    vi.advanceTimersByTime(301); // 유예(300ms) 밖 — blur 가 곧바로 숨긴다
+    loseFocus(win);
+    expect(win.isVisible()).toBe(false);
+    vi.advanceTimersByTime(90); // 경합(250ms) 안
+    trayClick(fake); // 'ignore'
+    expect(win.isVisible()).toBe(false);
+    vi.advanceTimersByTime(65);
+    trayDoubleClick(fake);
+    expect(win.isVisible()).toBe(false);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([SHOW_TRAY, HIDE_BLUR]);
   });
 
   it.each([
