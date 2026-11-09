@@ -179,8 +179,9 @@ supabase/      schema.sql(진실원본, 누적본) · migrations/(적용본)
 - **트레이 창은 프레임 없는 팝업이다**(#21) — 보이기 · 숨기기 · 배치는 `showWindow(reason)` · `hideWindow(reason)` · `placeNow` 로만 하고 창은
   `liveWindow()`(없거나 파괴됐거나 종료 중이면 null)로만 만진다. `hideWindow` 는 `win.hide()` **전에** `shownIntent` 를 끈다 — 그 안의 동기 blur 를 바깥
   클릭으로 읽으면 경합 가드가 다음 클릭을 삼킨다. blur 는 숨긴다(예외: 창 고정 · DevTools · 표시 뒤 `BLUR_GRACE_MS` 300). Windows 좌클릭은 blur 로 숨긴 지
-  `CLICK_RACE_MS` 250 안이면 무시한다 — `lastBlurHideAt` 은 blur 숨김만 적는다(Esc · ✕ 뒤의 클릭은 삼키지 않게). `transparent` 는 쓰지 않는다(투명도는
-  창의 opacity 로만 — 만들 때 옵션, 그 뒤 `setOpacity`).
+  `CLICK_RACE_MS` 250 안이면 무시한다 — `lastBlurHideAt` 은 blur 숨김만 적는다(Esc · ✕ 뒤의 클릭은 삼키지 않게). 더블클릭은 직전 좌클릭이 창을 보였을 때만
+  다시 보인다(`trayDoubleClickAction` — 둘째 누름의 blur 가 미룬 확인으로 창을 숨기지 않게). `transparent` 는 쓰지 않는다(투명도는 창의 opacity 로만 — 만들 때
+  옵션, 그 뒤 `setOpacity`).
 - **트레이 메뉴는 `refreshTrayMenu` 한 곳에서 만든다** — Windows 는 `setContextMenu` 없이 우클릭마다 새로 만들어 띄운다(D4 — 붙이면 OS 가 우클릭을 받아
   `right-click` 이 오지 않고, 자동 실행 체크를 그 순간의 OS 상태로 그릴 수 없다). 체크박스는 `item.checked` 를 원하는 값으로 쓴다(낡은 메뉴도 사용자가 본
   것과 반대로 가지 않는다). 화면 모드는 메뉴의 '혼자 하기' · '온라인 대전' 만 바꾼다. 판단은 `desktop/lib` 순수 모듈이 하고 시험은 플랫폼을 값으로 받는다.

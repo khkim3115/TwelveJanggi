@@ -25,7 +25,7 @@
 //   hooks 엿보기: 훅은 main 이 부르는 실행기 모듈을 진짜로 읽은 뒤(진짜는 require.cache 에 남는다), 만든 run 의 record · setTray ·
 //   open 을 감싸 가짜의 기록(hook.record · hook.setTray · hook.open)에도 남기고 진짜에 넘긴다. 실행기가 app.setLoginItemSettings 에 끼운
 //   D1 의 대체 함수는 감싸지 않는다 — 가짜 app 의 속성 쓰기 기록(app.set)에서 그 함수를 꺼내 calls 를 읽는다(동일성이 남는다).
-// - 트레이 · 메뉴: 가짜 Tray 의 emit 이 main 이 단 click · right-click 처리기를 부르고, 메뉴 항목은 가짜 MenuItem 의 click() 으로 누른다
+// - 트레이 · 메뉴: 가짜 Tray 의 emit 이 main 이 단 click · double-click · right-click 처리기를 부르고, 메뉴 항목은 가짜 MenuItem 의 click() 으로 누른다
 //   (Electron 처럼 checkbox 를 먼저 뒤집는다). 사용자가 보는 메뉴는 main 이 마지막에 만든 메뉴다(fake.menus 의 끝).
 // - 창 동작(설계 §5.2): 가짜는 ready-to-show 를 스스로 내지 않는다 — 보이는 창이 필요한 사례는 readyToShow 로 낸다. 렌더러의 IPC 는
 //   main 이 단 처리기를 신뢰하는 발신자(트레이 창의 메인 프레임)로 직접 부른다(rendererSend · rendererInvoke). 보이기 · 숨기기 이유와
@@ -500,6 +500,10 @@ function trayOf(fake: Fake): FakeTray {
 /** 트레이 좌클릭(win32 — main 이 tray.on('click') 으로 단 처리기). 처리기가 없으면 던진다(그 밖의 갈래에는 없다). */
 function trayClick(fake: Fake): void {
   if (!trayOf(fake).emit('click', {}, { x: 0, y: 0, width: 0, height: 0 }, { x: 0, y: 0 })) throw new Error('트레이 click 처리기가 없다');
+}
+/** 트레이 더블클릭(win32 — main 이 tray.on('double-click') 으로 단 처리기). 처리기가 없으면 던진다(그 밖의 갈래에는 없다). */
+function trayDoubleClick(fake: Fake): void {
+  if (!trayOf(fake).emit('double-click', {}, { x: 0, y: 0, width: 0, height: 0 })) throw new Error('트레이 double-click 처리기가 없다');
 }
 /** 트레이 우클릭(win32 — main 이 tray.on('right-click') 으로 단 처리기). 처리기가 없으면 던진다. */
 function trayRightClick(fake: Fake): void {
@@ -1950,7 +1954,7 @@ describe('트레이 메뉴 — 시작 메뉴 · Windows 우클릭 · macOS D6 (�
     expect(sentMenu).toBe(menu);
     expect(icon).toBe(only(fake, 'new Tray').args[0]); // 붙인 아이콘 그 객체
     // 클릭 처리기는 win32 에만 — 그 밖은 메뉴가 클릭을 받는다(click 을 함께 달면 토글이 겹친다)
-    expect(callsOf(fake, 'tray.on').map((call) => call.args[0])).toStrictEqual(platform === 'win32' ? ['click', 'right-click'] : []);
+    expect(callsOf(fake, 'tray.on').map((call) => call.args[0])).toStrictEqual(platform === 'win32' ? ['click', 'double-click', 'right-click'] : []);
   });
 
   it.each(PLATFORMS)('%s — 라벨은 설계 §5.1 의 플랫폼별 목록 그대로 · 새 프로필은 체크 셋 모두 꺼짐 · 버전 줄 · 위치 초기화 꺼짐', async (platform) => {
@@ -2338,6 +2342,114 @@ describe('트레이 좌클릭 — 토글 · 경합 가드 (설계 §5.1 trayClic
   });
 });
 
+describe('트레이 더블클릭 — 직전 좌클릭이 창을 보였을 때만 다시 보인다 (trayDoubleClickAction — 가짜 시계)', () => {
+  // 실제 Windows 순서(손 확인의 진단 기록): 숨긴 팝업은 click → show → focus → (둘째 누름에 작업표시줄이 활성화) blur → 5–7ms 뒤 double-click 이고,
+  // 열린 팝업은 click → 61–307ms 뒤 double-click 이다. 둘째 누름에는 click 이 오지 않는다.
+  const SHOW_TRAY = { kind: 'window', action: 'show', reason: 'tray' };
+  const HIDE_BLUR = { kind: 'window', action: 'hide', reason: 'blur' };
+  const HIDE_TOGGLE = { kind: 'window', action: 'hide', reason: 'toggle' };
+
+  /** 숨긴 창 — 시작 창을 ✕ 로 숨기고 시계를 충분히 밀었다(다음 좌클릭은 'show'). 그 뒤 기록의 자리(mark)와 함께. */
+  async function hiddenWindow(): Promise<{ fake: Fake; win: FakeWindow; mark: number }> {
+    const fake = await runMain('smoke');
+    const win = readyToShow(fake);
+    rendererSend(fake, 'tj-hide');
+    vi.advanceTimersByTime(1000);
+    return { fake, win, mark: fake.calls.length };
+  }
+  /** 열린 팝업 — 시작 창이 보인 지 유예(300ms)를 넘겼다(다음 좌클릭은 'hide'). 그 뒤 기록의 자리(mark)와 함께. */
+  async function openWindow(): Promise<{ fake: Fake; win: FakeWindow; mark: number }> {
+    const fake = await runMain('smoke');
+    const win = readyToShow(fake);
+    vi.advanceTimersByTime(301);
+    return { fake, win, mark: fake.calls.length };
+  }
+
+  it('숨긴 창 — click → 67ms 뒤 유예 안 blur(둘째 누름) → 7ms 뒤 double-click: 미룬 확인을 지우고 포커스를 되찾아 유예가 지나도 보인 채다', async () => {
+    const { fake, win, mark } = await hiddenWindow();
+    const timers = vi.getTimerCount();
+    trayClick(fake);
+    vi.advanceTimersByTime(67);
+    loseFocus(win);
+    expect([win.isVisible(), win.isFocused()]).toStrictEqual([true, false]);
+    expect(vi.getTimerCount()).toBe(timers + 1); // 양성 대조 — 유예 안의 blur 가 미룬 확인을 걸었다(이것이 창을 숨기던 길이다)
+    vi.advanceTimersByTime(7);
+    const focusMark = fake.calls.length;
+    trayDoubleClick(fake);
+    expect(vi.getTimerCount()).toBe(timers); // 미룬 확인을 지웠다 — 돌 타이머가 없다
+    expect(argsOf(fake, 'win.focus', focusMark)).toStrictEqual([[]]); // 포커스를 다시 청했다
+    expect(win.isFocused()).toBe(true);
+    vi.advanceTimersByTime(1000); // 첫 표시의 유예 · 다시 보인 유예가 모두 지났다
+    expect([win.isVisible(), win.isFocused()]).toStrictEqual([true, true]);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([SHOW_TRAY, SHOW_TRAY]); // 숨김 기록이 없다
+  });
+
+  it("숨긴 창 — click → 유예 밖 blur 로 숨음(느린 더블클릭의 둘째 누름) → double-click: 다시 보인다(reason 'tray') · 시간 임계값이 없다", async () => {
+    const { fake, win, mark } = await hiddenWindow();
+    trayClick(fake);
+    vi.advanceTimersByTime(301);
+    loseFocus(win);
+    expect(win.isVisible()).toBe(false); // 양성 대조 — 유예 밖의 blur 는 곧바로 숨긴다
+    vi.advanceTimersByTime(7);
+    trayDoubleClick(fake);
+    expect([win.isVisible(), win.isFocused()]).toStrictEqual([true, true]);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([SHOW_TRAY, HIDE_BLUR, SHOW_TRAY]);
+  });
+
+  it('열린 창 — click(토글로 숨김) → double-click: 숨은 채다', async () => {
+    const { fake, win, mark } = await openWindow();
+    trayClick(fake);
+    expect(win.isVisible()).toBe(false);
+    vi.advanceTimersByTime(61);
+    trayDoubleClick(fake);
+    expect(win.isVisible()).toBe(false);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([HIDE_TOGGLE]);
+  });
+
+  it("열린 창 — blur 로 숨은 직후 경합 안 click('ignore') → double-click: 숨은 채다", async () => {
+    const { fake, win, mark } = await openWindow();
+    loseFocus(win); // 첫 누름에 작업표시줄이 활성화를 가져갔다
+    expect(win.isVisible()).toBe(false);
+    vi.advanceTimersByTime(90);
+    trayClick(fake); // 경합 가드가 삼킨다
+    expect(win.isVisible()).toBe(false);
+    vi.advanceTimersByTime(61);
+    trayDoubleClick(fake);
+    expect(win.isVisible()).toBe(false);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([HIDE_BLUR]);
+  });
+
+  it.each([
+    ['숨긴 창', hiddenWindow, false],
+    ['열린 창', openWindow, true],
+  ] as const)('직전 좌클릭 없이 double-click(%s) — 아무것도 하지 않는다', async (_label, setup, visible) => {
+    const { fake, win, mark } = await setup();
+    trayDoubleClick(fake);
+    expect(win.isVisible()).toBe(visible);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([]);
+    expect(argsOf(fake, 'win.focus', mark)).toStrictEqual([]);
+  });
+
+  it('double-click 을 두 번 — 앞의 것이 직전 좌클릭을 쓴다: 뒤의 것은 아무것도 하지 않는다(숨긴 뒤에도 다시 보이지 않는다)', async () => {
+    const { fake, win, mark } = await hiddenWindow();
+    trayClick(fake);
+    trayDoubleClick(fake);
+    const focusMark = fake.calls.length;
+    trayDoubleClick(fake);
+    expect(argsOf(fake, 'win.focus', focusMark)).toStrictEqual([]);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([SHOW_TRAY, SHOW_TRAY]);
+    rendererSend(fake, 'tj-hide');
+    trayDoubleClick(fake);
+    expect(win.isVisible()).toBe(false);
+    expect(recordsOf(fake, 'window', mark)).toStrictEqual([SHOW_TRAY, SHOW_TRAY, { kind: 'window', action: 'hide', reason: 'request' }]);
+  });
+
+  it.each(['darwin', 'linux'] as const)('%s — double-click 처리기가 없다(메뉴가 클릭을 받는다)', async (platform) => {
+    const fake = await runMain('dev', { platform });
+    expect(() => trayDoubleClick(fake)).toThrow('트레이 double-click 처리기가 없다');
+  });
+});
+
 describe('자동 실행 — 설치본만 로그인 항목을 쓴다 (설계 §5.1 autostart · §5.2 자동 실행)', () => {
   it('패키지 win32 첫 실행 — setLoginItemSettings 정확히 한 번 { openAtLogin: true, name: AUMID, args: [--hidden], enabled: true } · 첫 실행 표시 저장 · 시작 메뉴의 자동 실행은 켜짐 · 체크', async () => {
     const fake = await runMain('packaged', { execPath: INSTALLED_EXE });
@@ -2674,6 +2786,7 @@ describe('파괴 · 종료 — 창은 liveWindow() 로만 만진다 (설계 §5.
     expect(() => {
       if (platform === 'win32') {
         trayClick(fake);
+        trayDoubleClick(fake);
         trayRightClick(fake);
       } else {
         menu.emit('menu-will-show', {});
@@ -2687,6 +2800,7 @@ describe('파괴 · 종료 — 창은 liveWindow() 로만 만진다 (설계 §5.
 
   it.each([
     ['좌클릭', trayClick],
+    ['더블클릭', trayDoubleClick],
     ['우클릭', trayRightClick],
   ] as const)('win32 before-quit 뒤 트레이 %s — 창을 부르지 않고 메뉴를 만들거나 띄우지 않는다', async (_label, press) => {
     const fake = await runMain('dev');
@@ -2696,5 +2810,20 @@ describe('파괴 · 종료 — 창은 liveWindow() 로만 만진다 (설계 §5.
     expect(() => press(fake)).not.toThrow();
     expect(touchedSince(fake, mark)).toStrictEqual([]);
     expect(fake.calls.slice(mark).filter((call) => call.name === 'Menu.buildFromTemplate' || call.name === 'tray.popUpContextMenu')).toStrictEqual([]);
+  });
+
+  it.each(['destroy', 'before-quit', '그대로'] as const)("win32 — 직전 좌클릭이 창을 보인 뒤 %s: double-click 은 던지지 않고 창 · webContents 를 부르지 않는다(대조 '그대로': show · focus 를 부른다)", async (condition) => {
+    const fake = await runMain('dev');
+    const win = readyToShow(fake);
+    rendererSend(fake, 'tj-hide');
+    vi.advanceTimersByTime(1000);
+    trayClick(fake); // double-click 이 쓸 'show' — 이것이 없으면 showWindow 까지 가지 않아 시험이 빈다
+    if (condition === 'destroy') win.destroy();
+    if (condition === 'before-quit') beforeQuit(fake);
+    const mark = fake.calls.length;
+    expect(() => trayDoubleClick(fake)).not.toThrow();
+    const touched = touchedSince(fake, mark);
+    if (condition !== '그대로') expect(touched).toStrictEqual([]);
+    else expect(touched.filter(([name]) => name === 'win.show' || name === 'win.focus')).toStrictEqual([['win.show'], ['win.focus']]);
   });
 });

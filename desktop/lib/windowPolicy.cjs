@@ -7,6 +7,7 @@
 // - 트레이 클릭: 열린 팝업의 아이콘을 누르면 blur 로 팝업이 먼저 숨고 곧이어 click 이 온다. 그 click 이 팝업을 다시 열지 않게,
 //   바깥 클릭(blur)으로 숨긴 뒤 250ms 안의 클릭은 무시한다. 이 가드는 트레이 좌클릭에만 건다.
 //   250ms 는 'blur 와 click 이 모두 버튼을 누를 때 온다' 는 소스 추론에 기댄다 — 실제 순서는 손 확인이다(설계 §8).
+// - 트레이 더블클릭: 직전 좌클릭이 창을 보였을 때만 다시 보인다 — 둘째 누름의 blur 가 막 연 창을 숨기지 않게(trayDoubleClickAction).
 
 /** 보인 직후 이 시간(ms) 안에 온 blur 는 숨기지 않는다. */
 const BLUR_GRACE_MS = 300;
@@ -49,4 +50,19 @@ function trayClickAction({ now, visible, lastBlurHideAt }) {
   return 'show';
 }
 
-module.exports = { BLUR_GRACE_MS, CLICK_RACE_MS, shouldHideOnBlur, deferredBlurAction, trayClickAction };
+/**
+ * 트레이 더블클릭이 창을 다시 보여야 하는가. 직전 좌클릭이 창을 보였을 때('show')만 'show' 이고, 그 밖은 'none' 이다.
+ * Windows 의 실제 사건 순서(손 확인 기록)가 근거다. 둘째 누름에는 click 이 오지 않고 double-click 만 온다.
+ * - 숨긴 팝업: click(보임) → 둘째 누름에 작업표시줄이 활성화를 가져가 blur → 5–7ms 뒤 double-click. 그 blur 는 유예 안이면 미룬 확인으로,
+ *   유예 밖이면 곧바로 창을 숨긴다. 그래서 double-click 이 다시 보여 포커스를 되찾는다.
+ * - 열린 팝업: click(토글로 숨김 'hide', 또는 blur 가 먼저 숨겨 무시 'ignore') → double-click. 닫힌 채 둔다.
+ * 시간 임계값을 두지 않는다 — Windows 는 더블클릭 시간 안에서만 double-click 을 내므로 직전 좌클릭은 늘 그 더블클릭의 첫 누름이다. '유예
+ * 300ms 안' 으로 좁히면 300ms 를 넘는 느린 더블클릭에 같은 증상이 남는다.
+ * @param {{ lastClickAction: 'hide' | 'show' | 'ignore' | null }} state lastClickAction 은 직전 좌클릭의 trayClickAction 결과 — 없으면 null
+ * @returns {'show' | 'none'}
+ */
+function trayDoubleClickAction({ lastClickAction }) {
+  return lastClickAction === 'show' ? 'show' : 'none';
+}
+
+module.exports = { BLUR_GRACE_MS, CLICK_RACE_MS, shouldHideOnBlur, deferredBlurAction, trayClickAction, trayDoubleClickAction };

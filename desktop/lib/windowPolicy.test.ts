@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { BLUR_GRACE_MS, CLICK_RACE_MS, deferredBlurAction, shouldHideOnBlur, trayClickAction } =
+const { BLUR_GRACE_MS, CLICK_RACE_MS, deferredBlurAction, shouldHideOnBlur, trayClickAction, trayDoubleClickAction } =
   require('./windowPolicy.cjs') as typeof import('./windowPolicy.cjs');
 
 it('상수 — blur 유예 300ms · 트레이 클릭 경합 가드 250ms', () => {
@@ -93,6 +93,22 @@ describe('trayClickAction', () => {
   it("바깥 클릭(blur)으로 숨긴 적이 없으면(초기값 −Infinity) 'show'", () => {
     expect(trayClickAction({ now: NOW, visible: false, lastBlurHideAt: -Infinity })).toBe('show');
     expect(trayClickAction({ now: 0, visible: false, lastBlurHideAt: -Infinity })).toBe('show'); // 앱을 켠 직후의 첫 클릭
+  });
+});
+
+describe('trayDoubleClickAction', () => {
+  // 손 확인의 Windows 사건 순서: 숨긴 팝업은 click(보임) → 둘째 누름의 blur → double-click, 열린 팝업은 click(토글로 숨김, 또는 blur 가 먼저 숨겨
+  // 무시) → double-click 이다. 둘째 누름에는 click 이 오지 않는다. 판단은 직전 좌클릭의 결과 하나뿐이다 — 시각을 받지 않는다.
+  it("직전 좌클릭이 창을 보였으면('show') 'show' — 둘째 누름의 blur 가 창을 숨기지 않게 다시 보인다", () => {
+    expect(trayDoubleClickAction({ lastClickAction: 'show' })).toBe('show');
+  });
+
+  it.each<['hide' | 'ignore' | null, string]>([
+    ['hide', '열린 팝업을 토글로 닫았다 — 닫힌 채 둔다'],
+    ['ignore', '열린 팝업을 누른 blur 가 먼저 숨겼고 click 은 경합 가드가 삼켰다 — 닫힌 채 둔다'],
+    [null, '직전 좌클릭이 없다(이미 썼거나 창이 없었다)'],
+  ])("직전 좌클릭 %s → 'none': %s", (lastClickAction) => {
+    expect(trayDoubleClickAction({ lastClickAction })).toBe('none');
   });
 });
 

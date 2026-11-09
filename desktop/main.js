@@ -49,7 +49,7 @@ const { failureResult, writeResultAtomic } = require('./lib/smokeOut.cjs');
 const { THEME_BACKGROUND, normalizeTheme } = require('./lib/theme.cjs');
 const { parseTrayBuild } = require('./lib/trayBuildInfo.cjs');
 const { buildTrayMenuTemplate } = require('./lib/trayMenu.cjs');
-const { BLUR_GRACE_MS, deferredBlurAction, shouldHideOnBlur, trayClickAction } = require('./lib/windowPolicy.cjs');
+const { BLUR_GRACE_MS, deferredBlurAction, shouldHideOnBlur, trayClickAction, trayDoubleClickAction } = require('./lib/windowPolicy.cjs');
 const { trayWindowPreferences } = require('./lib/windowPrefs.cjs');
 
 /** @typedef {import('./lib/navigation.cjs').NavigationRecord} NavigationRecord */
@@ -178,6 +178,12 @@ let showReason = null;
  * 숨김(Esc · ✕ · 토글 · 메뉴)은 기록하지 않는다 — 그 직후의 아이콘 클릭은 삼키지 않는다.
  */
 let lastBlurHideAt = -Infinity;
+/**
+ * 직전 트레이 좌클릭의 결과(windowPolicy 의 trayClickAction) — 트레이 더블클릭이 다시 보일지 정할 때 한 번만 쓴다. 좌클릭이 없었거나 그때 창이
+ * 없었거나 이미 썼으면 null 이다.
+ * @type {'hide' | 'show' | 'ignore' | null}
+ */
+let lastTrayClickAction = null;
 /**
  * 유예 안의 blur 를 삼킨 뒤, 유예가 끝난 때 한 번 더 보는 타이머 — 숨기거나 다시 보이면 지운다.
  * @type {ReturnType<typeof setTimeout> | null}
@@ -613,9 +619,9 @@ function createWindow(smoke) {
 }
 
 /**
- * 트레이 — 아이콘(16×16) · 툴팁 · 시작 메뉴(refreshTrayMenu). Windows 는 좌클릭이 팝업 토글이고 우클릭마다 메뉴를 새로 만들어 띄운다
- * (D4 — 메뉴를 붙이면 우클릭을 OS 가 받아 right-click 이 오지 않는다). macOS · 그 밖은 메뉴를 붙이고 click 처리기를 달지 않는다(메뉴가
- * 있어도 click 이 함께 와서 토글이 겹친다 — Electron 소스).
+ * 트레이 — 아이콘(16×16) · 툴팁 · 시작 메뉴(refreshTrayMenu). Windows 는 좌클릭이 팝업 토글이고(더블클릭은 첫 좌클릭이 보인 창을 지킨다)
+ * 우클릭마다 메뉴를 새로 만들어 띄운다(D4 — 메뉴를 붙이면 우클릭을 OS 가 받아 right-click 이 오지 않는다). macOS · 그 밖은 메뉴를 붙이고
+ * click 처리기를 달지 않는다(메뉴가 있어도 click 이 함께 와서 토글이 겹친다 — Electron 소스).
  */
 function createTray() {
   const iconPath = path.join(__dirname, 'assets', 'tray.png');
@@ -626,6 +632,7 @@ function createTray() {
   tray.setToolTip('십이장기');
   if (process.platform === 'win32') {
     tray.on('click', () => onTrayClick());
+    tray.on('double-click', () => onTrayDoubleClick());
     tray.on('right-click', () => onTrayRightClick());
   }
   refreshTrayMenu();
@@ -690,10 +697,25 @@ function menuThenRefresh(action) {
  */
 function onTrayClick() {
   const win = liveWindow();
-  if (win === null) return;
+  if (win === null) {
+    lastTrayClickAction = null;
+    return;
+  }
   const action = trayClickAction({ now: performance.now(), visible: shownIntent && win.isVisible(), lastBlurHideAt });
+  lastTrayClickAction = action;
   if (action === 'hide') hideWindow('toggle');
   else if (action === 'show') showWindow('tray');
+}
+
+/**
+ * Windows 더블클릭 — 둘째 누름에는 click 없이 double-click 만 오고, 그 누름에 작업표시줄이 활성화를 가져가 blur 가 먼저 온다(손 확인). 직전 좌클릭이
+ * 창을 보였을 때만 다시 보인다(windowPolicy 의 trayDoubleClickAction): showWindow 가 미룬 blur 확인을 지우고 포커스를 되찾고, 이미 blur 로 숨었으면
+ * 다시 보인다. 직전 좌클릭의 결과는 한 번만 쓴다. 창 없음 · 종료 중은 showWindow 의 liveWindow() 가 막는다.
+ */
+function onTrayDoubleClick() {
+  const action = trayDoubleClickAction({ lastClickAction: lastTrayClickAction });
+  lastTrayClickAction = null;
+  if (action === 'show') showWindow('tray');
 }
 
 /**
